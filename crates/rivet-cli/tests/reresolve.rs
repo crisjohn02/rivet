@@ -612,6 +612,7 @@ fn old_fact_schema_snapshot_is_reparsed_and_conditional_stays_unbound() {
                 scopes,
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .expect("publish a pre-T21-shape snapshot");
     }

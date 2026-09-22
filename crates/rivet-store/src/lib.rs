@@ -311,6 +311,11 @@ pub struct InventoryInput {
     /// `--force`: delete every stored fact and rebuild it in this same
     /// transaction, so all current file rows count as `updated`.
     pub force: bool,
+    /// Paths whose facts this publication regenerated although their content
+    /// hash, parse status, and language may be unchanged (for example, every
+    /// file reparsed after an extractor fingerprint change). Each counts as
+    /// `updated`, never `unchanged`. A path not in `files` is ignored.
+    pub regenerated: Vec<String>,
 }
 
 /// Counts and digest describing one [`Store::publish_inventory`] call.
@@ -318,9 +323,11 @@ pub struct InventoryInput {
 /// `updated + unchanged == files.len()` of the published input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishReport {
-    /// New rows, or rows whose content hash, parse status, or language changed.
+    /// New rows, rows whose content hash, parse status, or language changed,
+    /// and rows listed in [`InventoryInput::regenerated`].
     pub updated: u64,
-    /// Rows present before and after with none of those three values changed.
+    /// Rows present before and after with none of those three values changed
+    /// and whose facts were not regenerated.
     /// Metadata-only (mtime/size) changes still count as unchanged.
     pub unchanged: u64,
     /// Previously present rows removed by this publication.
@@ -534,7 +541,11 @@ impl Store {
             scopes,
             bindings,
             force,
+            regenerated,
         } = input;
+        // OUTPUT-CONTRACT "Administrative commands": "`updated` counts current
+        // file rows with changed source/status/language or regenerated facts".
+        let regenerated: HashSet<String> = regenerated.into_iter().collect();
 
         // Sort by path bytes so writes and the digest are deterministic and
         // independent of the caller's input order.
@@ -611,7 +622,8 @@ impl Store {
                         Some((content_hash, parse_status, language))
                             if *content_hash == file.content_hash
                                 && *parse_status == file.parse_status
-                                && *language == file.language =>
+                                && *language == file.language
+                                && !regenerated.contains(&file.path) =>
                         {
                             unchanged += 1;
                             write_file_row(&mut update, file)?;
@@ -1456,6 +1468,7 @@ mod tests {
             scopes: Vec::new(),
             bindings: Vec::new(),
             force: false,
+            regenerated: Vec::new(),
         }
     }
 
@@ -1600,6 +1613,7 @@ mod tests {
                 scopes: Vec::new(),
                 bindings: Vec::new(),
                 force: true,
+                regenerated: Vec::new(),
             })
             .unwrap();
         assert_eq!((after.updated, after.unchanged, after.deleted), (2, 0, 0));
@@ -1937,6 +1951,7 @@ mod tests {
                 scopes: Vec::new(),
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
 
@@ -1970,6 +1985,7 @@ mod tests {
                 scopes: Vec::new(),
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
         assert_eq!(store.list_symbols().unwrap().len(), 1);
@@ -1986,6 +2002,7 @@ mod tests {
                 scopes: Vec::new(),
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
         assert!(store.list_symbols().unwrap().is_empty());
@@ -2054,6 +2071,7 @@ mod tests {
                     resolution: Resolution::Exact,
                 }],
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
 
@@ -2074,6 +2092,7 @@ mod tests {
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
         assert!(store.list_bindings().unwrap().is_empty());
@@ -2095,6 +2114,7 @@ mod tests {
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
 
@@ -2138,6 +2158,7 @@ mod tests {
                 scopes: Vec::new(),
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
 
@@ -2173,6 +2194,7 @@ mod tests {
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .unwrap();
 

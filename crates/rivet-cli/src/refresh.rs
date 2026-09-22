@@ -106,7 +106,43 @@ pub(crate) fn open_cached_store(root: &rivet_core::RootInfo) -> Result<Store, Cl
             ));
         }
     }
-    Store::open(&rivet_dir).map_err(cached_store_error)
+    let store = Store::open(&rivet_dir).map_err(cached_store_error)?;
+    check_cached_fingerprints(&store)?;
+    Ok(store)
+}
+
+/// Refuses a cache whose facts or bindings were produced by different rules.
+///
+/// OUTPUT-CONTRACT "Flag applicability": `--no-refresh` "requires compatible
+/// cache", and "Errors": `repository_unavailable` (exit 3) "includes
+/// lock/I/O/incompatible-cache failures". [`Store::open`] already refuses a
+/// different `index_format_version`. This also compares the stored
+/// `extractor_fingerprint` (the rules that produced symbols, uses, and scopes)
+/// and `resolver_fingerprint` (the rules that produced bindings) with this
+/// build's values, because a cache from other rules would serve facts and
+/// tiers this build would not produce (AF5). A missing value is refused too.
+///
+/// `effective_config_fingerprint` is deliberately not compared: a config edit
+/// changes which files are eligible, like any other working-tree edit, and a
+/// `cached` answer is explicitly allowed to be stale relative to the working
+/// tree. The facts it serves were still produced by this build's rules.
+fn check_cached_fingerprints(store: &Store) -> Result<(), CliError> {
+    for (key, expected) in [
+        ("extractor_fingerprint", EXTRACTOR_FINGERPRINT),
+        ("resolver_fingerprint", RESOLVER_FINGERPRINT),
+    ] {
+        let stored = store.get_meta(key).map_err(cached_store_error)?;
+        if stored.as_deref() != Some(expected) {
+            let found = stored.as_deref().unwrap_or("none");
+            return Err(CliError::repository_unavailable(
+                format!(
+                    "incompatible cache: stored {key} {found:?} differs from this build's {expected:?}"
+                ),
+                "Run `rivet index` to rebuild the cache with this build, then retry with `--no-refresh`.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Maps cached-open failures to exit 3 with a rebuild hint.
@@ -231,9 +267,9 @@ fn refresh_inventory(
     // before reinserting the fresh rows (spec §12.3; ARCHITECTURE "Refresh and
     // invalidation"). There is no early return in `refresh_inventory`, so no
     // refresh path can keep stale bindings; the resolver fingerprint only feeds
-    // the snapshot digest. The one path that can answer from bindings predating
-    // a rule change is explicit `--no-refresh`, which is labeled `freshness:
-    // cached` and never claims a refresh. This is proven by
+    // the snapshot digest. Explicit `--no-refresh` does not refresh, so it
+    // refuses a cache whose stored resolver (or extractor) fingerprint differs
+    // from this build's (`check_cached_fingerprints`, AF5). This is proven by
     // `tests/refresh.rs::stale_bindings_are_re_resolved_without_reparsing`.
 
     // Load the current inventory and facts once. Reused files keep their
@@ -289,6 +325,38 @@ fn refresh_inventory(
         };
 
         let language_name = id.name().to_string();
+
+        // An enabled language with no extraction adapter (TypeScript until
+        // T42) yields no facts even when it parses, so the file must not count
+        // as indexed. OUTPUT-CONTRACT "Common index metadata": "`complete` is
+        // true only when all skip counts are zero", and ARCHITECTURE "Parse and
+        // coverage policy": "Unsupported language, binary, oversize, encoding,
+        // and deterministic parser-resource skips are counted separately."
+        // The language is unsupported by this build's extraction, so the file
+        // counts as `unsupported`; it is not a `parse_error`, because a valid
+        // file would be misreported as broken. The file is not read, so a size
+        // or binary skip is not distinguished, exactly as for any other
+        // unsupported file. Unlike an ordinary unsupported file (a README), the
+        // user enabled this language, so a diagnostic names the reason.
+        if !rivet_parser::has_extractor(id) {
+            stored_by_path.remove(&entry.rel_path);
+            stored_symbols.remove(&entry.rel_path);
+            stored_uses.remove(&entry.rel_path);
+            stored_scopes.remove(&entry.rel_path);
+            skipped.unsupported += 1;
+            diagnostics.push(no_extractor_diagnostic(&entry.rel_path, &language_name));
+            files.push(FileRow {
+                path: entry.rel_path.clone(),
+                language: Some(language_name),
+                mtime_ns: clamp_mtime_ns(entry.mtime_ns),
+                size: entry.size,
+                content_hash: None,
+                source: None,
+                parse_status: ParseStatus::Unsupported,
+            });
+            continue;
+        }
+
         let stored = stored_by_path.remove(&entry.rel_path);
 
         // Metadata mode trusts a stored row whose size and mtime match the
@@ -444,10 +512,14 @@ fn refresh_inventory(
     }
 
     // Non-UTF-8 paths are outside the scan domain but must be reported and force
-    // `complete: false` (OUTPUT-CONTRACT "Common index metadata").
+    // `complete: false` (OUTPUT-CONTRACT "Common index metadata": "Non-UTF-8
+    // paths are excluded with a diagnostic using escaped bytes and force
+    // `complete: false`"). The diagnostic `file` is the repository-relative
+    // path with the invalid bytes escaped, like every other diagnostic path
+    // (AF5, audit finding 17).
     for path in &walk.skipped {
         diagnostics.push(DiagnosticItem {
-            file: path.lossy.clone(),
+            file: path.rel_escaped.clone(),
             code: "non_utf8_path",
             detail: "path is not valid UTF-8".to_string(),
         });
@@ -487,7 +559,7 @@ fn refresh_inventory(
     // lossy spelling names an enabled PHP file.
     let php_unindexed = rivet_index::unindexed_php_files(&files)
         || walk.skipped.iter().any(|path| {
-            language_for_path(&path.lossy).is_some_and(|id| {
+            language_for_path(&path.rel_escaped).is_some_and(|id| {
                 id.name() == "php"
                     && config
                         .languages
@@ -509,6 +581,20 @@ fn refresh_inventory(
     };
     let symbol_count = symbols.len() as u64;
     let use_count = uses.len() as u64;
+    // OUTPUT-CONTRACT "Administrative commands": "`updated` counts current file
+    // rows with changed source/status/language or regenerated facts". A file
+    // reparsed because the stored extractor fingerprint differs has its facts
+    // regenerated by different rules even when its source, status, and language
+    // are unchanged, so it is `updated` (AF5, audit finding 16). With a current
+    // fingerprint, an unchanged `ok` file is reused rather than reparsed, and an
+    // unchanged failed file reparses deterministically to the same failure and
+    // no facts, so nothing is regenerated and it stays `unchanged`; a changed
+    // file is already `updated` by its hash or status.
+    let regenerated: Vec<String> = if fingerprint_matches {
+        Vec::new()
+    } else {
+        reparsed.clone()
+    };
     let published = store
         .publish_inventory(InventoryInput {
             fingerprint,
@@ -518,6 +604,7 @@ fn refresh_inventory(
             scopes,
             bindings,
             force,
+            regenerated,
         })
         .map_err(store_error)?;
 
@@ -607,12 +694,26 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
     let mut uses = 0_u64;
     let mut diagnostics = Vec::new();
     for file in store.list_files().map_err(store_error)? {
-        count_status(file.parse_status, &mut files_indexed, &mut skipped);
+        // A row in an enabled language without an extractor is `unsupported`
+        // exactly as a refresh would report it, even when an older snapshot
+        // stored it as `ok` (AF5, audit finding 14).
+        let no_extractor = file
+            .language
+            .as_deref()
+            .and_then(|name| lacks_extractor(&file.path, name));
+        let status = if no_extractor.is_some() {
+            ParseStatus::Unsupported
+        } else {
+            file.parse_status
+        };
+        count_status(status, &mut files_indexed, &mut skipped);
         uses += store
             .list_uses_for_file(&file.path)
             .map_err(store_error)?
             .len() as u64;
-        if let Some(item) = reused_status_diagnostic(&file.path, file.parse_status) {
+        if let Some(name) = no_extractor {
+            diagnostics.push(no_extractor_diagnostic(&file.path, name));
+        } else if let Some(item) = reused_status_diagnostic(&file.path, status) {
             diagnostics.push(item);
         }
     }
@@ -650,6 +751,28 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
         elapsed_ms: 0,
         timing,
     })
+}
+
+/// The language name of a stored row whose path maps to a compiled language
+/// with no extraction adapter, or `None` when an adapter exists.
+fn lacks_extractor<'a>(path: &str, language: &'a str) -> Option<&'a str> {
+    language_for_path(path)
+        .filter(|id| id.name() == language && !rivet_parser::has_extractor(*id))
+        .map(|_| language)
+}
+
+/// The diagnostic for an enabled-language file that no adapter extracts.
+///
+/// OUTPUT-CONTRACT "Common index metadata": "Diagnostics exclude ordinary
+/// `unsupported` files (counted above) but include other skipped files and
+/// unsupported paths." A file in a language the configuration enables is not
+/// an ordinary unsupported file, so it is reported; `code` is an open string.
+fn no_extractor_diagnostic(file: &str, language: &str) -> DiagnosticItem {
+    DiagnosticItem {
+        file: file.to_string(),
+        code: "unsupported_language",
+        detail: format!("{language} extraction is not implemented in this build"),
+    }
 }
 
 /// One reconstructed diagnostic for a cached non-`ok` file.
@@ -1093,6 +1216,7 @@ mod tests {
                 scopes: Vec::new(),
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .expect("publish stale inventory");
 

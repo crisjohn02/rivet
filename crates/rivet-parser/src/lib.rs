@@ -9,7 +9,9 @@
 //!
 //! TypeScript extraction is still a stub: its adapter returns an empty
 //! `ExtractedFile` until T42. The driver parses with the right grammar either
-//! way, so enabling the adapter later needs no CLI change.
+//! way, so enabling the adapter later needs no CLI change. [`has_extractor`]
+//! reports which languages have an adapter, so refresh can refuse to count a
+//! file as indexed when nothing would extract it (AF5).
 
 use rivet_core::ExtractedFile;
 use rivet_languages::LanguageId;
@@ -30,6 +32,21 @@ pub fn parse_file(language: LanguageId, bytes: &[u8]) -> ExtractedFile {
     dispatch(language, bytes, &tree)
 }
 
+/// Whether `language` has an extraction adapter in this build.
+///
+/// A file in a language without one yields no facts even when it parses, so
+/// counting it as indexed would claim coverage rivet does not have (AF5,
+/// audit finding 14). This must stay in step with [`dispatch`]: it is true
+/// exactly for the languages `dispatch` hands to an adapter.
+pub fn has_extractor(language: LanguageId) -> bool {
+    #[cfg(feature = "lang-php")]
+    if language == LanguageId::Php {
+        return true;
+    }
+    let _ = language;
+    false
+}
+
 /// Dispatches a parsed tree to the language adapter's `extract`.
 ///
 /// Only PHP has an adapter in this milestone. Other enabled grammars parse but
@@ -46,8 +63,19 @@ fn dispatch(language: LanguageId, bytes: &[u8], tree: &tree_sitter::Tree) -> Ext
 
 #[cfg(all(test, feature = "lang-php"))]
 mod tests {
-    use super::parse_file;
+    use super::{has_extractor, parse_file};
     use rivet_languages::LanguageId;
+
+    /// PHP has an adapter; TypeScript does not until T42.
+    #[test]
+    fn only_php_has_an_extractor() {
+        assert!(has_extractor(LanguageId::Php));
+        #[cfg(feature = "lang-typescript")]
+        {
+            assert!(!has_extractor(LanguageId::Typescript));
+            assert!(!has_extractor(LanguageId::Tsx));
+        }
+    }
 
     /// The driver extracts a named definition through the PHP adapter.
     #[test]

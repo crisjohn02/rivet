@@ -421,6 +421,7 @@ fn stale_bindings_are_re_resolved_without_reparsing() {
                 scopes,
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .expect("publish a stale binding state");
     }
