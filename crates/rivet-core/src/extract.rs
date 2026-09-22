@@ -178,14 +178,20 @@ pub struct TypedBinding {
     pub span: Span,
 }
 
-/// One simple variable assignment introduced in a lexical scope (T18/T21).
+/// One variable binding or rebinding introduced in a lexical scope
+/// (T18/T21/T21a).
 ///
-/// T18 recorded only direct `new` assignments. T21 records every simple
+/// T18 recorded only direct `new` assignments. T21 recorded every simple
 /// `$x = ...` assignment so the `new`-receiver rule can reject a variable that
-/// was reassigned or whose assignment is not a direct `new`. `direct_new` is
-/// true only when the right-hand side is a direct `new <class>(...)`; then
-/// `class_spelling` holds the class name as written. For any other right-hand
-/// side `class_spelling` is empty.
+/// was reassigned or whose assignment is not a direct `new`. T21a extends the
+/// record to every recognized rebinding form (`foreach`, destructuring,
+/// by-reference assignment, `catch`, by-reference closure capture, compound
+/// assignment, `unset`, `global`, `static`, and increment/decrement), so a
+/// variable the extractor cannot account for never looks singly assigned.
+///
+/// `direct_new` is true only when the right-hand side is a direct
+/// `new <class>(...)`; then `class_spelling` holds the class name as written.
+/// For any other binding or rebinding `class_spelling` is empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewBinding {
     /// The assigned variable exactly as written, including a leading `$`.
@@ -226,8 +232,10 @@ pub struct ScopeFacts {
     pub imports: Vec<ScopeImport>,
     /// Typed variable bindings introduced directly in this scope.
     pub typed_bindings: Vec<TypedBinding>,
-    /// Simple variable assignments introduced directly in this scope, in
-    /// source order. Each records whether it is a direct `new` assignment.
+    /// Variable bindings introduced directly in this scope, in source order.
+    /// Each records whether it is a direct `new` assignment. A recognized
+    /// rebinding (T21a) is recorded as a non-direct entry, so a variable with
+    /// more than one entry is rejected as a receiver.
     pub new_bindings: Vec<NewBinding>,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,

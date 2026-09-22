@@ -295,6 +295,29 @@ mod tests {
     }
 
     #[test]
+    fn new_plus_rebinding_records_nothing() {
+        // (a) T21a: the extractor records a non-`new` rebinding (`foreach`,
+        // destructuring, `catch`, ...) as a second fact for the same variable.
+        // It must suppress the direct `new` just like a second `new` does.
+        let store = seed(
+            svc_symbols(),
+            vec![new_use("C.php", "go", "$s", "1:0", 100, "\\A\\Svc", None)],
+            vec![scope(
+                "C.php",
+                "1:0",
+                Some("top:file"),
+                &[],
+                &[],
+                &[
+                    assignment("$s", "\\A\\Svc", true, None, (10, 12)),
+                    assignment("$s", "", false, None, (40, 42)),
+                ],
+            )],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
     fn assignment_after_the_use_records_nothing() {
         // (b) The only assignment starts after the use.
         let store = seed(
