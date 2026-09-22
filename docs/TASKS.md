@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | None |
-| Next task | T01 |
+| Last completed task | T01 |
+| Next task | T02 |
 | Active task / partial progress | None |
-| Blocker | None known; toolchain and dependency compatibility not verified |
-| Last checks | Documentation checks only; no application exists |
+| Blocker | None known |
+| Last checks | rustc 1.98.1 (48a229cea 2026-09-01); cargo 1.98.1 (797e8a9bc 2026-08-05). T01: `cargo build -p rivet-cli`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` all pass; `rivet --version` prints `rivet 0.1.0`; `rivet symbol Foo` prints the not-implemented message and exits 1. Edition 2024 accepted by the installed toolchain. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -46,7 +46,7 @@ Read: BUILDING workspace/dependency guidance; ARCHITECTURE workspace boundaries;
 
 | Done | ID | Small task | Done when |
 |---|---|---|---|
-| [ ] | T01 | Create the local Rust workspace and runnable CLI shell. Check the installed toolchain, create the six planned crate boundaries with minimal contents, and keep packages unpublished. Add a minimal `.gitignore` for generated build/cache files. | Workspace checks successfully and `rivet --version` runs. Record the toolchain used. No scanner/parser/database implementation. |
+| [x] | T01 | Create the local Rust workspace and runnable CLI shell. Check the installed toolchain, create the six planned crate boundaries with minimal contents, and keep packages unpublished. Add a minimal `.gitignore` for generated build/cache files. | Workspace checks successfully and `rivet --version` runs. Record the toolchain used. No scanner/parser/database implementation. |
 | [ ] | T02 | Pin compatible Tree-sitter, PHP, TypeScript/TSX grammar dependencies; wire language features and add tiny grammar smoke samples. | PHP and TSX snippets parse with their correct grammars; no-default, PHP-only, and default builds work. Commit the lockfile when version control is available. No TypeScript extraction. |
 | [ ] | T03 | Implement shared spans, symbol IDs, and resolution enums only. | Checks cover UTF-8/CRLF positions, `%`/`#` escaping, and duplicate ordinals. No database or language resolution. |
 | [ ] | T04 | Add a three-file authored PHP fixture and exact gold spans outside the fixture source. Include two same-name methods, an alias, and a top-level call. | Expected declarations/use locations are independently readable from the fixture. Record which cases remain unresolved by design. Do not build a general fixture framework. |
