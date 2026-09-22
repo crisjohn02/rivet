@@ -18,6 +18,10 @@ publish = false
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
+# Config parsing in rivet-core only. Pinned to the exact registry versions
+# checked with `cargo search`; `serde` needs its derive feature.
+serde = { version = "=1.0.229", features = ["derive"] }
+toml = "=1.1.6"
 # Grammars and the core parser are pinned to an exact compatible set: the grammar
 # crates expose `tree-sitter-language` 0.1, which tree-sitter 0.27.0 expects.
 tree-sitter = "=0.27.0"
