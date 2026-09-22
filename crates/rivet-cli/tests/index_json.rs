@@ -137,7 +137,8 @@ fn index_json_reports_inventory_and_is_stable() {
     assert_eq!(value["index"]["coverage"]["complete"], false);
     assert_eq!(value["index"]["diagnostics"]["total"], 2);
     assert_eq!(value["index"]["diagnostics"]["truncated"], false);
-    assert_eq!(value["symbols"], 0);
+    // b.php declares one function; T12 extracts and persists it.
+    assert_eq!(value["symbols"], 1);
     assert_eq!(value["uses"], 0);
     assert_eq!(value["bindings"], 0);
     assert_eq!(value["updated"], 5);
@@ -165,7 +166,7 @@ fn index_json_reports_inventory_and_is_stable() {
 #[test]
 fn unimplemented_command_emits_json_error() {
     let temp = git_repo("unimplemented");
-    let output = run(temp.path(), &["symbol", "Foo", "--json"]);
+    let output = run(temp.path(), &["refs", "Foo", "--json"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty(), "stdout must stay empty");
@@ -231,4 +232,29 @@ fn creates_rivet_dir_at_git_root_without_touching_gitignore() {
         !temp.path().join(".gitignore").exists(),
         "index must never edit .gitignore"
     );
+}
+
+#[test]
+fn malformed_php_is_a_parse_error_without_symbols() {
+    let temp = git_repo("parse-error");
+    write(
+        temp.path(),
+        "broken.php",
+        b"<?php\nclass Broken {\n  public function oops( {\n}",
+    );
+
+    let output = run(temp.path(), &["index", "--json"]);
+    let value = parse_stdout(&output);
+    assert_eq!(value["index"]["coverage"]["skipped"]["parse_error"], 1);
+    assert_eq!(value["index"]["coverage"]["files_indexed"], 0);
+    assert_eq!(value["index"]["coverage"]["complete"], false);
+    assert_eq!(value["symbols"], 0);
+    assert_eq!(value["index"]["diagnostics"]["total"], 1);
+    assert_eq!(
+        value["index"]["diagnostics"]["items"][0]["code"],
+        "parse_error"
+    );
+    // No symbols means a lookup cannot find anything in the failed file.
+    let lookup = run(temp.path(), &["symbol", "Broken", "--json"]);
+    assert_eq!(lookup.status.code(), Some(4));
 }

@@ -21,6 +21,10 @@ pub const EXIT_GENERAL: i32 = 1;
 pub const EXIT_INVALID_ARGUMENTS: i32 = 2;
 /// Missing root, lock, I/O, or incompatible-cache failure.
 pub const EXIT_REPOSITORY_UNAVAILABLE: i32 = 3;
+/// The query matched no declaration.
+pub const EXIT_SYMBOL_NOT_FOUND: i32 = 4;
+/// The query matched more than one declaration.
+pub const EXIT_AMBIGUOUS_SYMBOL: i32 = 5;
 
 /// A CLI failure rendered as an error object in `--json` mode and as human text
 /// otherwise.
@@ -70,6 +74,46 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(Map::new()),
+        }
+    }
+
+    /// A `symbol_not_found` failure (exit 4) with up to five suggestions.
+    pub fn symbol_not_found(
+        message: impl Into<String>,
+        hint: impl Into<String>,
+        suggestions: Vec<String>,
+    ) -> CliError {
+        let mut extra = Map::new();
+        extra.insert("suggestions".to_string(), json!(suggestions));
+        CliError {
+            code: "symbol_not_found",
+            exit: EXIT_SYMBOL_NOT_FOUND,
+            message: message.into(),
+            hint: hint.into(),
+            extra: Box::new(extra),
+        }
+    }
+
+    /// An `ambiguous_symbol` failure (exit 5) with a paginated candidate page.
+    pub fn ambiguous_symbol(
+        message: impl Into<String>,
+        hint: impl Into<String>,
+        total: u64,
+        truncated: bool,
+        next_offset: Option<u64>,
+        candidates: Vec<Value>,
+    ) -> CliError {
+        let mut extra = Map::new();
+        extra.insert("total".to_string(), json!(total));
+        extra.insert("truncated".to_string(), json!(truncated));
+        extra.insert("next_offset".to_string(), json!(next_offset));
+        extra.insert("candidates".to_string(), json!(candidates));
+        CliError {
+            code: "ambiguous_symbol",
+            exit: EXIT_AMBIGUOUS_SYMBOL,
+            message: message.into(),
+            hint: hint.into(),
+            extra: Box::new(extra),
         }
     }
 }
@@ -159,5 +203,22 @@ mod tests {
             (unavailable.code, unavailable.exit),
             ("repository_unavailable", 3)
         );
+    }
+
+    #[test]
+    fn symbol_errors_carry_required_extra_fields() {
+        let not_found = CliError::symbol_not_found("m", "h", vec!["a".to_string()]);
+        assert_eq!((not_found.code, not_found.exit), ("symbol_not_found", 4));
+        assert_eq!(not_found.extra.get("suggestions"), Some(&json!(["a"])));
+
+        let ambiguous =
+            CliError::ambiguous_symbol("m", "h", 3, true, Some(2), vec![json!({"id": "x"})]);
+        assert_eq!((ambiguous.code, ambiguous.exit), ("ambiguous_symbol", 5));
+        let keys: Vec<&str> = ambiguous.extra.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec!["total", "truncated", "next_offset", "candidates"]
+        );
+        assert_eq!(ambiguous.extra.get("next_offset"), Some(&json!(2)));
     }
 }

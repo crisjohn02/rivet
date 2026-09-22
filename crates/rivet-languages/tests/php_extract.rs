@@ -188,3 +188,45 @@ fn method_parent_index_points_at_class() {
     );
     assert_eq!(extracted.symbols[parent].kind, SymbolKind::Class);
 }
+
+/// Anonymous class members and closures are not addressable symbols in v0.1
+/// (spec §10.1), so they must not be emitted at all.
+#[test]
+fn anonymous_class_members_and_closures_are_not_symbols() {
+    let source = b"<?php\n$o = new class {\n    public function z() {}\n    private $p = 1;\n    public const C = 1;\n};\n$f = function () { return 1; };\n";
+    let tree = parse_php(source);
+    let extracted = php::extract(source, &tree);
+
+    assert!(
+        extracted.diagnostics.is_empty(),
+        "well-formed input has no diagnostics: {:?}",
+        extracted.diagnostics
+    );
+    assert!(
+        extracted.symbols.is_empty(),
+        "anonymous definitions must not be extracted: {:?}",
+        extracted.symbols
+    );
+}
+
+/// A named class after an anonymous class in the same file is still extracted
+/// with its methods; only the anonymous members are skipped.
+#[test]
+fn named_class_after_anonymous_class_is_extracted() {
+    let source = b"<?php\n$o = new class { public function z() {} };\nclass Named {\n    public function keep() {}\n}\n";
+    let tree = parse_php(source);
+    let extracted = php::extract(source, &tree);
+
+    assert!(extracted.diagnostics.is_empty());
+    let qualified: Vec<&str> = extracted
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.as_str())
+        .collect();
+    assert!(qualified.contains(&"Named"), "{qualified:?}");
+    assert!(qualified.contains(&"Named::keep"), "{qualified:?}");
+    assert!(
+        !qualified.iter().any(|name| name.ends_with("z")),
+        "anonymous member must be absent: {qualified:?}"
+    );
+}

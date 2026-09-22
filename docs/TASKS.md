@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T11 |
-| Next task | T12 |
+| Last completed task | T12 |
+| Next task | T13 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test -p rivet-languages` 5 pass (1 unit fingerprint guard + 4 php_extract); `cargo test --workspace` all pass (rivet-cli 2+6, rivet-core 60, rivet-languages 1+4, rivet-parser 4, rivet-store 19; 0 failed); `cargo build -p rivet-cli --no-default-features` compiles. |
+| Last checks | rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 4+7 index_json+7 symbol_json, rivet-core 60, rivet-index 3, rivet-languages 1+6, rivet-parser 0+4, rivet-store 22; 0 failed); `cargo build -p rivet-cli --no-default-features` and `--features lang-php` compile. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -75,7 +75,7 @@ Read: ADDING-A-LANGUAGE PHP support and fixtures; spec §10; OUTPUT-CONTRACT sym
 | Done | ID | Small task | Done when |
 |---|---|---|---|
 | [x] | T11 | Extract PHP namespaces, classes, named functions, and methods into owned records. Detect parser error/missing nodes. | Fixture declaration names, parents, and byte spans match gold. Malformed input produces a file diagnostic and no extracted facts. |
-| [ ] | T12 | Persist symbol records and implement canonical-ID, short-name, and qualified-name lookup. | `symbol <query> --json` locates the fixture methods; duplicate short names return candidates and exit 5. Call lists are still explicitly unavailable in this development milestone. |
+| [x] | T12 | Persist symbol records and implement canonical-ID, short-name, and qualified-name lookup. | `symbol <query> --json` locates the fixture methods; duplicate short names return candidates and exit 5. Call lists are still explicitly unavailable in this development milestone. |
 | [ ] | T13 | Add `file:line`, query normalization, deterministic ambiguity pagination, and not-found suggestions. | Same-line nested ambiguity is not guessed; candidate limits/offsets and error envelopes match the contract. |
 | [ ] | T14 | Extract declaration signatures/docs and implement `symbol --source` from stored bytes. | Returned source hashes/spans match indexed bytes even if the live file subsequently changes; CRLF/Unicode source is preserved. |
 | [ ] | T15 | Add changed-content refresh and removals to the query path; avoid reparsing equal content. | An edit, deletion, rename, and valid-to-malformed transition update symbol results automatically. A same-size edit with restored mtime is detected in default content mode. |

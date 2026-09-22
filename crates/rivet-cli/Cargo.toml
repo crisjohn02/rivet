@@ -20,6 +20,8 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rivet-core = { path = "../rivet-core" }
+rivet-index = { path = "../rivet-index" }
 rivet-languages = { path = "../rivet-languages", default-features = false }
 rivet-parser = { path = "../rivet-parser", default-features = false }
 rivet-store = { path = "../rivet-store" }
+tree-sitter = { workspace = true }

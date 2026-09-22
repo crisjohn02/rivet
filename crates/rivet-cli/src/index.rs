@@ -1,12 +1,13 @@
 //! `rivet index` inventory refresh (spec §12.4 steps 1–2, §13; OUTPUT-CONTRACT
 //! "Common index metadata" and "Administrative commands").
 //!
-//! T10 is an inventory milestone: it discovers the root, loads config, walks
-//! eligible files, reads compiled-language source through the bounded T07
-//! reader, publishes an atomic file inventory, and reports coverage. It does not
-//! parse source, so a readable `.php`/`.ts`/`.tsx` file is stored as `ok` while
-//! every other regular file is `unsupported` and no symbols, uses, or bindings
-//! are produced.
+//! The refresh discovers the root, loads config, walks eligible files, reads
+//! compiled-language source through the bounded T07 reader, and publishes one
+//! atomic snapshot containing both the file inventory and every extracted PHP
+//! symbol. A PHP file that Tree-sitter cannot parse publishes no symbols and is
+//! recorded as `parse_error`/`resource_limit` with a diagnostic.
+//!
+//! Uses, bindings, and TypeScript extraction arrive in later tasks.
 
 use std::io;
 use std::path::Path;
@@ -18,9 +19,11 @@ use rivet_core::{
     Config, ConfigError, Freshness, ParseStatus, RootError, SkipReason, SourceRead, WalkError,
     discover_root, read_source, walk_eligible,
 };
+#[cfg(feature = "lang-php")]
+use rivet_core::{LineIndex, Span, SymbolId, SymbolKind, assign_ordinals};
 use rivet_languages::{EXTRACTOR_FINGERPRINT, is_language_compiled, language_for_path};
 use rivet_store::{
-    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, Store, clamp_mtime_ns,
+    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, Store, SymbolRow, clamp_mtime_ns,
 };
 
 use crate::transport::CliError;
@@ -146,6 +149,7 @@ pub fn run(options: Options) -> Result<Report, CliError> {
 
     let max_bytes = config.index.max_file_size_kb.saturating_mul(1024);
     let mut files = Vec::with_capacity(walk.files.len());
+    let mut symbols: Vec<SymbolRow> = Vec::new();
     let mut skipped = Skipped::default();
     let mut diagnostics = Vec::new();
     let mut files_indexed = 0_u64;
@@ -170,15 +174,53 @@ pub fn run(options: Options) -> Result<Report, CliError> {
         let language_name = id.name().to_string();
         match read_source(&root.root, entry, max_bytes) {
             SourceRead::Ok { bytes, hash } => {
-                files_indexed += 1;
+                // PHP files are parsed and extracted here; every other
+                // compiled language is still stored as readable bytes with no
+                // facts in this milestone.
+                #[cfg(feature = "lang-php")]
+                let facts = if id.name() == "php" {
+                    Some(php_facts(&entry.rel_path, &bytes))
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "lang-php"))]
+                let facts: Option<FileFacts> = None;
+
+                let (parse_status, source, file_symbols, file_diagnostic) = match facts {
+                    Some(facts) => match facts.error {
+                        Some(status) => (
+                            status,
+                            None,
+                            Vec::new(),
+                            Some(DiagnosticItem {
+                                file: entry.rel_path.clone(),
+                                code: facts.diagnostic_code,
+                                detail: facts.diagnostic_detail,
+                            }),
+                        ),
+                        None => (ParseStatus::Ok, Some(bytes), facts.symbols, None),
+                    },
+                    None => (ParseStatus::Ok, Some(bytes), Vec::new(), None),
+                };
+
+                match parse_status {
+                    ParseStatus::Ok => files_indexed += 1,
+                    ParseStatus::ParseError => skipped.parse_error += 1,
+                    ParseStatus::ResourceLimit => skipped.resource_limit += 1,
+                    _ => {}
+                }
+                if let Some(item) = file_diagnostic {
+                    diagnostics.push(item);
+                }
+                symbols.extend(file_symbols);
                 files.push(FileRow {
                     path: entry.rel_path.clone(),
                     language: Some(language_name),
                     mtime_ns: clamp_mtime_ns(entry.mtime_ns),
                     size: entry.size,
                     content_hash: Some(hash),
-                    source: Some(bytes),
-                    parse_status: ParseStatus::Ok,
+                    source,
+                    parse_status,
                 });
             }
             SourceRead::Skipped { reason } => {
@@ -242,8 +284,13 @@ pub fn run(options: Options) -> Result<Report, CliError> {
         extractor: EXTRACTOR_FINGERPRINT.to_string(),
         resolver: "none".to_string(),
     };
+    let symbol_count = symbols.len() as u64;
     let published = store
-        .publish_inventory(InventoryInput { fingerprint, files })
+        .publish_inventory(InventoryInput {
+            fingerprint,
+            files,
+            symbols,
+        })
         .map_err(store_error)?;
 
     Ok(Report {
@@ -256,8 +303,7 @@ pub fn run(options: Options) -> Result<Report, CliError> {
         diagnostics_total,
         diagnostics_truncated,
         diagnostics,
-        // No parsing yet: symbols, uses, and bindings are always zero in T10.
-        symbols: 0,
+        symbols: symbol_count,
         uses: 0,
         bindings: 0,
         updated: published.updated,
@@ -271,6 +317,23 @@ pub fn run(options: Options) -> Result<Report, CliError> {
 /// Builds the top-level `index --json` object (without `schema_version`, which
 /// the transport prepends).
 pub fn success_json(report: &Report) -> Value {
+    let mut object = Map::new();
+    object.insert("index".to_string(), index_metadata(report));
+    object.insert("symbols".to_string(), json!(report.symbols));
+    object.insert("uses".to_string(), json!(report.uses));
+    object.insert("bindings".to_string(), json!(report.bindings));
+    object.insert("updated".to_string(), json!(report.updated));
+    object.insert("unchanged".to_string(), json!(report.unchanged));
+    object.insert("deleted".to_string(), json!(report.deleted));
+    if report.timing {
+        object.insert("elapsed_ms".to_string(), json!(report.elapsed_ms));
+    }
+    Value::Object(object)
+}
+
+/// Builds the shared `index` metadata object used by every navigation command
+/// (OUTPUT-CONTRACT "Common index metadata").
+pub fn index_metadata(report: &Report) -> Value {
     let skipped = json!({
         "unsupported": report.skipped.unsupported,
         "binary": report.skipped.binary,
@@ -301,27 +364,12 @@ pub fn success_json(report: &Report) -> Value {
         "truncated": report.diagnostics_truncated,
         "items": items,
     });
-
-    let mut object = Map::new();
-    object.insert(
-        "index".to_string(),
-        json!({
-            "snapshot": report.snapshot,
-            "freshness": report.freshness.as_str(),
-            "coverage": coverage,
-            "diagnostics": diagnostics,
-        }),
-    );
-    object.insert("symbols".to_string(), json!(report.symbols));
-    object.insert("uses".to_string(), json!(report.uses));
-    object.insert("bindings".to_string(), json!(report.bindings));
-    object.insert("updated".to_string(), json!(report.updated));
-    object.insert("unchanged".to_string(), json!(report.unchanged));
-    object.insert("deleted".to_string(), json!(report.deleted));
-    if report.timing {
-        object.insert("elapsed_ms".to_string(), json!(report.elapsed_ms));
-    }
-    Value::Object(object)
+    json!({
+        "snapshot": report.snapshot,
+        "freshness": report.freshness.as_str(),
+        "coverage": coverage,
+        "diagnostics": diagnostics,
+    })
 }
 
 /// The human `rivet index` output (spec §13).
@@ -335,6 +383,109 @@ pub fn human(report: &Report) -> String {
         report.unchanged,
         report.elapsed_ms
     )
+}
+
+/// One readable file's extraction outcome, ready to persist.
+///
+/// `error` is `Some` when parsing failed; then `symbols` is empty and
+/// `diagnostic_code`/`diagnostic_detail` describe the skip.
+struct FileFacts {
+    error: Option<ParseStatus>,
+    diagnostic_code: &'static str,
+    diagnostic_detail: String,
+    symbols: Vec<SymbolRow>,
+}
+
+/// Parses and extracts one PHP file using the pinned T02 grammar.
+#[cfg(feature = "lang-php")]
+fn php_facts(path: &str, source: &[u8]) -> FileFacts {
+    use rivet_languages::{LanguageId, grammar, php};
+
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&grammar(LanguageId::Php))
+        .expect("pinned PHP grammar must load");
+    let tree = parser
+        .parse(source, None)
+        .expect("parser must return a tree");
+    let extracted = php::extract(source, &tree);
+
+    if let Some(diagnostic) = extracted.diagnostics.first() {
+        let error = match diagnostic.code.as_str() {
+            "resource_limit" => ParseStatus::ResourceLimit,
+            _ => ParseStatus::ParseError,
+        };
+        return FileFacts {
+            error: Some(error),
+            diagnostic_code: static_diagnostic_code(&diagnostic.code),
+            diagnostic_detail: diagnostic.detail.clone(),
+            symbols: Vec::new(),
+        };
+    }
+
+    FileFacts {
+        error: None,
+        diagnostic_code: "",
+        diagnostic_detail: String::new(),
+        symbols: build_symbol_rows(path, source, &extracted.symbols),
+    }
+}
+
+/// Narrows an extraction diagnostic code to a `'static` contract spelling.
+#[cfg(feature = "lang-php")]
+fn static_diagnostic_code(code: &str) -> &'static str {
+    match code {
+        "resource_limit" => "resource_limit",
+        _ => "parse_error",
+    }
+}
+
+/// Turns extracted symbols into persisted rows for one file.
+///
+/// Duplicate qualified names within the file receive one-based ordinals in
+/// `(start_byte, end_byte, kind)` order (T03), the canonical ID escapes `%`
+/// and `#`, and line numbers come from the T07 bytes via [`LineIndex`].
+#[cfg(feature = "lang-php")]
+fn build_symbol_rows(
+    path: &str,
+    source: &[u8],
+    extracted: &[rivet_core::ExtractedSymbol],
+) -> Vec<SymbolRow> {
+    let items: Vec<(&str, Span, SymbolKind)> = extracted
+        .iter()
+        .map(|symbol| (symbol.qualified_name.as_str(), symbol.span, symbol.kind))
+        .collect();
+    let ordinals = assign_ordinals(&items);
+    let ids: Vec<String> = extracted
+        .iter()
+        .zip(&ordinals)
+        .map(|(symbol, ordinal)| {
+            SymbolId::new(path, &symbol.qualified_name, *ordinal)
+                .expect("a non-empty path and qualified name")
+                .as_canonical()
+        })
+        .collect();
+    let lines = LineIndex::new(source);
+
+    extracted
+        .iter()
+        .enumerate()
+        .map(|(index, symbol)| SymbolRow {
+            id: ids[index].clone(),
+            file: path.to_string(),
+            name: symbol.name.clone(),
+            lookup_name: rivet_languages::php::lookup_name(&symbol.name, symbol.kind),
+            qualified_name: symbol.qualified_name.clone(),
+            kind: symbol.kind,
+            parent_id: symbol.parent_index.map(|parent| ids[parent].clone()),
+            start_byte: symbol.span.start_byte(),
+            end_byte: symbol.span.end_byte(),
+            start_line: lines.start_line(symbol.span),
+            end_line: lines.end_line(symbol.span),
+            signature: symbol.signature.clone(),
+            doc_comment: symbol.doc_comment.clone(),
+        })
+        .collect()
 }
 
 /// Increments the skip count for `reason` and returns the persisted status.
@@ -441,7 +592,7 @@ fn create_rivet_dir(path: &Path) -> Result<(), CliError> {
 }
 
 /// Maps root discovery failures to `repository_unavailable` (exit 3).
-fn root_error(error: RootError) -> CliError {
+pub(crate) fn root_error(error: RootError) -> CliError {
     CliError::repository_unavailable(
         error.to_string(),
         "Run `rivet init` to establish a root, or run from inside a repository.",
@@ -473,7 +624,7 @@ fn walk_error(error: WalkError) -> CliError {
 
 /// Maps store open/publish failures to `repository_unavailable` (exit 3),
 /// including an incompatible or locked index.
-fn store_error(error: rivet_store::Error) -> CliError {
+pub(crate) fn store_error(error: rivet_store::Error) -> CliError {
     let hint = match &error {
         rivet_store::Error::IncompatibleIndexFormat { .. } => {
             "Delete .rivet/index.db and re-run the index."

@@ -3,6 +3,7 @@
 //! Arguments, root discovery, scan/refresh orchestration, output, exit codes.
 
 mod index;
+mod symbol;
 mod transport;
 
 use clap::Parser;
@@ -46,6 +47,18 @@ enum Command {
     Symbol {
         /// Symbol name, qualified name, or file:line to look up.
         query: String,
+        /// Maximum candidates to return.
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        /// Candidates to skip before the page.
+        #[arg(long, value_name = "N")]
+        offset: Option<u64>,
+        /// Omit the call/caller lists.
+        #[arg(long = "signature-only")]
+        signature_only: bool,
+        /// Include the symbol's source slice from stored bytes.
+        #[arg(long)]
+        source: bool,
     },
     /// Find references to a symbol.
     Refs {
@@ -115,6 +128,30 @@ fn main() {
                     }
                 }
                 Err(error) => fail(json, &error, "index"),
+            }
+        }
+        Command::Symbol {
+            query,
+            limit,
+            offset,
+            signature_only,
+            source,
+        } => {
+            let options = symbol::Options {
+                limit,
+                offset,
+                signature_only,
+                source,
+            };
+            match symbol::run(&query, options) {
+                Ok(value) => {
+                    if json {
+                        emit_success(value);
+                    } else {
+                        print!("{}", symbol::human(&value));
+                    }
+                }
+                Err(error) => fail(json, &error, "symbol"),
             }
         }
         other => not_implemented(json, &other),

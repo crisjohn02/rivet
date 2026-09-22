@@ -175,6 +175,16 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
         let (Some(kind), Some(declaration)) = (kind, declaration) else {
             continue;
         };
+        // Anonymous definitions are not addressable symbols in v0.1
+        // (spec §10.1), so their members are skipped rather than emitted as
+        // parentless top-level declarations.
+        if matches!(
+            kind,
+            SymbolKind::Method | SymbolKind::Property | SymbolKind::Const
+        ) && in_anonymous_container(declaration)
+        {
+            continue;
+        }
         let start_byte = declaration.start_byte() as u32;
         let end_byte = declaration.end_byte() as u32;
         if start_byte >= end_byte {
@@ -373,6 +383,39 @@ fn is_container_node(kind: &str) -> bool {
         kind,
         "class_declaration" | "interface_declaration" | "trait_declaration" | "enum_declaration"
     )
+}
+
+/// Reports whether `node` is a member of an anonymous class-like declaration.
+///
+/// The pinned grammar names an anonymous class body `anonymous_class`; it has
+/// no `class_declaration` node, so its members would otherwise be emitted as
+/// parentless top-level symbols. Such members are skipped because anonymous
+/// definitions are not addressable in v0.1 (spec §10.1).
+fn in_anonymous_container(node: Node<'_>) -> bool {
+    let mut current = node.parent();
+    while let Some(candidate) = current {
+        if candidate.kind() == "anonymous_class" {
+            return true;
+        }
+        if is_container_node(candidate.kind()) {
+            return false;
+        }
+        current = candidate.parent();
+    }
+    false
+}
+
+/// The case-folded form used for short-name (`lookup_name`) matching.
+///
+/// PHP class, interface, trait, enum, namespace, function, and method names
+/// are case-insensitive, so their lookup names are lowercased. Property and
+/// constant names are case-sensitive and keep their exact spelling (a PHP
+/// property keeps its leading `$`).
+pub fn lookup_name(name: &str, kind: SymbolKind) -> String {
+    match kind {
+        SymbolKind::Property | SymbolKind::Const => name.to_string(),
+        _ => name.to_lowercase(),
+    }
 }
 
 /// The active namespace name at `byte`, by source order.

@@ -342,7 +342,10 @@ If a query matches more than one symbol, `rivet` exits with code 5 and returns t
 ```json
 {
   "error": "ambiguous_symbol",
-  "query": "SurveyService.launch",
+  "message": "query 'SurveyService.launch' matched 2 symbols",
+  "total": 2,
+  "truncated": false,
+  "next_offset": null,
   "candidates": [
     { "id": "app/Services/SurveyService.php#App\\Services\\SurveyService::launch", "kind": "method", "file": "app/Services/SurveyService.php", "start_line": 82 },
     { "id": "app/Legacy/SurveyService.php#App\\Legacy\\SurveyService::launch", "kind": "method", "file": "app/Legacy/SurveyService.php", "start_line": 14 }

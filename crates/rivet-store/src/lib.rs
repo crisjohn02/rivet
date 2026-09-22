@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rivet_core::ParseStatus;
+use rivet_core::{ParseStatus, SymbolKind};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -148,6 +148,46 @@ pub struct FileRow {
     pub parse_status: ParseStatus,
 }
 
+/// The column list shared by every `symbols` read, in schema order.
+const SYMBOL_COLUMNS: &str = "id, file, name, lookup_name, qualified_name, kind, parent_id, \
+     start_byte, end_byte, start_line, end_line, signature, doc_comment";
+
+/// One row of the `symbols` table.
+///
+/// `kind` is the parsed [`SymbolKind`]; `parent_id` is the canonical ID of the
+/// enclosing container declaration, or `None` for a top-level definition.
+/// `signature` and `doc_comment` are filled by a later task (T14) and are
+/// `None` in T12.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRow {
+    /// Canonical symbol ID (`<file>#<qualified name>[#<ordinal>]`).
+    pub id: String,
+    /// Repo-relative `/`-separated file path (the `files` foreign key).
+    pub file: String,
+    /// Short declared name.
+    pub name: String,
+    /// Case-folded name used for short-name lookup.
+    pub lookup_name: String,
+    /// Language-native qualified name.
+    pub qualified_name: String,
+    /// Declaration kind.
+    pub kind: SymbolKind,
+    /// Canonical ID of the parent declaration, if any.
+    pub parent_id: Option<String>,
+    /// Zero-based inclusive declaration start byte.
+    pub start_byte: u32,
+    /// Zero-based exclusive declaration end byte.
+    pub end_byte: u32,
+    /// One-based line containing `start_byte`.
+    pub start_line: u32,
+    /// One-based inclusive line containing `end_byte - 1`.
+    pub end_line: u32,
+    /// Collapsed signature (T14), or `None`.
+    pub signature: Option<String>,
+    /// Attached doc comment (T14), or `None`.
+    pub doc_comment: Option<String>,
+}
+
 /// The four fingerprint inputs that identify an indexed snapshot's
 /// configuration (ARCHITECTURE "Refresh and invalidation").
 ///
@@ -174,6 +214,9 @@ pub struct InventoryInput {
     pub fingerprint: Fingerprint,
     /// Every currently eligible file. Rows not listed here are deleted.
     pub files: Vec<FileRow>,
+    /// Every extracted symbol for the current inventory. Symbols are replaced
+    /// per file inside the same transaction as the file rows.
+    pub symbols: Vec<SymbolRow>,
 }
 
 /// Counts and digest describing one [`Store::publish_inventory`] call.
@@ -367,7 +410,11 @@ impl Store {
     /// "Concurrency and source consistency"). A duplicate new path aborts the
     /// transaction rather than collapsing two logically distinct inputs.
     pub fn publish_inventory(&mut self, input: InventoryInput) -> Result<PublishReport, Error> {
-        let InventoryInput { fingerprint, files } = input;
+        let InventoryInput {
+            fingerprint,
+            files,
+            symbols,
+        } = input;
 
         // Sort by path bytes so writes and the digest are deterministic and
         // independent of the caller's input order.
@@ -436,6 +483,22 @@ impl Store {
                     }
                 }
             }
+        }
+
+        // Replace symbols per current file in the same transaction. Iterating
+        // every current file (not just those with symbols) removes stale
+        // symbols from a file that became parse_error/resource_limit in this
+        // refresh.
+        let mut symbols_by_file: HashMap<String, Vec<SymbolRow>> = HashMap::new();
+        for symbol in symbols {
+            symbols_by_file
+                .entry(symbol.file.clone())
+                .or_default()
+                .push(symbol);
+        }
+        for file in &sorted {
+            let rows = symbols_by_file.remove(&file.path).unwrap_or_default();
+            replace_file_symbols_in_tx(&tx, &file.path, &rows)?;
         }
 
         write_fingerprint(&tx, &fingerprint, &digest)?;
@@ -517,6 +580,164 @@ impl Store {
     pub fn pragma_foreign_keys(&self) -> Result<bool, Error> {
         pragma_foreign_keys(&self.conn)
     }
+
+    /// Deletes then inserts every symbol row for one file in one transaction.
+    ///
+    /// Replacing a whole file's symbols keeps a refresh atomic per file; the
+    /// deferred `parent_id` foreign key allows a child row to be inserted
+    /// before its parent row within the same transaction. `publish_inventory`
+    /// calls the same helper inside its single publication transaction.
+    pub fn replace_file_symbols(&mut self, file: &str, symbols: &[SymbolRow]) -> Result<(), Error> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        replace_file_symbols_in_tx(&tx, file, symbols)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Returns the symbol row with canonical ID `id`, if any.
+    pub fn get_symbol(&self, id: &str) -> Result<Option<SymbolRow>, Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let row = tx
+            .query_row(
+                &format!("SELECT {SYMBOL_COLUMNS} FROM symbols WHERE id = ?1"),
+                params![id],
+                symbol_row_from,
+            )
+            .optional()?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Returns every symbol whose persisted `lookup_name` equals `name`.
+    ///
+    /// Rows are ordered by `(file bytes, start_byte, id)`.
+    pub fn find_symbols_by_lookup_name(&self, name: &str) -> Result<Vec<SymbolRow>, Error> {
+        self.select_symbols(
+            &format!(
+                "SELECT {SYMBOL_COLUMNS} FROM symbols WHERE lookup_name = ?1 \
+                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
+            ),
+            params![name],
+        )
+    }
+
+    /// Returns every symbol whose persisted `qualified_name` equals `qname`.
+    ///
+    /// Rows are ordered by `(file bytes, start_byte, id)`.
+    pub fn find_symbols_by_qualified_name(&self, qname: &str) -> Result<Vec<SymbolRow>, Error> {
+        self.select_symbols(
+            &format!(
+                "SELECT {SYMBOL_COLUMNS} FROM symbols WHERE qualified_name = ?1 \
+                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
+            ),
+            params![qname],
+        )
+    }
+
+    /// Returns every persisted symbol ordered by `(file bytes, start_byte, id)`.
+    ///
+    /// Dotted-path and case-folded qualified-name matching need to normalize
+    /// separators and case in Rust, so they scan this ordered list instead of a
+    /// single indexed lookup.
+    pub fn list_symbols(&self) -> Result<Vec<SymbolRow>, Error> {
+        self.select_symbols(
+            &format!(
+                "SELECT {SYMBOL_COLUMNS} FROM symbols \
+                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
+            ),
+            [],
+        )
+    }
+
+    /// Runs a `symbols` SELECT and collects every row.
+    fn select_symbols(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<SymbolRow>, Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(sql)?;
+            let rows = stmt.query_map(params, symbol_row_from)?;
+            rows.collect::<rusqlite::Result<Vec<SymbolRow>>>()?
+        };
+        tx.commit()?;
+        Ok(rows)
+    }
+}
+
+/// Deletes then inserts `symbols` for `file` inside the caller's transaction.
+fn replace_file_symbols_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    file: &str,
+    symbols: &[SymbolRow],
+) -> Result<(), Error> {
+    tx.execute("DELETE FROM symbols WHERE file = ?1", params![file])?;
+    if symbols.is_empty() {
+        return Ok(());
+    }
+    let mut insert = tx.prepare(
+        "INSERT INTO symbols
+             (id, file, name, lookup_name, qualified_name, kind, parent_id,
+              start_byte, end_byte, start_line, end_line, signature, doc_comment)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )?;
+    for symbol in symbols {
+        insert.execute(params![
+            symbol.id,
+            symbol.file,
+            symbol.name,
+            symbol.lookup_name,
+            symbol.qualified_name,
+            symbol.kind.as_str(),
+            symbol.parent_id,
+            symbol.start_byte,
+            symbol.end_byte,
+            symbol.start_line,
+            symbol.end_line,
+            symbol.signature,
+            symbol.doc_comment,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Maps a `symbols` row (selected with [`SYMBOL_COLUMNS`]) to a [`SymbolRow`].
+fn symbol_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRow> {
+    let id: String = row.get("id")?;
+    let file: String = row.get("file")?;
+    let name: String = row.get("name")?;
+    let lookup_name: String = row.get("lookup_name")?;
+    let qualified_name: String = row.get("qualified_name")?;
+    let kind: String = row.get("kind")?;
+    let kind = kind.parse::<SymbolKind>().map_err(|error| {
+        // `kind` is the sixth selected column (index 5).
+        rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
+    })?;
+    let parent_id: Option<String> = row.get("parent_id")?;
+    let start_byte: i64 = row.get("start_byte")?;
+    let end_byte: i64 = row.get("end_byte")?;
+    let start_line: i64 = row.get("start_line")?;
+    let end_line: i64 = row.get("end_line")?;
+    let signature: Option<String> = row.get("signature")?;
+    let doc_comment: Option<String> = row.get("doc_comment")?;
+    Ok(SymbolRow {
+        id,
+        file,
+        name,
+        lookup_name,
+        qualified_name,
+        kind,
+        parent_id,
+        start_byte: start_byte as u32,
+        end_byte: end_byte as u32,
+        start_line: start_line as u32,
+        end_line: end_line as u32,
+        signature,
+        doc_comment,
+    })
 }
 
 /// Validates `rivet_dir` and `rivet_dir/index.db` before any write (spec §27).
@@ -725,9 +946,9 @@ fn write_fingerprint(
 mod tests {
     use super::{
         Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, PublishReport, Store,
-        clamp_mtime_ns, snapshot_digest,
+        SymbolRow, clamp_mtime_ns, snapshot_digest,
     };
-    use rivet_core::{ParseStatus, content_hash};
+    use rivet_core::{ParseStatus, SymbolKind, content_hash};
     use rusqlite::params;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -800,7 +1021,11 @@ mod tests {
     }
 
     fn inventory(fingerprint: Fingerprint, files: Vec<FileRow>) -> InventoryInput {
-        InventoryInput { fingerprint, files }
+        InventoryInput {
+            fingerprint,
+            files,
+            symbols: Vec::new(),
+        }
     }
 
     fn publish(store: &mut Store, files: Vec<FileRow>) -> PublishReport {
@@ -1162,5 +1387,114 @@ mod tests {
         let error = Store::open(&rivet_dir).unwrap_err();
         assert!(matches!(error, Error::InvalidDestination { .. }));
         assert!(error.to_string().contains("index.db"), "{error}");
+    }
+
+    /// One symbol row for `file` with a distinct id.
+    fn sample_symbol(file: &str, id: &str, name: &str, start_byte: u32) -> SymbolRow {
+        SymbolRow {
+            id: id.to_string(),
+            file: file.to_string(),
+            name: name.to_string(),
+            lookup_name: name.to_lowercase(),
+            qualified_name: format!("App\\{name}"),
+            kind: SymbolKind::Method,
+            parent_id: None,
+            start_byte,
+            end_byte: start_byte + 5,
+            start_line: 1,
+            end_line: 1,
+            signature: None,
+            doc_comment: None,
+        }
+    }
+
+    #[test]
+    fn replace_file_symbols_deletes_then_inserts_in_one_transaction() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_file(&sample_file("a.php")).unwrap();
+        store.upsert_file(&sample_file("b.php")).unwrap();
+
+        store
+            .replace_file_symbols("a.php", &[sample_symbol("a.php", "a#one", "one", 0)])
+            .unwrap();
+        store
+            .replace_file_symbols("a.php", &[sample_symbol("a.php", "a#two", "two", 10)])
+            .unwrap();
+        store
+            .replace_file_symbols("b.php", &[sample_symbol("b.php", "b#three", "three", 0)])
+            .unwrap();
+
+        assert!(store.get_symbol("a#one").unwrap().is_none());
+        assert_eq!(store.get_symbol("a#two").unwrap().unwrap().name, "two");
+        assert_eq!(store.get_symbol("b#three").unwrap().unwrap().name, "three");
+        assert_eq!(store.list_symbols().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn symbol_reads_are_ordered_by_file_then_start_byte_then_id() {
+        let mut store = Store::open_in_memory().unwrap();
+        for path in ["z.php", "a.php", "m.php"] {
+            store.upsert_file(&sample_file(path)).unwrap();
+        }
+        // Deliberately out of order, including a same-file tie.
+        let rows = vec![
+            sample_symbol("z.php", "z#x", "same", 0),
+            sample_symbol("a.php", "a#b", "same", 5),
+            sample_symbol("a.php", "a#a", "same", 5),
+            sample_symbol("m.php", "m#x", "same", 1),
+        ];
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![
+                    sample_file("z.php"),
+                    sample_file("a.php"),
+                    sample_file("m.php"),
+                ],
+                symbols: rows,
+            })
+            .unwrap();
+
+        let ids: Vec<String> = store
+            .find_symbols_by_lookup_name("same")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(ids, vec!["a#a", "a#b", "m#x", "z#x"]);
+
+        let by_qname = store.find_symbols_by_qualified_name("App\\same").unwrap();
+        assert_eq!(by_qname.len(), 4);
+        assert!(
+            store
+                .find_symbols_by_lookup_name("nope")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn publishing_parse_error_clears_stale_symbols() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![sample_file("a.php")],
+                symbols: vec![sample_symbol("a.php", "a#one", "one", 0)],
+            })
+            .unwrap();
+        assert_eq!(store.list_symbols().unwrap().len(), 1);
+
+        let mut failed = sample_file("a.php");
+        failed.parse_status = ParseStatus::ParseError;
+        failed.source = None;
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![failed],
+                symbols: Vec::new(),
+            })
+            .unwrap();
+        assert!(store.list_symbols().unwrap().is_empty());
     }
 }
