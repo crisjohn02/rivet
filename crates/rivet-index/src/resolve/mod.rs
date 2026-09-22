@@ -69,6 +69,14 @@ pub(crate) struct ScopeFacts {
     /// (`Foo::NAME`, `$x::NAME`) rather than an instance property access
     /// (AF2). See [`MemberUse::of`].
     pub(crate) class_constant_access: bool,
+    /// Whether the use's own scope is a global scope, whose variables a
+    /// function can rebind through `global` or `$GLOBALS` (AF3).
+    pub(crate) global_scope: bool,
+    /// The explicit call sites of the use's own scope, recorded only for a
+    /// global scope (AF3).
+    pub(crate) call_sites: Vec<Span>,
+    /// Whether the use's own scope contains a `goto` (AF3).
+    pub(crate) goto_present: bool,
 }
 
 /// The member kind a receiver use can name (AF2).
@@ -135,13 +143,18 @@ struct ScopeData<'a> {
     unanalysable: bool,
     namespace_unattributed: bool,
     class_constant_accesses: HashSet<(u32, u32)>,
+    global_scope: bool,
+    call_sites: Vec<Span>,
+    goto_present: bool,
 }
 
 /// The persisted `scopes.facts_json` shape, read back without reparsing.
 ///
 /// `typed_bindings` is ignored in T19; T20/T21 extend this struct when their
 /// rules need more facts. T21b adds `call_args` and `unanalysable`; AF1 adds
-/// `namespace_unattributed`; AF2 adds `class_constant_accesses`.
+/// `namespace_unattributed`; AF2 adds `class_constant_accesses`; AF3 adds
+/// `global_scope`, `call_sites`, `goto_present`, `global_names`,
+/// `dynamic_global_write`, and `parameter_lists`.
 #[derive(Deserialize, Default)]
 struct PersistedScopeFacts {
     #[serde(default)]
@@ -158,6 +171,25 @@ struct PersistedScopeFacts {
     namespace_unattributed: bool,
     #[serde(default)]
     class_constant_accesses: Vec<Span>,
+    #[serde(default)]
+    global_scope: bool,
+    #[serde(default)]
+    call_sites: Vec<Span>,
+    #[serde(default)]
+    goto_present: bool,
+    #[serde(default)]
+    global_names: Vec<String>,
+    #[serde(default)]
+    dynamic_global_write: bool,
+    #[serde(default)]
+    parameter_lists: Vec<PersistedParameterList>,
+}
+
+/// One declaration's persisted by-reference parameter flags (AF3).
+#[derive(Deserialize)]
+struct PersistedParameterList {
+    symbol: SymbolId,
+    by_ref: Vec<bool>,
 }
 
 /// Symbol lookups shared by every rule.
@@ -176,6 +208,16 @@ pub(crate) struct RuleCtx<'a> {
     /// global function fallback is not trustworthy. See
     /// [`unindexed_php_files`].
     pub(crate) php_files_unindexed: bool,
+    /// Canonical function/method ID -> by-reference flag per parameter, read
+    /// from the parse tree at extraction time (AF3). A declaration absent here
+    /// has an unknown parameter list.
+    parameter_lists: HashMap<String, Vec<bool>>,
+    /// Every global variable name (with `$`) that some indexed function-like
+    /// scope can rebind through `global` or a literal `$GLOBALS` key (AF3).
+    pub(crate) global_names: HashSet<String>,
+    /// Whether some indexed function-like scope can rebind a global it does
+    /// not name (AF3). See `ScopeFacts::dynamic_global_write` in rivet-core.
+    pub(crate) dynamic_global_write: bool,
 }
 
 impl<'a> RuleCtx<'a> {
@@ -201,7 +243,22 @@ impl<'a> RuleCtx<'a> {
             by_qname_exact,
             by_qname_folded,
             php_files_unindexed: false,
+            parameter_lists: HashMap::new(),
+            global_names: HashSet::new(),
+            dynamic_global_write: false,
         }
+    }
+
+    /// Whether the parameter at 0-based `position` of the declaration `id` is
+    /// declared by reference (AF3).
+    ///
+    /// `None` when the declaration has no recorded parameter list or no
+    /// parameter at that position; the caller must then treat the argument as
+    /// possibly rebound rather than assume by-value.
+    pub(crate) fn parameter_by_ref(&self, id: &str, position: u32) -> Option<bool> {
+        self.parameter_lists
+            .get(id)
+            .and_then(|flags| flags.get(position as usize).copied())
     }
 
     /// Returns the symbol with canonical ID `id`, if present.
@@ -337,11 +394,18 @@ impl<'a> Resolver<'a> {
         uses: &'a [UseRow],
         scopes: &'a [ScopeRow],
     ) -> Resolver<'a> {
-        let ctx = RuleCtx::new(symbols);
+        let mut ctx = RuleCtx::new(symbols);
         let mut scope_map = HashMap::with_capacity(scopes.len());
         for row in scopes {
             let parsed =
                 serde_json::from_str::<PersistedScopeFacts>(&row.facts_json).unwrap_or_default();
+            // Snapshot-wide facts (AF3): any scope's parameter lists and
+            // global rebinding facts apply to uses in every file.
+            for list in parsed.parameter_lists {
+                ctx.parameter_lists.insert(list.symbol, list.by_ref);
+            }
+            ctx.global_names.extend(parsed.global_names);
+            ctx.dynamic_global_write |= parsed.dynamic_global_write;
             scope_map.insert(
                 (row.file.as_str(), row.scope_key.as_str()),
                 ScopeData {
@@ -357,6 +421,9 @@ impl<'a> Resolver<'a> {
                         .iter()
                         .map(|span| (span.start_byte(), span.end_byte()))
                         .collect(),
+                    global_scope: parsed.global_scope,
+                    call_sites: parsed.call_sites,
+                    goto_present: parsed.goto_present,
                 },
             );
         }
@@ -431,6 +498,9 @@ impl<'a> Resolver<'a> {
             unanalysable: false,
             namespace_unattributed: false,
             class_constant_access: false,
+            global_scope: false,
+            call_sites: Vec::new(),
+            goto_present: false,
         };
         let mut key = Some(use_row.scope_key.as_str());
         let mut own_scope = true;
@@ -450,6 +520,9 @@ impl<'a> Resolver<'a> {
                 facts.class_constant_access = scope
                     .class_constant_accesses
                     .contains(&(use_row.start_byte, use_row.end_byte));
+                facts.global_scope = scope.global_scope;
+                facts.call_sites = scope.call_sites.clone();
+                facts.goto_present = scope.goto_present;
                 own_scope = false;
             }
             if facts.namespace.is_none() {

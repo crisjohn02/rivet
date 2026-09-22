@@ -95,6 +95,15 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **8** — AF3: `UseHint::Typed` gained `origin` (parameter or property), and
+///   a union, intersection, or DNF type or a by-reference parameter no longer
+///   records a typed receiver; a reference taken to a variable (`$y = &$x`, a
+///   by-reference `foreach`) is recorded as a rebinding of it; constructor
+///   arguments are walked and recorded as `constructor` call arguments;
+///   `NewBinding` gained `value_end`; and `ScopeFacts` gained `global_scope`,
+///   `call_sites`, `goto_present`, `global_names`, `dynamic_global_write`, and
+///   `parameter_lists`, the tree-read by-reference parameter flags that replace
+///   re-parsing signature text.
 /// - **7** — AF2: stored PHP `lookup_name`s for symbols and uses fold case by
 ///   ASCII only, as PHP does, instead of by Unicode, and `ScopeFacts` gained
 ///   `class_constant_accesses`, so a class-constant read is told apart from an
@@ -119,13 +128,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=7";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=8";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=7";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=8";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=7";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=8";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

@@ -11,14 +11,33 @@
 //! same alias/fully-qualified/namespace-relative scope chain as a `type` use,
 //! then binds the named member of that class.
 //!
+//! AF3 splits rule 2 by where the type was declared, because PHP enforces the
+//! two differently:
+//!
+//! - A typed **parameter** (including a promoted constructor parameter used
+//!   as the local variable inside the constructor) is checked only when the
+//!   function is called; the body may then assign anything to it. It binds
+//!   only when the variable is never rebound anywhere in its scope, the scope
+//!   is analysable, and no call argument may rebind it by reference, the same
+//!   conditions that suppress a `new` receiver ([`rebinding`]).
+//! - A typed **property** read through `$this->name` is checked on every
+//!   assignment, so it can only hold that class or a subclass, and `scoped`
+//!   already allows for subclass dispatch. Reassignment never suppresses it.
+//!
+//! Only a single class type, or a nullable one (`?A`), is recorded as a typed
+//! receiver; a union, intersection, or DNF type binds nothing (AF3).
+//!
+//! [`rebinding`]: super::rebinding
+//!
 //! Both rules yield [`Resolution::Scoped`] only: late static binding and
 //! runtime dispatch can select another implementation, so receiver evidence
 //! never upgrades to `exact` (spec §11.3).
 
-use rivet_core::extract::UseHint;
+use rivet_core::extract::{TypedOrigin, UseHint};
 use rivet_core::{Resolution, SymbolKind};
 use rivet_store::{SymbolRow, UseRow};
 
+use crate::resolve::rules::rebinding::local_untrustworthy;
 use crate::resolve::rules::resolve_class_spelling;
 use crate::resolve::{MemberUse, RuleCtx, ScopeFacts, SymbolId};
 
@@ -39,11 +58,36 @@ pub(crate) fn resolve(
             }
             enclosing_class(ctx, use_row)?
         }
-        UseHint::Typed { type_spelling } => resolve_class_spelling(ctx, &type_spelling, facts)?,
+        UseHint::Typed {
+            type_spelling,
+            origin,
+        } => {
+            // A parameter type says nothing once the variable is rebound; a
+            // property type holds on every assignment (AF3).
+            if origin == TypedOrigin::Parameter {
+                let variable = use_row.receiver.as_deref()?;
+                if !is_bare_variable(variable) || local_untrustworthy(ctx, use_row, facts, variable)
+                {
+                    return None;
+                }
+            }
+            resolve_class_spelling(ctx, &type_spelling, facts)?
+        }
         _ => return None,
     };
     ctx.unique_member(&class.id, &use_row.spelling, member)
         .map(|member| (member.id.clone(), Resolution::Scoped))
+}
+
+/// Whether a receiver text is one plain variable (`$svc`), the only form a
+/// typed parameter receiver can take.
+fn is_bare_variable(receiver: &str) -> bool {
+    receiver.strip_prefix('$').is_some_and(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric() || byte >= 0x80)
+    })
 }
 
 /// Whether a `This`/`SelfOrStatic` hint names the enclosing class itself.
@@ -606,5 +650,131 @@ mod tests {
                 "C.php#App\\C::$items"
             ]
         );
+    }
+
+    /// A scope row whose facts are the given JSON object.
+    fn scope_json(file: &str, scope_key: &str, facts: serde_json::Value) -> ScopeRow {
+        ScopeRow {
+            file: file.to_string(),
+            scope_key: scope_key.to_string(),
+            parent_scope_key: None,
+            facts_json: facts.to_string(),
+        }
+    }
+
+    /// `A::m` plus a typed `$x->m()` use of the given origin in scope `1:0`.
+    fn typed_case(origin: &str, receiver: &str, facts: serde_json::Value) -> Store {
+        let class = symbol("A.php", "A", SymbolKind::Class, None);
+        let method = symbol("A.php", "A::m", SymbolKind::Method, Some("A.php#A"));
+        let hint =
+            format!("{{\"kind\":\"typed\",\"type_spelling\":\"A\",\"origin\":\"{origin}\"}}");
+        seed(
+            vec![class, method],
+            vec![use_row(
+                "F.php",
+                "m",
+                RefKind::Call,
+                Some(receiver),
+                None,
+                "1:0",
+                &hint,
+            )],
+            vec![scope_json("F.php", "1:0", facts)],
+        )
+    }
+
+    /// One non-`new` rebinding fact for `$x`.
+    fn rebinding() -> serde_json::Value {
+        serde_json::json!([{
+            "variable": "$x",
+            "class_spelling": "",
+            "span": {"start_byte": 40, "end_byte": 42},
+            "direct_new": false,
+        }])
+    }
+
+    #[test]
+    fn typed_parameter_never_rebound_binds_scoped() {
+        let store = typed_case("parameter", "$x", serde_json::json!({}));
+        let binding = only_binding(&store);
+        assert_eq!(binding.target_id, "A.php#A::m");
+        assert_eq!(binding.resolution, Resolution::Scoped);
+    }
+
+    #[test]
+    fn typed_parameter_rebound_anywhere_records_nothing() {
+        // AF3 finding 6: the rebinding may follow the use (a loop body).
+        let store = typed_case(
+            "parameter",
+            "$x",
+            serde_json::json!({ "new_bindings": rebinding() }),
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn typed_parameter_in_an_unanalysable_scope_records_nothing() {
+        let store = typed_case(
+            "parameter",
+            "$x",
+            serde_json::json!({ "unanalysable": true }),
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn typed_parameter_passed_to_an_unknown_function_records_nothing() {
+        let store = typed_case(
+            "parameter",
+            "$x",
+            serde_json::json!({ "call_args": [{
+                "variable": "$x",
+                "callee": "takes_ref",
+                "kind": "function",
+                "position": 0,
+                "span": {"start_byte": 50, "end_byte": 52},
+            }]}),
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn typed_parameter_hint_without_an_origin_is_treated_as_a_parameter() {
+        // Facts written before AF3 carry no `origin`; the stricter reading
+        // applies.
+        let class = symbol("A.php", "A", SymbolKind::Class, None);
+        let method = symbol("A.php", "A::m", SymbolKind::Method, Some("A.php#A"));
+        let store = seed(
+            vec![class, method],
+            vec![use_row(
+                "F.php",
+                "m",
+                RefKind::Call,
+                Some("$x"),
+                None,
+                "1:0",
+                "{\"kind\":\"typed\",\"type_spelling\":\"A\"}",
+            )],
+            vec![scope_json(
+                "F.php",
+                "1:0",
+                serde_json::json!({ "new_bindings": rebinding() }),
+            )],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn typed_property_binds_despite_rebinding_facts() {
+        // PHP checks a typed property on every assignment, so neither a
+        // same-named local's rebinding nor an unanalysable scope unsettles it.
+        let store = typed_case(
+            "property",
+            "$this->x",
+            serde_json::json!({ "new_bindings": rebinding(), "unanalysable": true }),
+        );
+        let binding = only_binding(&store);
+        assert_eq!(binding.target_id, "A.php#A::m");
+        assert_eq!(binding.resolution, Resolution::Scoped);
     }
 }

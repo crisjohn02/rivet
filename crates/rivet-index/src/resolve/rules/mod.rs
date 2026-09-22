@@ -2,11 +2,14 @@
 //!
 //! T19 provides [`imports`] and [`functions`]. T20 adds [`receivers`] and T21
 //! adds [`new_expr`]; each is registered in `resolve/mod.rs` in that order.
+//! [`rebinding`] is not a rule: it holds the local-variable rebinding checks
+//! that [`receivers`] and [`new_expr`] share (AF3).
 
 pub(crate) mod functions;
 pub(crate) mod imports;
 pub(crate) mod new_expr;
 pub(crate) mod php_builtins;
+pub(crate) mod rebinding;
 pub(crate) mod receivers;
 
 use rivet_store::SymbolRow;

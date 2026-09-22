@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use rivet_core::extract::{ExtractedUse, ImportKind, UseHint};
+use rivet_core::extract::{ExtractedUse, ImportKind, TypedOrigin, UseHint};
 use rivet_core::{ExtractedFile, RefKind};
 use rivet_languages::{LanguageId, grammar, php};
 use tree_sitter::{Parser, Tree};
@@ -201,7 +201,13 @@ fn php_authored_receiver_hints_and_imports() {
     // Case f: typed parameter receiver.
     let typed_call = find_use(&report, 736, 742);
     match &typed_call.hint {
-        UseHint::Typed { type_spelling } => assert_eq!(type_spelling, "SurveyService"),
+        UseHint::Typed {
+            type_spelling,
+            origin,
+        } => {
+            assert_eq!(type_spelling, "SurveyService");
+            assert_eq!(*origin, TypedOrigin::Parameter, "a parameter type (AF3)");
+        }
         other => panic!("expected Typed hint, got {other:?}"),
     }
 

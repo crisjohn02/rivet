@@ -38,6 +38,28 @@ dropped. A `/** ... */` docblock immediately above (no blank line) attaches.
 `signature_summary` renders a container as its signature line, one body-free
 line per direct member, and `}`; method bodies collapse to `{ … }`.
 
+## Receiver hints (AF3)
+
+- A typed receiver records whether its type was declared on a **parameter**
+  (including a promoted constructor parameter used as a local) or a
+  **property** (`$this->name`). PHP checks a parameter type only on entry, so
+  the resolver trusts it only when the variable is never rebound in its scope;
+  a property type is checked on every assignment and survives reassignment.
+- Only a single class type (`A`) or a nullable one (`?A`) is a typed receiver.
+  A union, intersection, or DNF type (`A|B`, `A&B`, `(A&B)|null`, also
+  `A|null`) and a by-reference parameter (`A &$x`) record none.
+- `$y = &$x`, a by-reference `foreach` over `$x`, and `[&$x]` record a
+  rebinding of `$x`.
+- Constructor arguments are walked and recorded as call arguments of
+  `Class::__construct` (`new static`, `new parent`, dynamic classes, and
+  anonymous classes have an unknown receiver).
+- By-reference parameter positions of each function and method are read from
+  the parse tree, so attributes, default values, and comments cannot mislead
+  them.
+- A global scope records its explicit call sites and any `goto`; a function
+  body records the names it can rebind through `global` or a literal
+  `$GLOBALS` key, and whether it can rebind a global it does not name.
+
 ## Not resolved in v0.1
 
 Per `docs/ADDING-A-LANGUAGE.md` "MVP support boundary", these stay unresolved
