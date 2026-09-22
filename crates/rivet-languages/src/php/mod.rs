@@ -1,10 +1,11 @@
-//! PHP named-definition extraction.
+//! PHP named-definition and identifier-use extraction.
 //!
 //! T11 extracts namespaces, classes, interfaces, traits (as class-kind),
 //! enums, functions, methods, properties, and constants into owned
 //! [`ExtractedSymbol`] records with native qualified names
-//! (`App\Services\SurveyService::launch`). Uses, references, signatures, and
-//! doc comments are later tasks.
+//! (`App\Services\SurveyService::launch`). T17 adds owned `ExtractedUse` and
+//! `ExtractedImport` records with lexical receiver hints; signatures, doc
+//! comments, and cross-file resolution are later tasks.
 //!
 //! Parse policy (docs/ARCHITECTURE.md "Parse and coverage policy"): a file
 //! whose Tree-sitter tree contains any ERROR or MISSING node publishes no
@@ -16,6 +17,8 @@ use std::sync::OnceLock;
 
 use rivet_core::{Diagnostic, ExtractedFile, ExtractedSymbol, Span, SymbolKind};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
+
+mod uses;
 
 /// The compiled-once symbol query for the pinned PHP grammar.
 static SYMBOLS_QUERY: OnceLock<Query> = OnceLock::new();
@@ -44,6 +47,8 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
     if matches!(scan, Scan::ResourceLimit) {
         return ExtractedFile {
             symbols: Vec::new(),
+            uses: Vec::new(),
+            imports: Vec::new(),
             diagnostics: vec![Diagnostic {
                 code: "resource_limit".to_string(),
                 detail: format!("visited more than {MAX_VISITED_NODES} Tree-sitter nodes"),
@@ -58,6 +63,8 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
         };
         return ExtractedFile {
             symbols: Vec::new(),
+            uses: Vec::new(),
+            imports: Vec::new(),
             diagnostics: vec![Diagnostic {
                 code: "parse_error".to_string(),
                 detail: format!("{kind} at byte {byte}"),
@@ -67,8 +74,12 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
     }
 
     let raw = collect_raw(source, root);
+    let symbols = build_symbols(raw);
+    let (uses, imports) = uses::extract_uses(source, root, &symbols);
     ExtractedFile {
-        symbols: build_symbols(raw),
+        symbols,
+        uses,
+        imports,
         diagnostics: Vec::new(),
     }
 }
