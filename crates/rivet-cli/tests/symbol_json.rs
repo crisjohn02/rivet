@@ -137,17 +137,14 @@ fn native_qualified_name_returns_the_gold_symbol() {
         value["parent"],
         "SurveyService.php#App\\Services\\SurveyService"
     );
-    assert_eq!(
-        value["calls"],
-        serde_json::json!({"total": 0, "truncated": false, "next_offset": null, "items": []})
-    );
-    assert_eq!(
-        value["called_by"],
-        serde_json::json!({"total": 0, "truncated": false, "next_offset": null, "items": []})
-    );
-    assert_eq!(
-        value["development_note"],
-        "calls and called_by are not implemented until T24"
+    // T24 fills the call lists: `launch` contains no extracted call use, but it
+    // is called from six places (five scoped, one unresolved name match).
+    assert_eq!(value["calls"]["total"], 0);
+    assert_eq!(value["calls"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(value["called_by"]["total"], 6);
+    assert!(
+        value.get("development_note").is_none(),
+        "the T12 not-implemented note is gone: {value}"
     );
 }
 

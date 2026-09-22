@@ -3,6 +3,7 @@
 //! Arguments, root discovery, scan/refresh orchestration, output, exit codes.
 
 mod index;
+mod references;
 mod refresh;
 mod refs;
 mod symbol;
@@ -64,6 +65,9 @@ enum Command {
         /// Include the symbol's source slice from stored bytes.
         #[arg(long)]
         source: bool,
+        /// Minimum resolution tier to include in both call lists.
+        #[arg(long = "min-resolution", value_name = "exact|scoped|name_match")]
+        min_resolution: Option<String>,
         /// Freshness mode, overriding config.
         #[arg(long, value_name = "content|metadata")]
         freshness: Option<String>,
@@ -145,6 +149,7 @@ fn main() {
             offset,
             signature_only,
             source,
+            min_resolution,
             freshness,
             no_refresh,
         } => {
@@ -153,6 +158,7 @@ fn main() {
                 offset,
                 signature_only,
                 source,
+                min_resolution,
                 freshness,
                 no_refresh,
             };

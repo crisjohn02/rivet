@@ -1,18 +1,23 @@
-//! `rivet symbol <query>` (spec §10; OUTPUT-CONTRACT "Coordinates and symbol
-//! objects", "Pagination and resolution", and the `rivet symbol` block).
+//! `rivet symbol <query>` (spec §10 and §14; OUTPUT-CONTRACT "Coordinates and
+//! symbol objects", "Pagination and resolution", and the `rivet symbol` block).
 //!
 //! T12 resolves canonical IDs, native qualified names, dotted paths, and short
 //! names against stored symbol rows after a refresh; T13 adds `file:line` and
 //! deterministic ambiguity pagination; T14 adds `--source` from the stored
-//! `files.source` bytes plus persisted `signature`/`doc_comment`. Real call
-//! lists arrive in T24.
+//! `files.source` bytes plus persisted `signature`/`doc_comment`. T24 fills the
+//! `calls` and `called_by` lists from the shared reference pipeline, each
+//! paginated independently.
 
+use std::collections::HashSet;
+
+use rivet_core::{RefKind, Resolution};
 use serde_json::{Map, Value, json};
 
 use rivet_index::{QueryOutcome, resolve_query, suggestions};
 use rivet_store::{Store, SymbolRow};
 
 use crate::index;
+use crate::references::{self, Mode, Selection};
 use crate::refresh::{cached_report, open_cached_store, open_context, open_store, refresh};
 use crate::transport::CliError;
 
@@ -29,10 +34,12 @@ pub struct Options {
     pub limit: Option<u64>,
     /// `--offset N`: candidate page offset.
     pub offset: Option<u64>,
-    /// `--signature-only`: omit the (currently empty) call lists.
+    /// `--signature-only`: omit the call lists.
     pub signature_only: bool,
     /// `--source`: include the symbol's source slice from stored bytes.
     pub source: bool,
+    /// `--min-resolution exact|scoped|name_match`, applied to both call lists.
+    pub min_resolution: Option<String>,
     /// `--freshness content|metadata`: override the configured freshness.
     pub freshness: Option<String>,
     /// `--no-refresh`: answer from the committed snapshot without refreshing.
@@ -47,6 +54,7 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
         offset,
         signature_only,
         source,
+        min_resolution,
         freshness,
         no_refresh,
     } = options;
@@ -66,6 +74,9 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     }
     let limit = parse_limit(limit)?;
     let offset = offset.unwrap_or(0);
+    // `--min-resolution` filters both call lists (OUTPUT-CONTRACT "Pagination
+    // and resolution").
+    let minimum = references::parse_min_resolution(min_resolution.as_deref())?;
     // Parse `--freshness` before any filesystem work (spec §27).
     let requested_freshness = index::parse_freshness(freshness.as_deref())?;
 
@@ -127,16 +138,22 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
             SuccessOptions {
                 source,
                 signature_only,
+                limit,
+                offset,
+                minimum,
             },
         ),
         total => ambiguous(&store, &matches, query, total, limit, offset),
     }
 }
 
-/// The two output-shaping options for the single-symbol success object.
+/// The output-shaping options for the single-symbol success object.
 struct SuccessOptions {
     source: bool,
     signature_only: bool,
+    limit: u64,
+    offset: u64,
+    minimum: Resolution,
 }
 
 /// Builds the success object for a unique match.
@@ -180,14 +197,38 @@ fn single(
             .unwrap_or(Value::Null),
     );
     if !options.signature_only {
-        object.insert("calls".to_string(), empty_call_list());
-        object.insert("called_by".to_string(), empty_call_list());
+        // `calls` is the call sites contained by the target; `called_by` is the
+        // default reference-mode matching restricted to call sites targeting
+        // the symbol. The two lists are paginated independently with the same
+        // supplied limit/offset (OUTPUT-CONTRACT "`rivet symbol`").
+        let bindings = references::bindings_by_use_id(store)?;
+        let all = references::all_uses(store)?;
+        let call_kinds: HashSet<RefKind> = HashSet::from([RefKind::Call]);
+        let calls = references::collect_matches(
+            &all,
+            &bindings,
+            row,
+            Selection::Contained,
+            Some(&call_kinds),
+            options.minimum,
+        );
+        let called_by = references::collect_matches(
+            &all,
+            &bindings,
+            row,
+            Selection::Query(Mode::References),
+            Some(&call_kinds),
+            options.minimum,
+        );
+        object.insert(
+            "calls".to_string(),
+            references::call_list_object(store, &calls, options.limit, options.offset)?,
+        );
+        object.insert(
+            "called_by".to_string(),
+            references::call_list_object(store, &called_by, options.limit, options.offset)?,
+        );
     }
-    // T24 replaces this note once call/caller lists are real.
-    object.insert(
-        "development_note".to_string(),
-        json!("calls and called_by are not implemented until T24"),
-    );
     Ok(Value::Object(object))
 }
 
@@ -281,11 +322,6 @@ fn source_slice(store: &Store, row: &SymbolRow) -> Result<String, CliError> {
             })
         })?;
     Ok(String::from_utf8_lossy(slice).into_owned())
-}
-
-/// An empty call/caller list while T24 is pending.
-fn empty_call_list() -> Value {
-    json!({"total": 0, "truncated": false, "next_offset": null, "items": []})
 }
 
 /// Validates `--limit` before any filesystem work.
