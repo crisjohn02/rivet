@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rivet_core::{ParseStatus, RefKind, SymbolKind};
+use rivet_core::{ParseStatus, RefKind, Resolution, SymbolKind};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -250,6 +250,23 @@ pub struct ScopeRow {
     pub facts_json: String,
 }
 
+/// One row of the `bindings` table.
+///
+/// A binding links one persisted use to the single declaration a resolver rule
+/// selected. `resolution` is `exact` or `scoped`; the schema rejects
+/// `name_match`, which is query-relative evidence rather than a stored link.
+/// The row is written by `publish_inventory` after every use has a `use_id`, so
+/// `use_id` is always the SQLite surrogate key of a committed use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingRow {
+    /// SQLite row ID of the bound use (the `bindings` primary key).
+    pub use_id: i64,
+    /// Canonical ID of the target declaration.
+    pub target_id: String,
+    /// Evidence tier for the link (`exact` or `scoped`).
+    pub resolution: Resolution,
+}
+
 /// The four fingerprint inputs that identify an indexed snapshot's
 /// configuration (ARCHITECTURE "Refresh and invalidation").
 ///
@@ -287,6 +304,10 @@ pub struct InventoryInput {
     /// per file, together with that file's symbols and uses, in the same
     /// transaction.
     pub scopes: Vec<ScopeRow>,
+    /// Every resolved binding for the current inventory. The whole table is
+    /// replaced: bindings are re-resolved for all uses on every publish
+    /// (spec §12.3). Each `use_id` must name a use in `uses`.
+    pub bindings: Vec<BindingRow>,
     /// `--force`: delete every stored fact and rebuild it in this same
     /// transaction, so all current file rows count as `updated`.
     pub force: bool,
@@ -511,6 +532,7 @@ impl Store {
             symbols,
             uses,
             scopes,
+            bindings,
             force,
         } = input;
 
@@ -531,12 +553,16 @@ impl Store {
             .filter(|path| !incoming.contains(path.as_str()))
             .count() as u64;
 
+        // Bindings are re-resolved for every persisted use on every publish, so
+        // the whole table is cleared before the new facts are written and the
+        // fresh rows are inserted after all uses exist (spec §12.3).
+        tx.execute("DELETE FROM bindings", [])?;
+
         // A forced rebuild discards every stored fact before writing the new
         // inventory. Child tables are cleared before their parents so foreign
         // keys never see a dangling reference; `diagnostics` has no foreign key
         // and is cleared explicitly.
         if force {
-            tx.execute("DELETE FROM bindings", [])?;
             tx.execute("DELETE FROM uses", [])?;
             tx.execute("DELETE FROM scopes", [])?;
             tx.execute("DELETE FROM diagnostics", [])?;
@@ -633,6 +659,7 @@ impl Store {
             let scope_rows = scopes_by_file.remove(&file.path).unwrap_or_default();
             replace_file_scopes_in_tx(&tx, &file.path, &scope_rows)?;
         }
+        insert_bindings_in_tx(&tx, &bindings)?;
 
         write_fingerprint(&tx, &fingerprint, &digest)?;
         tx.commit()?;
@@ -855,6 +882,22 @@ impl Store {
         tx.commit()?;
         Ok(rows)
     }
+
+    /// Returns every persisted binding ordered by `use_id`.
+    ///
+    /// Rows are the whole `bindings` table, so a caller can compare
+    /// re-resolution output across refreshes.
+    pub fn list_bindings(&self) -> Result<Vec<BindingRow>, Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let rows = {
+            let mut stmt =
+                tx.prepare("SELECT use_id, target_id, resolution FROM bindings ORDER BY use_id")?;
+            let rows = stmt.query_map([], binding_row_from)?;
+            rows.collect::<rusqlite::Result<Vec<BindingRow>>>()?
+        };
+        tx.commit()?;
+        Ok(rows)
+    }
 }
 
 /// Deletes then inserts `symbols` for `file` inside the caller's transaction.
@@ -1036,6 +1079,46 @@ fn scope_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScopeRow> {
         scope_key: row.get("scope_key")?,
         parent_scope_key: row.get("parent_scope_key")?,
         facts_json: row.get("facts_json")?,
+    })
+}
+
+/// Inserts every resolved binding inside the caller's transaction.
+///
+/// The caller has already deleted the previous rows and written every use, so
+/// each binding's `use_id` foreign key resolves. A duplicate `use_id` aborts
+/// the transaction rather than replacing a link silently.
+fn insert_bindings_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    bindings: &[BindingRow],
+) -> Result<(), Error> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let mut insert =
+        tx.prepare("INSERT INTO bindings (use_id, target_id, resolution) VALUES (?1, ?2, ?3)")?;
+    for binding in bindings {
+        insert.execute(params![
+            binding.use_id,
+            binding.target_id,
+            binding.resolution.as_str(),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Maps a `bindings` row to a [`BindingRow`].
+fn binding_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<BindingRow> {
+    let use_id: i64 = row.get("use_id")?;
+    let target_id: String = row.get("target_id")?;
+    let resolution: String = row.get("resolution")?;
+    let resolution = resolution.parse::<Resolution>().map_err(|error| {
+        // `resolution` is the third selected column (index 2).
+        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+    })?;
+    Ok(BindingRow {
+        use_id,
+        target_id,
+        resolution,
     })
 }
 
@@ -1289,10 +1372,10 @@ fn write_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::{
-        Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, PublishReport, ScopeRow,
-        Store, SymbolRow, UseRow, clamp_mtime_ns, snapshot_digest,
+        BindingRow, Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput,
+        PublishReport, ScopeRow, Store, SymbolRow, UseRow, clamp_mtime_ns, snapshot_digest,
     };
-    use rivet_core::{ParseStatus, RefKind, SymbolKind, content_hash};
+    use rivet_core::{ParseStatus, RefKind, Resolution, SymbolKind, content_hash};
     use rusqlite::params;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1371,6 +1454,7 @@ mod tests {
             symbols: Vec::new(),
             uses: Vec::new(),
             scopes: Vec::new(),
+            bindings: Vec::new(),
             force: false,
         }
     }
@@ -1514,6 +1598,7 @@ mod tests {
                 symbols: Vec::new(),
                 uses: Vec::new(),
                 scopes: Vec::new(),
+                bindings: Vec::new(),
                 force: true,
             })
             .unwrap();
@@ -1850,6 +1935,7 @@ mod tests {
                 symbols: rows,
                 uses: Vec::new(),
                 scopes: Vec::new(),
+                bindings: Vec::new(),
                 force: false,
             })
             .unwrap();
@@ -1882,6 +1968,7 @@ mod tests {
                 symbols: vec![sample_symbol("a.php", "a#one", "one", 0)],
                 uses: Vec::new(),
                 scopes: Vec::new(),
+                bindings: Vec::new(),
                 force: false,
             })
             .unwrap();
@@ -1897,6 +1984,7 @@ mod tests {
                 symbols: Vec::new(),
                 uses: Vec::new(),
                 scopes: Vec::new(),
+                bindings: Vec::new(),
                 force: false,
             })
             .unwrap();
@@ -1946,6 +2034,52 @@ mod tests {
     }
 
     #[test]
+    fn bindings_round_trip_and_are_replaced_on_publish() {
+        let mut store = Store::open_in_memory().unwrap();
+        let facts_json =
+            "{\"imports\":[],\"typed_bindings\":[],\"new_bindings\":[],\"declares\":[]}";
+        let symbol = sample_symbol("a.php", "a.php#App\\launch", "launch", 0);
+        let mut use_row = sample_use("a.php", "launch", "launch", RefKind::Call, 179, 185);
+        use_row.use_id = Some(7);
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![sample_file("a.php")],
+                symbols: vec![symbol.clone()],
+                uses: vec![use_row],
+                scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
+                bindings: vec![BindingRow {
+                    use_id: 7,
+                    target_id: symbol.id.clone(),
+                    resolution: Resolution::Exact,
+                }],
+                force: false,
+            })
+            .unwrap();
+
+        let bindings = store.list_bindings().unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].use_id, 7);
+        assert_eq!(bindings[0].target_id, symbol.id);
+        assert_eq!(bindings[0].resolution, Resolution::Exact);
+
+        // Re-publishing with no bindings clears the table: every publish
+        // re-resolves all uses (spec §12.3).
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![sample_file("a.php")],
+                symbols: vec![symbol],
+                uses: Vec::new(),
+                scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
+                bindings: Vec::new(),
+                force: false,
+            })
+            .unwrap();
+        assert!(store.list_bindings().unwrap().is_empty());
+    }
+
+    #[test]
     fn use_row_round_trips_with_null_container_and_non_ascii_receiver() {
         let mut store = Store::open_in_memory().unwrap();
         let facts_json =
@@ -1959,6 +2093,7 @@ mod tests {
                 symbols: Vec::new(),
                 uses: vec![use_row.clone()],
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
+                bindings: Vec::new(),
                 force: false,
             })
             .unwrap();
@@ -2001,6 +2136,7 @@ mod tests {
                 symbols: Vec::new(),
                 uses: rows,
                 scopes: Vec::new(),
+                bindings: Vec::new(),
                 force: false,
             })
             .unwrap();
@@ -2035,6 +2171,7 @@ mod tests {
                 symbols: Vec::new(),
                 uses: vec![sample_use("a.php", "g", "g", RefKind::Call, 0, 1)],
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
+                bindings: Vec::new(),
                 force: false,
             })
             .unwrap();

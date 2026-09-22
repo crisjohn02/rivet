@@ -9,3 +9,7 @@ description = "Declaration resolution, query matching, context ranking and fitti
 [dependencies]
 rivet-core = { path = "../rivet-core" }
 rivet-store = { path = "../rivet-store" }
+# Scope facts are persisted as JSON, so the resolver reads them back without
+# reparsing the source file (T18/T19).
+serde = { workspace = true }
+serde_json = { workspace = true }

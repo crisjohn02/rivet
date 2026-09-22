@@ -453,6 +453,8 @@ version = "0.1.0"
 dependencies = [
  "rivet-core",
  "rivet-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -160,11 +160,10 @@ impl RefreshMode {
 
 /// The resolver fingerprint recorded in `meta.resolver_fingerprint`.
 ///
-/// Bindings do not exist until T22, so this is a fixed placeholder. T22 must
-/// replace it with a real version; the stored-vs-current comparison hook in
-/// [`refresh_inventory`] is where a changed resolver will clear and recompute
-/// persisted bindings.
-const RESOLVER_FINGERPRINT: &str = "none";
+/// T19 writes a real version because bindings are computed on every publish. A
+/// future change to the resolution rules bumps this so the snapshot digest and
+/// T22's invalidation trigger both see it.
+const RESOLVER_FINGERPRINT: &str = "php-rules-v1";
 
 /// The shared result of one refresh.
 ///
@@ -225,9 +224,9 @@ fn refresh_inventory(
         .map_err(store_error)?;
     let fingerprint_matches = stored_extractor.as_deref() == Some(EXTRACTOR_FINGERPRINT);
 
-    // Resolver invalidation hook (T22). Bindings do not exist yet, so a changed
-    // resolver fingerprint is intentionally a no-op here; T22 replaces this
-    // with clearing and recomputing persisted bindings.
+    // Resolver invalidation. T19 recomputes bindings for every use on every
+    // publish (spec §12.3), so a changed resolver fingerprint needs no separate
+    // clear here; T22 adds the membership-change triggers.
     let stored_resolver = store
         .get_meta("resolver_fingerprint")
         .map_err(store_error)?;
@@ -244,6 +243,15 @@ fn refresh_inventory(
     let mut stored_symbols = symbols_by_file(store)?;
     let mut stored_uses = uses_by_file(store)?;
     let mut stored_scopes = scopes_by_file(store)?;
+    // Newly reparsed uses get explicit IDs above this high-water mark so the
+    // in-memory resolver can name them before the publish transaction runs.
+    let mut next_use_id = stored_uses
+        .values()
+        .flatten()
+        .filter_map(|row| row.use_id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
 
     let mut files = Vec::with_capacity(walk.files.len());
     let mut symbols: Vec<SymbolRow> = Vec::new();
@@ -456,6 +464,21 @@ fn refresh_inventory(
     let diagnostics_truncated = diagnostics_total > DIAGNOSTIC_CAP;
     diagnostics.truncate(DIAGNOSTIC_CAP);
 
+    // Give every newly extracted use an explicit ID so the in-memory resolver
+    // can reference it before the publish transaction runs. Reused rows already
+    // carry their stored ID, and the high-water mark keeps new IDs unique.
+    for row in &mut uses {
+        if row.use_id.is_none() {
+            row.use_id = Some(next_use_id);
+            next_use_id = next_use_id.saturating_add(1);
+        }
+    }
+    // Resolve every use for the snapshot being published. The rules run over
+    // the same rows written below, so bindings and facts commit in one
+    // transaction (spec §12.3).
+    let bindings = rivet_index::Resolver::new(&symbols, &uses, &scopes).resolve();
+    let binding_count = bindings.len() as u64;
+
     let fingerprint = Fingerprint {
         index_format_version: INDEX_FORMAT_VERSION.to_string(),
         effective_config,
@@ -471,6 +494,7 @@ fn refresh_inventory(
             symbols,
             uses,
             scopes,
+            bindings,
             force,
         })
         .map_err(store_error)?;
@@ -490,7 +514,7 @@ fn refresh_inventory(
             diagnostics,
             symbols: symbol_count,
             uses: use_count,
-            bindings: 0,
+            bindings: binding_count,
             updated: published.updated,
             unchanged: published.unchanged,
             deleted: published.deleted,
@@ -584,6 +608,7 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
 
     let skipped_total = skipped.total();
     let symbols = store.list_symbols().map_err(store_error)?.len() as u64;
+    let bindings = store.list_bindings().map_err(store_error)?.len() as u64;
     Ok(Report {
         snapshot,
         freshness: Freshness::Cached,
@@ -596,7 +621,7 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
         diagnostics,
         symbols,
         uses,
-        bindings: 0,
+        bindings,
         updated: 0,
         unchanged: 0,
         deleted: 0,
@@ -981,6 +1006,7 @@ mod tests {
                 symbols: Vec::new(),
                 uses: Vec::new(),
                 scopes: Vec::new(),
+                bindings: Vec::new(),
                 force: false,
             })
             .expect("publish stale inventory");

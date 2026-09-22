@@ -4,7 +4,12 @@
 //! canonical ID, native qualified name, `file:line`, dotted path, and short
 //! name, plus deterministic ambiguity ordering, not-found suggestions, and
 //! query normalization hardening. The forms live in the [`query`] module.
+//!
+//! T19 adds [`resolve`]: direct PHP import/namespace bindings and lexically
+//! bound function references, resolved from the persisted uses and scopes.
 
 mod query;
+pub mod resolve;
 
 pub use query::{QueryOutcome, levenshtein, resolve_query, suggestions};
+pub use resolve::{Resolver, resolve_all};

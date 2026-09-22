@@ -150,9 +150,15 @@ fn index_persists_gold_uses_scopes_and_reindexes_identically() {
         "reported uses {reported} must cover every gold use ({})",
         gold.len()
     );
-    assert_eq!(value["bindings"], 0, "T18 performs no resolution");
 
     let store = open_store(root);
+    // T19 resolves real bindings; the reported count must match the table.
+    let binding_rows = store.list_bindings().expect("list bindings");
+    assert_eq!(
+        value["bindings"].as_u64().expect("bindings is a number"),
+        binding_rows.len() as u64,
+        "reported bindings must match the persisted bindings table"
+    );
 
     // Every gold (file, start_byte, end_byte, ref_kind) has exactly one row.
     for gold_use in &gold {

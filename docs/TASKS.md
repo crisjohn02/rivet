@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T18 |
-| Next task | T19 |
+| Last completed task | T19 |
+| Next task | T20 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T18: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 5 unit + 7 freshness_modes + 7 index_json + 1 index_uses + 6 refresh + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 60, rivet-index 11, rivet-languages 4 unit + 6 php_extract + 2 php_uses, rivet-parser 2 unit + 4 grammar_smoke, rivet-store 27; 0 failed); `--no-default-features` and `--features lang-php` builds compile. |
+| Last checks | T19: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 5 unit + 2 bindings + 7 freshness_modes + 7 index_json + 1 index_uses + 6 refresh + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 60, rivet-index 23, rivet-languages 4 unit + 6 php_extract + 2 php_uses, rivet-parser 2 unit + 4 grammar_smoke, rivet-store 28; 0 failed); `--no-default-features` and `--features lang-php` builds compile. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -91,7 +91,7 @@ Read: spec §11; ARCHITECTURE uses/scopes/bindings; OUTPUT-CONTRACT refs and cal
 |---|---|---|---|
 | [x] | T17 | Extract PHP call/use spans and containing symbols for the small fixture, including top-level uses and interpolated expressions. | Gold use spans match; literal text/declarations are excluded; call sites are not duplicated as unknown references. |
 | [x] | T18 | Persist lexical scopes, imports/aliases, and unresolved use facts. | Facts survive a store round-trip with nullable containers and sufficient scope data to resolve without reparsing. No guessed target foreign keys. |
-| [ ] | T19 | Resolve direct PHP import/namespace bindings and supported lexical function references. | Alias uses link to the correct declarations; shadowing and conflicting candidates remain unresolved. Exact tiers require lexical evidence. |
+| [x] | T19 | Resolve direct PHP import/namespace bindings and supported lexical function references. | Alias uses link to the correct declarations; shadowing and conflicting candidates remain unresolved. Exact tiers require lexical evidence. |
 | [ ] | T20 | Resolve `$this`/`self` member uses and explicit native receiver types. | Correct declaration links are scoped; same-name classes remain distinct; dynamic/late-static behavior does not become exact. |
 | [ ] | T21 | Add preceding `new` receiver hints with conservative reassignment/control-flow handling. | A known safe assignment resolves as scoped; reassignment or uncertainty does not retain an unjustified binding. |
 | [ ] | T22 | Re-resolve all persisted uses when indexed content/membership changes. | Adding a duplicate declaration, changing an import, or deleting a target updates bindings in unchanged files; unresolved uses survive. |
