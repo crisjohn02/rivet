@@ -90,6 +90,7 @@ Rust single binary. Tree-sitter for parsing. SQLite for a persistent, incrementa
 | [benchmark/REPORT-TEMPLATE.md](benchmark/REPORT-TEMPLATE.md) | Empty pilot/confirmatory report template: metrics, gates, evidence, limitations |
 | [docs/AGENT-SNIPPET.md](docs/AGENT-SNIPPET.md) | The text `rivet snippet` prints |
 | [docs/RELEASING.md](docs/RELEASING.md) | Release checklist and versioning policy |
+| [CLAUDE.md](CLAUDE.md) | How this project is built: Claude orchestrates and reviews, OpenCode implements |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 | [CHANGELOG.md](CHANGELOG.md) | Changes by version |
 
