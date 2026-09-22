@@ -122,7 +122,7 @@ fn config_invalidation_excludes_and_restores() {
     let root = temp.path();
 
     let before = parse_success(&run(root, &["index", "--json"]));
-    assert_eq!(before["index"]["coverage"]["files_seen"], 5);
+    assert_eq!(before["index"]["coverage"]["files_seen"], 10);
     let found = parse_success(&run(root, &["symbol", BOOT_LAUNCH, "--json"]));
     assert_eq!(found["symbol"]["qualified_name"], "App\\Boot\\launch");
 
@@ -138,7 +138,7 @@ fn config_invalidation_excludes_and_restores() {
     assert_eq!(excluded["error"], "symbol_not_found");
 
     let after = parse_success(&run(root, &["index", "--json"]));
-    assert_eq!(after["index"]["coverage"]["files_seen"], 4);
+    assert_eq!(after["index"]["coverage"]["files_seen"], 9);
 
     // Removing the exclusion makes boot.php eligible again and it is reparsed.
     fs::remove_file(root.join(".rivet/config.toml")).expect("remove config");
@@ -171,7 +171,7 @@ fn language_invalidation_disables_php() {
     assert_eq!(missing["error"], "symbol_not_found");
 
     let after = parse_success(&run(root, &["index", "--json"]));
-    assert_eq!(after["index"]["coverage"]["skipped"]["unsupported"], 5);
+    assert_eq!(after["index"]["coverage"]["skipped"]["unsupported"], 10);
     assert_eq!(after["index"]["coverage"]["files_indexed"], 0);
     assert_eq!(after["symbols"], 0);
 

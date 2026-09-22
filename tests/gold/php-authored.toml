@@ -1,5 +1,8 @@
-# Gold spans for the four-file authored PHP fixture.
+# Gold spans for the authored PHP fixture.
 # Generated mechanically; see tests/gold/check_gold.py.
+# T25 adds focused files for interfaces, traits, enums (including cases),
+# abstract/static/readonly/promoted members, multi-name declarations, and
+# top-level constants.
 
 [[declaration]]
 file = "SurveyService.php"
@@ -272,3 +275,263 @@ line = 20
 column = 11
 case = "h"
 text = "launch"
+
+[[declaration]]
+file = "Interface.php"
+qualified_name = "App\\Contracts\\Named"
+kind = "interface"
+start_byte = 59
+end_byte = 192
+start_line = 7
+end_line = 14
+text = "interface Named\n{\n    public const KIND "
+
+[[declaration]]
+file = "Interface.php"
+qualified_name = "App\\Contracts\\Named::KIND"
+kind = "const"
+start_byte = 81
+end_byte = 109
+start_line = 9
+end_line = 9
+text = "public const KIND = 'named';"
+
+[[declaration]]
+file = "Interface.php"
+qualified_name = "App\\Contracts\\Named::name"
+kind = "method"
+start_byte = 115
+end_byte = 146
+start_line = 11
+end_line = 11
+text = "public function name(): string;"
+
+[[declaration]]
+file = "Interface.php"
+qualified_name = "App\\Contracts\\Named::set"
+kind = "method"
+start_byte = 152
+end_byte = 190
+start_line = 13
+end_line = 13
+text = "public function set(int $value): void;"
+
+[[declaration]]
+file = "Trait.php"
+qualified_name = "App\\Concerns\\Greets"
+kind = "class"
+start_byte = 58
+end_byte = 179
+start_line = 7
+end_line = 15
+text = "trait Greets\n{\n    public const SALUTE ="
+
+[[declaration]]
+file = "Trait.php"
+qualified_name = "App\\Concerns\\Greets::SALUTE"
+kind = "const"
+start_byte = 77
+end_byte = 104
+start_line = 9
+end_line = 9
+text = "public const SALUTE = 'hi';"
+
+[[declaration]]
+file = "Trait.php"
+qualified_name = "App\\Concerns\\Greets::greet"
+kind = "method"
+start_byte = 110
+end_byte = 177
+start_line = 11
+end_line = 14
+text = "public function greet(): string\n    {\n  "
+
+[[declaration]]
+file = "Enums.php"
+qualified_name = "App\\Enums\\Suit"
+kind = "enum"
+start_byte = 55
+end_byte = 102
+start_line = 7
+end_line = 11
+text = "enum Suit\n{\n    case Hearts;\n    case Sp"
+
+[[declaration]]
+file = "Enums.php"
+qualified_name = "App\\Enums\\Suit::Hearts"
+kind = "const"
+start_byte = 71
+end_byte = 83
+start_line = 9
+end_line = 9
+text = "case Hearts;"
+
+[[declaration]]
+file = "Enums.php"
+qualified_name = "App\\Enums\\Suit::Spades"
+kind = "const"
+start_byte = 88
+end_byte = 100
+start_line = 10
+end_line = 10
+text = "case Spades;"
+
+[[declaration]]
+file = "Enums.php"
+qualified_name = "App\\Enums\\Status"
+kind = "enum"
+start_byte = 104
+end_byte = 183
+start_line = 13
+end_line = 17
+text = "enum Status: string\n{\n    case Active = "
+
+[[declaration]]
+file = "Enums.php"
+qualified_name = "App\\Enums\\Status::Active"
+kind = "const"
+start_byte = 130
+end_byte = 153
+start_line = 15
+end_line = 15
+text = "case Active = 'active';"
+
+[[declaration]]
+file = "Enums.php"
+qualified_name = "App\\Enums\\Status::Closed"
+kind = "const"
+start_byte = 158
+end_byte = 181
+start_line = 16
+end_line = 16
+text = "case Closed = 'closed';"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing"
+kind = "class"
+start_byte = 57
+end_byte = 485
+start_line = 7
+end_line = 27
+text = "abstract class AbstractThing\n{\n    publi"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::FIRST"
+kind = "const"
+start_byte = 92
+end_byte = 127
+start_line = 9
+end_line = 9
+text = "public const FIRST = 1, SECOND = 2;"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::SECOND"
+kind = "const"
+start_byte = 92
+end_byte = 127
+start_line = 9
+end_line = 9
+text = "public const FIRST = 1, SECOND = 2;"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::$count"
+kind = "property"
+start_byte = 133
+end_byte = 162
+start_line = 11
+end_line = 11
+text = "public static int $count = 0;"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::$title"
+kind = "property"
+start_byte = 168
+end_byte = 198
+start_line = 13
+end_line = 13
+text = "public readonly string $title;"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::$left"
+kind = "property"
+start_byte = 204
+end_byte = 233
+start_line = 15
+end_line = 15
+text = "public int $left, $right = 2;"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::$right"
+kind = "property"
+start_byte = 204
+end_byte = 233
+start_line = 15
+end_line = 15
+text = "public int $left, $right = 2;"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::describe"
+kind = "method"
+start_byte = 239
+end_byte = 283
+start_line = 17
+end_line = 17
+text = "abstract public function describe(): str"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::__construct"
+kind = "method"
+start_byte = 289
+end_byte = 483
+start_line = 19
+end_line = 26
+text = "public function __construct(private int "
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::$seed"
+kind = "property"
+start_byte = 317
+end_byte = 334
+start_line = 19
+end_line = 19
+text = "private int $seed"
+
+[[declaration]]
+file = "Members.php"
+qualified_name = "App\\Members\\AbstractThing::$tag"
+kind = "property"
+start_byte = 336
+end_byte = 360
+start_line = 19
+end_line = 19
+text = "public string $tag = 'x'"
+
+[[declaration]]
+file = "Constants.php"
+qualified_name = "App\\Constants\\FIRST"
+kind = "const"
+start_byte = 59
+end_byte = 87
+start_line = 7
+end_line = 7
+text = "const FIRST = 1, SECOND = 2;"
+
+[[declaration]]
+file = "Constants.php"
+qualified_name = "App\\Constants\\SECOND"
+kind = "const"
+start_byte = 59
+end_byte = 87
+start_line = 7
+end_line = 7
+text = "const FIRST = 1, SECOND = 2;"

@@ -94,9 +94,10 @@ fn trim_indentation(raw: &str, indent: usize) -> String {
 
 /// The collapsed form of a container symbol (spec §16.2).
 ///
-/// For a class/interface/enum, this is the container signature line, `{`, one
-/// line per direct member in source order, and `}`. Property and constant
-/// members end in `;`; method members end in ` { … }`. A non-container symbol
+/// For a class/interface/enum (and a trait, which is class-kind), this is the
+/// container signature line, `{`, one line per direct member in source order,
+/// and `}`. A method member collapses its body to ` { … }`; every other member
+/// kind (property, constant, enum case) ends with `;`. A non-container symbol
 /// returns its own signature unchanged.
 ///
 /// `source` is part of the adapter contract; member headers are already stored
@@ -115,20 +116,15 @@ pub fn signature_summary(
     summary.push_str("\n{\n");
     for member in members {
         let signature = member.signature.as_deref().unwrap_or("");
+        summary.push_str("    ");
+        summary.push_str(signature);
         match member.kind {
-            SymbolKind::Property | SymbolKind::Const => {
-                summary.push_str("    ");
-                summary.push_str(signature);
-                summary.push_str(";\n");
-            }
-            SymbolKind::Method => {
-                summary.push_str("    ");
-                summary.push_str(signature);
-                summary.push_str(" { … }\n");
-            }
-            // Other direct member kinds (enum cases) are not extracted yet;
-            // T25 extends the summary's kind coverage.
-            _ => {}
+            // A method body is replaced by `{ … }`; an interface or abstract
+            // method has no body to replace but is still callable, so it keeps
+            // the same collapsed shape.
+            SymbolKind::Method => summary.push_str(" { … }\n"),
+            // Properties, constants, and enum cases are body-free already.
+            _ => summary.push_str(";\n"),
         }
     }
     summary.push('}');
@@ -150,7 +146,7 @@ fn collapse_whitespace(value: &str) -> String {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use rivet_core::ExtractedFile;
+    use rivet_core::{ExtractedFile, SymbolKind};
     use tree_sitter::Parser;
 
     use crate::{LanguageId, grammar, php};
@@ -278,5 +274,117 @@ final class SurveyService
             separated.doc_comment, None,
             "a blank line breaks docblock attachment"
         );
+    }
+
+    /// The container at `qualified_name` and its direct members in extraction
+    /// order (already sorted by declaration start byte).
+    fn container_members(
+        extracted: &ExtractedFile,
+        qualified_name: &str,
+    ) -> (
+        rivet_core::ExtractedSymbol,
+        Vec<rivet_core::ExtractedSymbol>,
+    ) {
+        let index = extracted
+            .symbols
+            .iter()
+            .position(|symbol| symbol.qualified_name == qualified_name)
+            .unwrap_or_else(|| panic!("missing {qualified_name}"));
+        let container = extracted.symbols[index].clone();
+        let members = extracted
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.parent_index == Some(index))
+            .cloned()
+            .collect();
+        (container, members)
+    }
+
+    /// An interface summary lists its bodyless methods with collapsed bodies.
+    #[test]
+    fn interface_collapsed_form_lists_bodyless_methods() {
+        let (source, extracted) = extract_fixture("Interface.php");
+        let source = String::from_utf8(source).expect("fixture is UTF-8");
+        let (interface, members) = container_members(&extracted, "App\\Contracts\\Named");
+
+        let expected = "\
+interface Named
+{
+    public const KIND = 'named';
+    public function name(): string { … }
+    public function set(int $value): void { … }
+}";
+        assert_eq!(signature_summary(&interface, &members, &source), expected);
+    }
+
+    /// An enum summary lists its cases (recorded as `const`) with `;`.
+    #[test]
+    fn enum_collapsed_form_lists_cases() {
+        let (source, extracted) = extract_fixture("Enums.php");
+        let source = String::from_utf8(source).expect("fixture is UTF-8");
+
+        let (pure, members) = container_members(&extracted, "App\\Enums\\Suit");
+        let expected = "\
+enum Suit
+{
+    case Hearts;
+    case Spades;
+}";
+        assert_eq!(signature_summary(&pure, &members, &source), expected);
+
+        let (backed, members) = container_members(&extracted, "App\\Enums\\Status");
+        let expected = "\
+enum Status: string
+{
+    case Active = 'active';
+    case Closed = 'closed';
+}";
+        assert_eq!(signature_summary(&backed, &members, &source), expected);
+    }
+
+    /// A trait is class-kind and summarizes like a class.
+    #[test]
+    fn trait_collapsed_form_is_class_kind() {
+        let (source, extracted) = extract_fixture("Trait.php");
+        let source = String::from_utf8(source).expect("fixture is UTF-8");
+        let (trait_symbol, members) = container_members(&extracted, "App\\Concerns\\Greets");
+        assert_eq!(trait_symbol.kind, SymbolKind::Class);
+
+        let expected = "\
+trait Greets
+{
+    public const SALUTE = 'hi';
+    public function greet(): string { … }
+}";
+        assert_eq!(
+            signature_summary(&trait_symbol, &members, &source),
+            expected
+        );
+    }
+
+    /// Every member kind appears once per declared name: multi-name
+    /// declarations repeat the shared header, and promoted properties are
+    /// ordinary `;` members after the constructor.
+    #[test]
+    fn class_collapsed_form_covers_multi_name_and_promoted_members() {
+        let (source, extracted) = extract_fixture("Members.php");
+        let source = String::from_utf8(source).expect("fixture is UTF-8");
+        let (class, members) = container_members(&extracted, "App\\Members\\AbstractThing");
+
+        let expected = "\
+abstract class AbstractThing
+{
+    public const FIRST = 1, SECOND = 2;
+    public const FIRST = 1, SECOND = 2;
+    public static int $count = 0;
+    public readonly string $title;
+    public int $left, $right = 2;
+    public int $left, $right = 2;
+    abstract public function describe(): string { … }
+    public function __construct(private int $seed, public string $tag = 'x') { … }
+    private int $seed;
+    public string $tag = 'x';
+}";
+        assert_eq!(signature_summary(&class, &members, &source), expected);
     }
 }

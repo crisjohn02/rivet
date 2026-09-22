@@ -230,3 +230,118 @@ fn named_class_after_anonymous_class_is_extracted() {
         "anonymous member must be absent: {qualified:?}"
     );
 }
+
+/// Enum cases (pure and backed) are recorded as `const` symbols owned by their
+/// enum, with case-sensitive lookup names (T25).
+#[test]
+fn enum_cases_are_const_symbols_with_enum_parent() {
+    let (_source, extracted) = extract_file("Enums.php");
+
+    let hearts = extracted
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == "App\\Enums\\Suit::Hearts")
+        .expect("pure enum case Hearts");
+    assert_eq!(hearts.kind, SymbolKind::Const);
+    assert_eq!(hearts.name, "Hearts");
+    let parent = hearts.parent_index.expect("enum case has an enum parent");
+    assert_eq!(extracted.symbols[parent].qualified_name, "App\\Enums\\Suit");
+    assert_eq!(extracted.symbols[parent].kind, SymbolKind::Enum);
+
+    let active = extracted
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == "App\\Enums\\Status::Active")
+        .expect("backed enum case Active");
+    assert_eq!(active.kind, SymbolKind::Const);
+
+    // Enum cases are case-sensitive in PHP; `Const` lookup keeps exact spelling.
+    assert_eq!(php::lookup_name("Hearts", SymbolKind::Const), "Hearts");
+    assert_eq!(php::lookup_name("Hearts", SymbolKind::Method), "hearts");
+}
+
+/// Promoted constructor properties, static/readonly members, and multi-name
+/// property/constant declarations are each extracted once per declared name.
+#[test]
+fn promoted_and_multi_name_members_are_extracted() {
+    let (_source, extracted) = extract_file("Members.php");
+
+    let find = |name: &str| {
+        extracted
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == name)
+            .unwrap_or_else(|| panic!("missing {name}"))
+    };
+
+    // Promoted constructor properties are `property` symbols owned by the class
+    // and keep their `$`.
+    for name in [
+        "App\\Members\\AbstractThing::$seed",
+        "App\\Members\\AbstractThing::$tag",
+    ] {
+        let property = find(name);
+        assert_eq!(property.kind, SymbolKind::Property, "{name}");
+        assert!(property.name.starts_with('$'), "{name} keeps $");
+        let parent = property.parent_index.expect("promoted property parent");
+        assert_eq!(extracted.symbols[parent].name, "AbstractThing");
+    }
+
+    // Multi-name property and constant declarations produce one symbol per
+    // name, all sharing the whole declaration span.
+    for (first, second) in [
+        (
+            "App\\Members\\AbstractThing::FIRST",
+            "App\\Members\\AbstractThing::SECOND",
+        ),
+        (
+            "App\\Members\\AbstractThing::$left",
+            "App\\Members\\AbstractThing::$right",
+        ),
+    ] {
+        let a = find(first);
+        let b = find(second);
+        assert_eq!(
+            a.span, b.span,
+            "multi-name members share the declaration span"
+        );
+    }
+}
+
+/// An interface's bodyless method keeps a sensible signature: `header()` drops
+/// the trailing `;` when there is no body.
+#[test]
+fn interface_bodyless_method_signature_drops_the_semicolon() {
+    let (_source, extracted) = extract_file("Interface.php");
+
+    let name = extracted
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == "App\\Contracts\\Named::name")
+        .expect("interface method name");
+    assert_eq!(name.kind, SymbolKind::Method);
+    assert_eq!(
+        name.signature.as_deref(),
+        Some("public function name(): string")
+    );
+}
+
+/// Members of the anonymous class inside a new fixture are not extracted as
+/// addressable symbols (spec §10.1).
+#[test]
+fn anonymous_class_members_in_authored_fixture_are_not_extracted() {
+    let (_source, extracted) = extract_file("Members.php");
+
+    assert!(
+        !extracted
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "hidden"),
+        "the anonymous class method must not leak: {:?}",
+        extracted
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<Vec<_>>()
+    );
+}

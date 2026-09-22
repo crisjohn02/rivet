@@ -93,18 +93,21 @@ pub fn is_language_compiled(name: &str) -> bool {
 /// reused without reparsing and its stale facts would deserialize with serde
 /// defaults. T21a widened `new_bindings` again to include recognized rebinding
 /// forms, so a variable rebound by `foreach`, destructuring, `catch`, and the
-/// like is no longer treated as singly assigned. A change to any persisted fact
-/// shape or to the meaning of an existing field must bump this integer so the
-/// next refresh reparses every enabled-language file. The current schema is 2
-/// (post-T21a); it was introduced by T22 together with this component.
+/// like is no longer treated as singly assigned. T25 adds enum cases and
+/// promoted constructor properties as `const`/`property` symbols, so an index
+/// built by the previous binary is missing addressable declarations; the
+/// integer is bumped to force a reparse. A change to any persisted fact shape
+/// or to the meaning of an existing field must bump this integer so the next
+/// refresh reparses every enabled-language file. The current schema is 3
+/// (post-T25); it was introduced by T22 together with this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=2";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=3";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=2";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=3";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=2";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=3";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

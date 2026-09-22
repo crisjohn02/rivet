@@ -334,7 +334,7 @@ fn no_reparse_hook_proves_equal_content_is_not_reparsed() {
     );
     let value = parse_success(&second);
     assert_eq!(value["updated"], 0);
-    assert_eq!(value["unchanged"], 5);
+    assert_eq!(value["unchanged"], 10);
     let second_lines: Vec<String> = fs::read_to_string(&log)
         .unwrap_or_default()
         .lines()

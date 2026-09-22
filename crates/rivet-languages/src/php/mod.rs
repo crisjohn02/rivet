@@ -5,8 +5,9 @@
 //! [`ExtractedSymbol`] records with native qualified names
 //! (`App\Services\SurveyService::launch`). T14 fills each record's collapsed
 //! `signature` and attached `doc_comment`; T17 adds owned `ExtractedUse` and
-//! `ExtractedImport` records with lexical receiver hints. Cross-file
-//! resolution is a later task.
+//! `ExtractedImport` records with lexical receiver hints; T25 adds enum cases
+//! and promoted constructor properties (both mapped onto existing contract
+//! kinds). Cross-file resolution is a later task.
 //!
 //! Parse policy (docs/ARCHITECTURE.md "Parse and coverage policy"): a file
 //! whose Tree-sitter tree contains any ERROR or MISSING node publishes no
@@ -242,6 +243,20 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
             // declaration span, per the adapter's "whole declaration node"
             // span rule.
             SymbolKind::Property => {
+                // A promoted constructor property is one property declared in
+                // a parameter list, so it has no `property_element` children.
+                if declaration.kind() == "property_promotion_parameter" {
+                    if let Some(name) = name_node {
+                        raw.push(member(
+                            kind,
+                            &header,
+                            node_text(name, source),
+                            declaration.id(),
+                            enclosing_container(declaration),
+                        ));
+                    }
+                    continue;
+                }
                 for element in declaration.children(&mut child_cursor) {
                     if element.kind() != "property_element" {
                         continue;
@@ -259,6 +274,20 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
                 }
             }
             SymbolKind::Const => {
+                // An enum case is declared alone (`case Hearts;`), not through
+                // a `const_element` list.
+                if declaration.kind() == "enum_case" {
+                    if let Some(name) = name_node {
+                        raw.push(member(
+                            kind,
+                            &header,
+                            node_text(name, source),
+                            declaration.id(),
+                            enclosing_container(declaration),
+                        ));
+                    }
+                    continue;
+                }
                 for element in declaration.children(&mut child_cursor) {
                     if element.kind() != "const_element" {
                         continue;
@@ -449,7 +478,8 @@ fn in_anonymous_container(node: Node<'_>) -> bool {
 /// PHP class, interface, trait, enum, namespace, function, and method names
 /// are case-insensitive, so their lookup names are lowercased. Property and
 /// constant names are case-sensitive and keep their exact spelling (a PHP
-/// property keeps its leading `$`).
+/// property keeps its leading `$`). Enum cases are recorded as constants and
+/// are case-sensitive too, matching PHP.
 pub fn lookup_name(name: &str, kind: SymbolKind) -> String {
     match kind {
         SymbolKind::Property | SymbolKind::Const => name.to_string(),

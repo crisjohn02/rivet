@@ -26,6 +26,13 @@
 (enum_declaration
   name: (name) @symbol.name) @symbol.enum
 
+; Enum cases have no dedicated value in the contract's closed `kind` enum, and
+; docs/ADDING-A-LANGUAGE.md "Named definitions" names constants but not enum
+; cases. A PHP enum case is addressable and case-sensitive exactly like a class
+; constant (`Suit::Hearts`), so it is recorded as `const` (T25).
+(enum_case
+  name: (name) @symbol.name) @symbol.const
+
 (function_definition
   name: (name) @symbol.name) @symbol.function
 
@@ -33,5 +40,11 @@
   name: (name) @symbol.name) @symbol.method
 
 (property_declaration) @symbol.property
+
+; A promoted constructor property is a real property declared in a parameter
+; list. docs/ADDING-A-LANGUAGE.md "Named definitions" includes properties, so
+; it is recorded as one (T25). Its name is a `variable_name`, keeping the `$`.
+(property_promotion_parameter
+  name: (variable_name) @symbol.name) @symbol.property
 
 (const_declaration) @symbol.const
