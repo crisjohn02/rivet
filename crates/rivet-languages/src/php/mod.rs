@@ -23,7 +23,7 @@ use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 mod namespaces;
 mod signature;
 mod uses;
-pub use signature::signature_summary;
+pub use signature::{order_members, signature_summary};
 
 /// The compiled-once symbol query for the pinned PHP grammar.
 static SYMBOLS_QUERY: OnceLock<Query> = OnceLock::new();

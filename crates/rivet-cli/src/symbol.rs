@@ -314,15 +314,28 @@ pub(crate) fn symbol_object(store: &Store, row: &SymbolRow) -> Result<Value, riv
 /// column, or a span outside the stored bytes is a failure rather than a null
 /// or empty result that would look complete.
 fn source_slice(store: &Store, row: &SymbolRow) -> Result<String, CliError> {
-    let bytes = store
-        .get_file(&row.file)
+    let bytes = stored_source(store, &row.file)?;
+    span_text(&bytes, row)
+}
+
+/// The exact stored source bytes of `file` from the snapshot.
+///
+/// Shared with the `context` full form (T28) so both read the same bytes and
+/// fail the same way when they are missing.
+pub(crate) fn stored_source(store: &Store, file: &str) -> Result<Vec<u8>, CliError> {
+    store
+        .get_file(file)
         .map_err(index::store_error)?
         .and_then(|file| file.source)
         .ok_or_else(|| {
             index::store_error(rivet_store::Error::Configuration {
-                detail: format!("no stored source bytes for {}", row.file),
+                detail: format!("no stored source bytes for {file}"),
             })
-        })?;
+        })
+}
+
+/// `row`'s declaration span sliced out of its file's stored `bytes`.
+pub(crate) fn span_text(bytes: &[u8], row: &SymbolRow) -> Result<String, CliError> {
     let slice = bytes
         .get(row.start_byte as usize..row.end_byte as usize)
         .ok_or_else(|| {
