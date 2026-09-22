@@ -20,5 +20,6 @@ pub mod init;
 pub mod references;
 pub mod refresh;
 pub mod refs;
+pub mod snippet;
 pub mod symbol;
 pub mod transport;

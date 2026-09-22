@@ -1,4 +1,5 @@
-//! Integration tests for `rivet init` (T33a).
+//! Integration tests for `rivet init` (T33a). Snippet installation
+//! (`--write-snippet`, T33b) is covered in `snippet_json.rs`.
 //!
 //! These drive the built binary and assert exact JSON bytes and exact file
 //! contents: root selection (spec §25), the default config and its
@@ -593,34 +594,22 @@ fn index_after_init_matches_index_without_init() {
 }
 
 #[test]
-fn snippet_flags_fail_before_filesystem_work() {
+fn snippet_file_without_write_snippet_fails_before_filesystem_work() {
     let temp = git_repo("snippet-flags");
     let root = temp.path();
     let before = tree(root);
 
-    let output = run(root, &["init", "--snippet-file", "AGENTS.md", "--json"]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(value["error"], "invalid_arguments");
-
-    for args in [
-        &["init", "--write-snippet", "--json"][..],
-        &[
-            "init",
-            "--write-snippet",
-            "--snippet-file",
-            "CLAUDE.md",
-            "--json",
-        ],
-    ] {
-        let output = run(root, args);
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
+    for name in ["AGENTS.md", "CLAUDE.md", "README.md"] {
+        let output = run(root, &["init", "--snippet-file", name, "--json"]);
+        assert_eq!(output.status.code(), Some(2), "{name}");
         assert!(output.stdout.is_empty());
         let value: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(value["error"], "general");
+        assert_eq!(value["error"], "invalid_arguments");
         assert!(
-            value["message"].as_str().unwrap().contains("T33b"),
+            value["message"]
+                .as_str()
+                .unwrap()
+                .contains("requires `--write-snippet`"),
             "{value}"
         );
     }

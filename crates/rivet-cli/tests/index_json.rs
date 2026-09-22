@@ -163,29 +163,64 @@ fn index_json_reports_inventory_and_is_stable() {
     assert!(value.get("elapsed_ms").is_some(), "{value}");
 }
 
+/// Every subcommand is implemented: none is left on a "not implemented"
+/// path. This replaced `unimplemented_command_emits_json_error` once T33b
+/// implemented `snippet`, the last unimplemented command.
+///
+/// The subcommand list is read from `rivet --help`, so a newly added command
+/// fails here until it is listed below. Each one must print `--help` with exit
+/// 0, and a real `--json` invocation of each must succeed with one JSON
+/// object on stdout and an empty stderr.
 #[test]
-fn unimplemented_command_emits_json_error() {
-    // `init` is implemented as of T33a; `snippet` (T33b) is still
-    // unimplemented.
-    let temp = git_repo("unimplemented");
-    let output = run(temp.path(), &["snippet", "--json"]);
+fn every_subcommand_is_wired() {
+    let temp = git_repo("wired");
+    let root = temp.path();
+    write(root, "src/a.php", b"<?php\nfunction f() {}\nf();\n");
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty(), "stdout must stay empty");
-    let value: Value = serde_json::from_slice(&output.stderr).expect("stderr is JSON");
-    assert_eq!(value["schema_version"], 1);
-    assert_eq!(value["error"], "general");
-    assert!(
-        value["message"]
-            .as_str()
-            .unwrap()
-            .contains("rivet snippet is not implemented yet (expected in T33"),
-        "{value}"
-    );
+    let help = run(root, &["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    let help = String::from_utf8(help.stdout).expect("help is UTF-8");
+    let listed: Vec<&str> = help
+        .split("Commands:\n")
+        .nth(1)
+        .expect("help lists commands")
+        .lines()
+        .take_while(|line| line.starts_with("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .collect();
+
+    let invocations: [(&str, &[&str]); 6] = [
+        ("init", &["init", "--json"]),
+        ("index", &["index", "--json"]),
+        ("symbol", &["symbol", "f", "--json"]),
+        ("refs", &["refs", "f", "--json"]),
+        ("context", &["context", "f", "--json"]),
+        ("snippet", &["snippet", "--json"]),
+    ];
+    let expected: Vec<&str> = invocations.iter().map(|(name, _)| *name).collect();
     assert_eq!(
-        value["hint"],
-        "Only `rivet init`, `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build."
+        listed, expected,
+        "every listed subcommand needs a case here"
     );
+
+    for (name, args) in invocations {
+        let output = run(root, &[name, "--help"]);
+        assert_eq!(output.status.code(), Some(0), "{name} --help");
+        assert!(!output.stdout.is_empty(), "{name} --help prints usage");
+
+        let output = run(root, args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty(), "{args:?} stderr");
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+        assert_eq!(value["schema_version"], 1, "{args:?}");
+        assert!(value.get("error").is_none(), "{args:?}: {value}");
+    }
 }
 
 #[test]
