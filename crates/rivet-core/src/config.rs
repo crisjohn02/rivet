@@ -291,13 +291,15 @@ impl Config {
     /// A stable, hash-free canonical serialization of the indexing-affecting
     /// fields (`[index]` and `[languages]`) for cache invalidation.
     ///
-    /// Keys are sorted, list values are sorted and escaped, so TOML key or list
-    /// reordering does not change the fingerprint while any semantic change
-    /// does. Context/output settings are excluded because they do not affect
-    /// the stored index.
+    /// Keys are sorted and values are escaped, so TOML key reordering does not
+    /// change the fingerprint while any semantic change does.
+    /// `languages.enabled` is a set, so its list is sorted;
+    /// `index.exclude` is order-sensitive (gitignore-style negations depend on
+    /// position), so its declared order is preserved. Context/output settings
+    /// are excluded because they do not affect the stored index.
     pub fn fingerprint(&self) -> String {
         let lines = [
-            format!("index.exclude={}", format_list(&self.index.exclude)),
+            format!("index.exclude={}", format_list_ordered(&self.index.exclude)),
             format!("index.freshness={}", self.index.freshness.as_str()),
             format!("index.max_file_size_kb={}", self.index.max_file_size_kb),
             format!("index.respect_gitignore={}", self.index.respect_gitignore),
@@ -319,6 +321,22 @@ fn format_list(values: &[String]) -> String {
 
     let mut out = String::from("[");
     for (index, value) in sorted.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        push_quoted(&mut out, value);
+    }
+    out.push(']');
+    out
+}
+
+/// Formats a list of strings as an escaped canonical array in declared order.
+///
+/// Used for order-sensitive gitignore-style globs, where the position of a
+/// negation pattern changes its meaning.
+fn format_list_ordered(values: &[String]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -670,16 +688,31 @@ mod tests {
 
     #[test]
     fn fingerprint_ignores_toml_key_and_list_order() {
+        // TOML key reordering is ignored.
         let first = Config::from_toml(
             "[index]\nfreshness = \"metadata\"\nrespect_gitignore = false\nexclude = [\"b/**\", \"a/**\"]\nmax_file_size_kb = 5\n[languages]\nenabled = [\"typescript\", \"php\"]\n",
         )
         .unwrap();
-        let second = Config::from_toml(
-            "[languages]\nenabled = [\"php\", \"typescript\"]\n[index]\nexclude = [\"a/**\", \"b/**\"]\nmax_file_size_kb = 5\nrespect_gitignore = false\nfreshness = \"metadata\"\n",
+        let reordered_keys = Config::from_toml(
+            "[languages]\nenabled = [\"typescript\", \"php\"]\n[index]\nexclude = [\"b/**\", \"a/**\"]\nmax_file_size_kb = 5\nrespect_gitignore = false\nfreshness = \"metadata\"\n",
         )
         .unwrap();
+        assert_eq!(first.fingerprint(), reordered_keys.fingerprint());
 
-        assert_eq!(first.fingerprint(), second.fingerprint());
+        // `languages.enabled` is a set: reordering its list is ignored.
+        let reordered_languages = Config::from_toml(
+            "[index]\nfreshness = \"metadata\"\nrespect_gitignore = false\nexclude = [\"b/**\", \"a/**\"]\nmax_file_size_kb = 5\n[languages]\nenabled = [\"php\", \"typescript\"]\n",
+        )
+        .unwrap();
+        assert_eq!(first.fingerprint(), reordered_languages.fingerprint());
+
+        // `index.exclude` is order-sensitive: gitignore-style negations depend on
+        // position, so reordering the list changes the fingerprint.
+        let reordered_exclude = Config::from_toml(
+            "[index]\nfreshness = \"metadata\"\nrespect_gitignore = false\nexclude = [\"a/**\", \"b/**\"]\nmax_file_size_kb = 5\n[languages]\nenabled = [\"typescript\", \"php\"]\n",
+        )
+        .unwrap();
+        assert_ne!(first.fingerprint(), reordered_exclude.fingerprint());
     }
 
     #[test]

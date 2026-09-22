@@ -13,6 +13,7 @@ pub mod root;
 pub mod span;
 #[cfg(test)]
 mod test_support;
+pub mod walk;
 
 pub use config::{
     Collapse, Config, ConfigError, ContextConfig, Freshness, IndexConfig, LanguagesConfig,
@@ -22,3 +23,4 @@ pub use id::{SymbolId, SymbolIdError, assign_ordinals};
 pub use kinds::{KindParseError, RefKind, Resolution, SymbolKind};
 pub use root::{RootError, RootInfo, discover_root};
 pub use span::{LineCol, LineIndex, Span, SpanError};
+pub use walk::{FileEntry, SkippedPath, WalkError, WalkResult, walk_eligible};
