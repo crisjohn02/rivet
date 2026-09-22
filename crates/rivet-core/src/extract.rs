@@ -282,7 +282,8 @@ pub struct CallArg {
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
-/// `new_bindings`, `call_args`, `unanalysable`, and `declares`.
+/// `new_bindings`, `call_args`, `unanalysable`, `namespace_unattributed`, and
+/// `declares`.
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -306,6 +307,13 @@ pub struct ScopeFacts {
     /// The `new`-receiver rule records no binding anywhere in such a scope.
     #[serde(default)]
     pub unanalysable: bool,
+    /// True when the adapter cannot attribute this scope to exactly one
+    /// namespace block (AF1): for PHP, code outside every namespace block of a
+    /// namespaced file, or any code in a file that mixes namespace forms. The
+    /// resolver records no binding for a use whose scope chain reaches such a
+    /// scope, because every lexical lookup depends on the namespace.
+    #[serde(default)]
+    pub namespace_unattributed: bool,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,
 }

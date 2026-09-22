@@ -95,6 +95,11 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **6** — AF1: each namespace block of a PHP file gets its own top-level
+///   scope (`ns{block}:file`) instead of sharing `top:file`, top-level closures
+///   chain to it, a global `namespace { }` block's declarations lost their
+///   inherited namespace prefix, and `ScopeFacts` gained
+///   `namespace_unattributed`.
 /// - **5** — the merge of T21b into T25a. T25/T25a had reached 4 while T21b
 ///   independently reached 3, so neither value described the union and the
 ///   merge took a new integer.
@@ -110,13 +115,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=5";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=6";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=5";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=6";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=5";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=6";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

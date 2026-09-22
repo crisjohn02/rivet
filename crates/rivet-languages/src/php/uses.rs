@@ -30,8 +30,17 @@ use rivet_core::extract::{
 use rivet_core::{ExtractedSymbol, RefKind, Span, SymbolKind};
 use tree_sitter::Node;
 
-/// The deterministic key of a file's top-level scope.
+use super::namespaces::{Attribution, NamespaceLayout};
+
+/// The deterministic key of the top-level scope of a file with no namespace.
+///
+/// A namespaced file has one top-level scope per namespace block instead,
+/// keyed `ns{block}:file` (AF1), plus `orphan:file` for any position that
+/// cannot be attributed to exactly one block.
 pub const FILE_SCOPE_KEY: &str = "top:file";
+
+/// The scope-key prefix of positions no namespace block owns.
+const ORPHAN_PREFIX: &str = "orphan";
 
 /// The most recent binding of one variable within a function body.
 enum Binding {
@@ -47,6 +56,8 @@ enum Binding {
 struct Walker<'a> {
     source: &'a [u8],
     symbols: &'a [ExtractedSymbol],
+    /// Which namespace block owns each byte (AF1).
+    layout: &'a NamespaceLayout,
     /// Class-like node id -> property name (no `$`) -> written type spelling.
     property_types: HashMap<usize, HashMap<String, String>>,
     uses: Vec<ExtractedUse>,
@@ -72,10 +83,12 @@ pub fn extract_uses(
     source: &[u8],
     root: Node<'_>,
     symbols: &[ExtractedSymbol],
+    layout: &NamespaceLayout,
 ) -> (Vec<ExtractedUse>, Vec<ExtractedImport>, Vec<ExtractedScope>) {
     let mut walker = Walker {
         source,
         symbols,
+        layout,
         property_types: collect_property_types(root, source),
         uses: Vec::new(),
         imports: Vec::new(),
@@ -698,7 +711,7 @@ impl Walker<'_> {
             return;
         };
         let containing = containing_symbol(self.symbols, span.start_byte(), span.end_byte());
-        let scope_key = self.scope_key(containing);
+        let scope_key = self.scope_key(containing, span.start_byte());
         self.ensure_scope(&scope_key);
         self.uses.push(ExtractedUse {
             spelling: self.text(node),
@@ -711,10 +724,16 @@ impl Walker<'_> {
         });
     }
 
-    fn scope_key(&self, containing: Option<usize>) -> String {
+    /// The scope key for a position at `byte` whose innermost named container
+    /// is `containing`.
+    ///
+    /// A position with no named container belongs to the namespace block that
+    /// owns `byte`, so a top-level closure's key carries that block's prefix
+    /// and chains to its imports and namespace (AF1).
+    fn scope_key(&self, containing: Option<usize>, byte: u32) -> String {
         let container = match containing {
             Some(index) => index.to_string(),
-            None => "top".to_string(),
+            None => block_prefix(self.layout, byte),
         };
         match self.body_stack.last().copied().flatten() {
             Some(ordinal) => format!("{container}:{ordinal}"),
@@ -833,7 +852,7 @@ impl Walker<'_> {
             node.start_byte() as u32,
             node.end_byte() as u32,
         );
-        self.scope_key(containing)
+        self.scope_key(containing, node.start_byte() as u32)
     }
 
     /// Ensures a scope entry exists so every scope that owns a use is persisted.
@@ -853,13 +872,29 @@ impl Walker<'_> {
     /// Freezes the walker's scope map into owned, parent-linked scopes.
     fn finish_scopes(&mut self) -> Vec<ExtractedScope> {
         let mut scope_facts = std::mem::take(&mut self.scope_facts);
-        // The file scope always exists so imports and top-level declarations
-        // have a home even in a file with no uses.
-        scope_facts.entry(FILE_SCOPE_KEY.to_string()).or_default();
+        // Every top-level scope always exists so imports and top-level
+        // declarations have a home even in a file with no uses: the file scope
+        // for a file with no namespace, otherwise one scope per namespace
+        // block. A namespaced file in which no position can be attributed has
+        // only the orphan scope.
+        if !self.layout.is_namespaced() {
+            scope_facts.entry(FILE_SCOPE_KEY.to_string()).or_default();
+        } else if self.layout.block_count() == 0 {
+            scope_facts
+                .entry(format!("{ORPHAN_PREFIX}:file"))
+                .or_default();
+        } else {
+            for block in 0..self.layout.block_count() {
+                scope_facts.entry(format!("ns{block}:file")).or_default();
+            }
+        }
         for (index, symbol) in self.symbols.iter().enumerate() {
             let scope_key = match symbol.parent_index {
                 Some(parent) => format!("{parent}:file"),
-                None => FILE_SCOPE_KEY.to_string(),
+                None => format!(
+                    "{}:file",
+                    block_prefix(self.layout, symbol.span.start_byte())
+                ),
             };
             scope_facts
                 .entry(scope_key)
@@ -867,10 +902,18 @@ impl Walker<'_> {
                 .declares
                 .push(index);
         }
+        share_top_level_variables(&mut scope_facts);
+        // Every lookup depends on the namespace, so a scope no block owns is
+        // flagged and the resolver records no binding under it.
+        for (scope_key, facts) in scope_facts.iter_mut() {
+            if key_prefix(scope_key) == ORPHAN_PREFIX {
+                facts.namespace_unattributed = true;
+            }
+        }
         scope_facts
             .into_iter()
             .map(|(scope_key, facts)| {
-                let parent_scope_key = parent_scope_key(&scope_key, self.symbols);
+                let parent_scope_key = parent_scope_key(&scope_key, self.symbols, self.layout);
                 ExtractedScope {
                     scope_key,
                     parent_scope_key,
@@ -994,26 +1037,112 @@ fn is_named_container(kind: SymbolKind) -> bool {
     )
 }
 
+/// The scope-key prefix for a position with no named container (AF1).
+///
+/// `top` in a file with no namespace, `ns{block}` inside a namespace block,
+/// and `orphan` where no single block owns the position.
+fn block_prefix(layout: &NamespaceLayout, byte: u32) -> String {
+    match layout.attribution(byte) {
+        Attribution::NoNamespace => "top".to_string(),
+        Attribution::Block(block) => format!("ns{block}"),
+        Attribution::Unattributed => ORPHAN_PREFIX.to_string(),
+    }
+}
+
+/// The container part of a scope key, before the first `:`.
+fn key_prefix(scope_key: &str) -> &str {
+    scope_key.split(':').next().unwrap_or(scope_key)
+}
+
+/// Whether a scope-key container names a top-level (block) prefix rather than
+/// a symbol index.
+fn is_block_prefix(container: &str) -> bool {
+    container == "top"
+        || container == ORPHAN_PREFIX
+        || container
+            .strip_prefix("ns")
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Makes top-level variable facts suppress across namespace blocks (AF1).
+///
+/// PHP namespaces do not scope variables: top-level code in every block of a
+/// file shares one set of globals. Each block's top-level scope keeps its own
+/// facts, so a `new` receiver and its class spelling resolve in the block they
+/// appear in, and gains every other block's top-level assignments and
+/// call arguments as non-direct rebinding entries plus its `unanalysable`
+/// flag. A variable assigned in more than one block therefore never binds, as
+/// it did not before blocks had separate scopes.
+fn share_top_level_variables(scope_facts: &mut BTreeMap<String, ScopeFacts>) {
+    let roots: Vec<String> = scope_facts
+        .keys()
+        .filter(|key| key.ends_with(":file") && is_block_prefix(key_prefix(key)))
+        .cloned()
+        .collect();
+    if roots.len() < 2 {
+        return;
+    }
+    let mut shared: BTreeMap<String, (Vec<NewBinding>, bool)> = BTreeMap::new();
+    for root in &roots {
+        let mut rebindings: Vec<NewBinding> = Vec::new();
+        let mut unanalysable = false;
+        for other in roots.iter().filter(|other| *other != root) {
+            let facts = &scope_facts[other];
+            unanalysable |= facts.unanalysable;
+            for binding in &facts.new_bindings {
+                rebindings.push(NewBinding {
+                    variable: binding.variable.clone(),
+                    class_spelling: String::new(),
+                    span: binding.span,
+                    direct_new: false,
+                    block: binding.block,
+                });
+            }
+            for arg in &facts.call_args {
+                rebindings.push(NewBinding {
+                    variable: arg.variable.clone(),
+                    class_spelling: String::new(),
+                    span: arg.span,
+                    direct_new: false,
+                    block: None,
+                });
+            }
+        }
+        shared.insert(root.clone(), (rebindings, unanalysable));
+    }
+    for (root, (rebindings, unanalysable)) in shared {
+        let facts = scope_facts.entry(root).or_default();
+        facts.new_bindings.extend(rebindings);
+        facts.unanalysable |= unanalysable;
+    }
+}
+
 /// The enclosing scope key of `scope_key`.
 ///
-/// A scope key is `top:file`, `{symbol_index}:file` (a class-like body or an
-/// otherwise unscoped position), or `{symbol_index}:{body_ordinal}` (a function
-/// body). The parent of a symbol-owned scope is the scope that declares that
-/// symbol: the file scope for a top-level symbol, or the parent's `:file` scope
-/// for a member. The file scope has no parent.
-fn parent_scope_key(scope_key: &str, symbols: &[ExtractedSymbol]) -> Option<String> {
-    if scope_key == FILE_SCOPE_KEY {
-        return None;
-    }
-    let container = scope_key.split(':').next()?;
-    if container == "top" {
-        return None;
+/// A scope key is `{prefix}:file` (a top-level scope), `{prefix}:{ordinal}` (a
+/// top-level closure or arrow function body), `{symbol_index}:file` (a
+/// class-like body or an otherwise unscoped position), or
+/// `{symbol_index}:{body_ordinal}` (a function body). `prefix` is `top`,
+/// `ns{block}`, or `orphan` (see [`block_prefix`]).
+///
+/// The parent of a top-level closure is its block's top-level scope. The
+/// parent of a symbol-owned scope is the scope that declares that symbol: the
+/// top-level scope of its namespace block for a top-level symbol, or the
+/// parent's `:file` scope for a member. Top-level scopes have no parent.
+fn parent_scope_key(
+    scope_key: &str,
+    symbols: &[ExtractedSymbol],
+    layout: &NamespaceLayout,
+) -> Option<String> {
+    let (container, rest) = scope_key.split_once(':')?;
+    if is_block_prefix(container) {
+        return (rest != "file").then(|| format!("{container}:file"));
     }
     let index: usize = container.parse().ok()?;
     let symbol = symbols.get(index)?;
     Some(match symbol.parent_index {
         Some(parent) => format!("{parent}:file"),
-        None => FILE_SCOPE_KEY.to_string(),
+        None => format!("{}:file", block_prefix(layout, symbol.span.start_byte())),
     })
 }
 
@@ -1239,7 +1368,7 @@ mod tests {
     use super::FILE_SCOPE_KEY;
     use crate::{LanguageId, grammar};
     use rivet_core::ExtractedFile;
-    use rivet_core::extract::{CallArgKind, CallReceiver, NewBinding, ScopeFacts};
+    use rivet_core::extract::{CallArgKind, CallReceiver, ExtractedScope, NewBinding, ScopeFacts};
     use tree_sitter::Parser;
 
     fn extract(source: &str) -> ExtractedFile {
@@ -1472,5 +1601,150 @@ mod tests {
         assert!(file.diagnostics.is_empty());
         assert!(file_scope(&file).call_args.is_empty());
         assert_eq!(binding_count(&file, "$s"), 2, "T21a records the rebinding");
+    }
+
+    /// The scope with `key`, which must exist.
+    fn scope<'a>(file: &'a ExtractedFile, key: &str) -> &'a ExtractedScope {
+        file.scopes
+            .iter()
+            .find(|scope| scope.scope_key == key)
+            .unwrap_or_else(|| panic!("missing scope {key}: {:?}", file.scopes))
+    }
+
+    /// The scope key of the `nth` use spelled `spelling`, in source order.
+    fn use_scope(file: &ExtractedFile, spelling: &str, nth: usize) -> String {
+        file.uses
+            .iter()
+            .filter(|use_| use_.spelling == spelling)
+            .nth(nth)
+            .unwrap_or_else(|| panic!("missing use #{nth} of {spelling}"))
+            .scope_key
+            .clone()
+    }
+
+    /// The import aliases recorded in the scope with `key`.
+    fn aliases(file: &ExtractedFile, key: &str) -> Vec<String> {
+        scope(file, key)
+            .facts
+            .imports
+            .iter()
+            .map(|import| import.alias.clone())
+            .collect()
+    }
+
+    /// AF1 finding 1: a top-level closure chains to its namespace block, which
+    /// holds the block's imports and its `module` declaration.
+    #[test]
+    fn top_level_closure_chains_to_its_namespace_block() {
+        let file = extract(
+            "<?php\nnamespace App;\nuse App\\Lib\\Tool;\n$f = function () { new Tool(); };\n$g = fn () => new Tool();\n",
+        );
+        assert!(file.diagnostics.is_empty());
+        assert_eq!(use_scope(&file, "Tool", 1), "ns0:0");
+        assert_eq!(use_scope(&file, "Tool", 2), "ns0:1");
+        assert_eq!(
+            scope(&file, "ns0:0").parent_scope_key.as_deref(),
+            Some("ns0:file")
+        );
+        assert_eq!(
+            scope(&file, "ns0:1").parent_scope_key.as_deref(),
+            Some("ns0:file")
+        );
+        let block = scope(&file, "ns0:file");
+        assert_eq!(block.parent_scope_key, None);
+        assert_eq!(aliases(&file, "ns0:file"), ["Tool"]);
+        let module = block.facts.declares[0];
+        assert_eq!(file.symbols[module].qualified_name, "App");
+        assert!(
+            !file
+                .scopes
+                .iter()
+                .any(|scope| scope.scope_key == FILE_SCOPE_KEY),
+            "a namespaced file has no `top:file` scope"
+        );
+    }
+
+    /// A file with no namespace keeps `top:file`, and a top-level closure now
+    /// chains to it.
+    #[test]
+    fn closure_in_a_file_without_namespace_chains_to_the_file_scope() {
+        let file = extract("<?php\nuse Lib\\Tool;\n$f = function () { new Tool(); };\n");
+        assert_eq!(use_scope(&file, "Tool", 1), "top:0");
+        assert_eq!(
+            scope(&file, "top:0").parent_scope_key.as_deref(),
+            Some(FILE_SCOPE_KEY)
+        );
+        assert_eq!(aliases(&file, FILE_SCOPE_KEY), ["Tool"]);
+    }
+
+    /// AF1 finding 2: each block, unbraced or braced, owns its own imports and
+    /// declarations, and a member's scope chains to its own block.
+    #[test]
+    fn each_namespace_block_owns_its_imports_and_declarations() {
+        for source in [
+            "<?php\nnamespace One;\nuse Lib\\A;\nclass C {}\nnamespace Two;\nuse Lib\\B;\nclass D { public function m() { $f = function () { new B(); }; } }\n",
+            "<?php\nnamespace One {\nuse Lib\\A;\nclass C {}\n}\nnamespace Two {\nuse Lib\\B;\nclass D { public function m() { $f = function () { new B(); }; } }\n}\n",
+        ] {
+            let file = extract(source);
+            assert!(file.diagnostics.is_empty(), "{source}");
+            assert_eq!(aliases(&file, "ns0:file"), ["A"], "{source}");
+            assert_eq!(aliases(&file, "ns1:file"), ["B"], "{source}");
+            let declared = |key: &str| -> Vec<String> {
+                scope(&file, key)
+                    .facts
+                    .declares
+                    .iter()
+                    .map(|index| file.symbols[*index].qualified_name.clone())
+                    .collect()
+            };
+            assert_eq!(declared("ns0:file"), ["One", "One\\C"], "{source}");
+            assert_eq!(declared("ns1:file"), ["Two", "Two\\D"], "{source}");
+            // The closure in `D::m` chains `m` -> `D` -> block `Two`.
+            let closure = use_scope(&file, "B", 1);
+            let method_scope = scope(&file, &closure)
+                .parent_scope_key
+                .clone()
+                .expect("closure scope has a parent");
+            let class_parent = scope(&file, &method_scope)
+                .parent_scope_key
+                .clone()
+                .expect("class scope has a parent");
+            assert_eq!(class_parent, "ns1:file", "{source}");
+        }
+    }
+
+    /// Positions no namespace block owns are flagged, and nothing else is.
+    #[test]
+    fn unattributed_positions_are_flagged() {
+        let mixed = extract("<?php\nnamespace One;\nnew A();\nnamespace Two { new B(); }\n");
+        assert!(mixed.diagnostics.is_empty());
+        assert_eq!(use_scope(&mixed, "A", 0), "orphan:file");
+        assert_eq!(use_scope(&mixed, "B", 0), "orphan:file");
+        assert_eq!(mixed.scopes.len(), 1, "{:?}", mixed.scopes);
+        assert!(scope(&mixed, "orphan:file").facts.namespace_unattributed);
+
+        let between = extract(
+            "<?php\nnamespace One { new A(); }\n$f = function () { new C(); };\nnamespace Two { new B(); }\n",
+        );
+        assert!(between.diagnostics.is_empty());
+        assert_eq!(use_scope(&between, "A", 0), "ns0:file");
+        assert_eq!(use_scope(&between, "C", 0), "orphan:0");
+        assert_eq!(use_scope(&between, "B", 0), "ns1:file");
+        assert!(scope(&between, "orphan:0").facts.namespace_unattributed);
+        assert!(!scope(&between, "ns0:file").facts.namespace_unattributed);
+        assert!(!scope(&between, "ns1:file").facts.namespace_unattributed);
+    }
+
+    /// A top-level assignment in one block is a rebinding in every other
+    /// block's top-level scope, because PHP namespaces do not scope variables.
+    #[test]
+    fn top_level_assignments_rebind_across_namespace_blocks() {
+        let file = extract("<?php\nnamespace One;\n$s = new A();\nnamespace Two;\n$t = new B();\n");
+        let one = &scope(&file, "ns0:file").facts.new_bindings;
+        let two = &scope(&file, "ns1:file").facts.new_bindings;
+        assert!(one.iter().any(|b| b.variable == "$s" && b.direct_new));
+        assert!(one.iter().any(|b| b.variable == "$t" && !b.direct_new));
+        assert!(two.iter().any(|b| b.variable == "$t" && b.direct_new));
+        assert!(two.iter().any(|b| b.variable == "$s" && !b.direct_new));
     }
 }

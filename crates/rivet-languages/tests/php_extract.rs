@@ -172,6 +172,43 @@ fn file_without_namespace_uses_bare_names() {
     assert_eq!(solo.parent_index, None);
 }
 
+/// The qualified names extracted from `source`, in symbol order.
+fn qualified_names(source: &[u8]) -> Vec<String> {
+    let tree = parse_php(source);
+    let extracted = php::extract(source, &tree);
+    assert!(extracted.diagnostics.is_empty(), "snippet must parse");
+    extracted
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.clone())
+        .collect()
+}
+
+/// AF1: a global `namespace { }` block declares bare global names rather than
+/// inheriting the previous block's namespace.
+#[test]
+fn global_namespace_block_declares_bare_names() {
+    let source =
+        b"<?php\nnamespace A { class X {} }\nnamespace { class Y {} function helper(){} }\n";
+    assert_eq!(qualified_names(source), ["A", "A\\X", "Y", "helper"]);
+
+    // A named block after a global block takes its own name again.
+    let source =
+        b"<?php\nnamespace { class Y {} }\nnamespace B { class Z { public function m() {} } }\n";
+    assert_eq!(qualified_names(source), ["Y", "B", "B\\Z", "B\\Z::m"]);
+}
+
+/// AF1: each unbraced block qualifies its own declarations.
+#[test]
+fn unbraced_namespace_blocks_qualify_their_own_declarations() {
+    let source =
+        b"<?php\nnamespace First;\nclass Widget {}\nnamespace Second;\nfunction caller() {}\n";
+    assert_eq!(
+        qualified_names(source),
+        ["First", "First\\Widget", "Second", "Second\\caller"]
+    );
+}
+
 /// A method's `parent_index` resolves to its owning class record.
 #[test]
 fn method_parent_index_points_at_class() {
