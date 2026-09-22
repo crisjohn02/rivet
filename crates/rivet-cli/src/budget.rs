@@ -27,8 +27,8 @@
 //! [`fit`] is the T28 primitive and knows nothing about overlap.
 //! [`fit_context`] (T29, spec §16.4 items 3 and 4) is the same greedy walk
 //! with overlap suppression, the `--limit` segment cap, and the omission
-//! counts; command wiring and JSON are T30, and [`ContextFit`] is the
-//! intermediate structure it consumes. With no overlapping candidates and a
+//! counts; [`ContextFit`] is the intermediate structure that
+//! [`crate::context_cmd`] (T30) renders as JSON. With no overlapping candidates and a
 //! limit of at least the candidate count, [`fit_context`] emits exactly
 //! [`fit`]'s segments.
 //!

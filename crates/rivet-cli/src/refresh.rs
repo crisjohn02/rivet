@@ -58,6 +58,31 @@ pub(crate) fn open_context() -> Result<Context, CliError> {
     Ok(Context { root, config })
 }
 
+/// Acquires the snapshot a query command answers from: refreshes the working
+/// tree with the requested (or configured) freshness, or, for
+/// `--no-refresh`, opens the committed snapshot directly (keeping the AF5
+/// compatibility check) and never walks.
+///
+/// Shared by `symbol`, `refs`, and `context`. The caller validates every
+/// argument and the configured languages first.
+pub(crate) fn acquire_snapshot(
+    context: &Context,
+    no_refresh: bool,
+    requested_freshness: Option<Freshness>,
+) -> Result<(Store, Report), CliError> {
+    if no_refresh {
+        let store = open_cached_store(&context.root)?;
+        let report = cached_report(&store, false)?;
+        Ok((store, report))
+    } else {
+        let effective_freshness = requested_freshness.unwrap_or(context.config.index.freshness);
+        let mode = crate::index::refresh_mode(effective_freshness);
+        let mut store = open_store(&context.root)?;
+        let report = refresh(&context.root.root, &context.config, &mut store, mode, false)?.report;
+        Ok((store, report))
+    }
+}
+
 /// Opens the cache store, creating `.rivet/` at a Git root when absent.
 ///
 /// A query auto-creates `.rivet/` only at a Git root and never edits

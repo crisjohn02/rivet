@@ -145,10 +145,15 @@ impl CliError {
     ///
     /// `symbol_not_found` and `ambiguous_symbol` are answers about the indexed
     /// declarations: "no match" or "these matches" is true only of that
-    /// snapshot and its coverage. Argument errors, lock/I/O/cache failures,
+    /// snapshot and its coverage. `budget_too_small` is too: its
+    /// `required_tokens` is the estimate of a stored symbol's source, which
+    /// only the snapshot can supply. Argument errors, lock/I/O/cache failures,
     /// and `general` failures are not, even when raised after a refresh.
     pub fn is_index_dependent(&self) -> bool {
-        matches!(self.code, "symbol_not_found" | "ambiguous_symbol")
+        matches!(
+            self.code,
+            "symbol_not_found" | "ambiguous_symbol" | "budget_too_small"
+        )
     }
 
     /// Attaches the acquired snapshot's `index` metadata to an index-dependent
@@ -298,6 +303,14 @@ mod tests {
             keys,
             vec!["total", "truncated", "next_offset", "candidates", "index"]
         );
+
+        // Error 8's `required_tokens` is computed from the snapshot, so it
+        // carries `index` after its required fields.
+        let too_small =
+            CliError::budget_too_small("m", "h", 10, 17).with_snapshot_index(index.clone());
+        let keys: Vec<&str> = too_small.extra.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["budget_tokens", "required_tokens", "index"]);
+        assert_eq!(too_small.extra.get("index"), Some(&index));
 
         for error in [
             CliError::invalid_arguments("m", "h"),

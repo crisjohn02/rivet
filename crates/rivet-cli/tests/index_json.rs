@@ -165,9 +165,10 @@ fn index_json_reports_inventory_and_is_stable() {
 
 #[test]
 fn unimplemented_command_emits_json_error() {
-    // `refs` is implemented as of T23; `context` (T30) is still unimplemented.
+    // `context` is implemented as of T30; `snippet` (T33) is still
+    // unimplemented.
     let temp = git_repo("unimplemented");
-    let output = run(temp.path(), &["context", "Foo", "--json"]);
+    let output = run(temp.path(), &["snippet", "--json"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty(), "stdout must stay empty");
@@ -178,8 +179,12 @@ fn unimplemented_command_emits_json_error() {
         value["message"]
             .as_str()
             .unwrap()
-            .contains("not implemented"),
+            .contains("rivet snippet is not implemented yet (expected in T33"),
         "{value}"
+    );
+    assert_eq!(
+        value["hint"],
+        "Only `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build."
     );
 }
 
