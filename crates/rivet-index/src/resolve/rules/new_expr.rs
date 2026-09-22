@@ -12,16 +12,29 @@
 //!   conditional or loop body never leaks a binding to the outside (or vice
 //!   versa).
 //!
+//! T21b adds two more suppression conditions:
+//!
+//! - the scope contains a construct whose effect on locals cannot be bounded
+//!   (a dynamic variable write, a `$GLOBALS` write, `extract`, `eval`, or a
+//!   dynamic-callee call), so no binding anywhere in it is recorded; and
+//! - the variable is passed to a call that may rebind it. A recorded
+//!   [`CallArg`] is adjudicated against the callee's indexed parameter list, or
+//!   against [`php_builtins`] when no declaration exists; anything that cannot
+//!   be proven by-value suppresses.
+//!
 //! The class spelling resolves through the same alias/fully-qualified/
 //! namespace-relative scope chain as a `type` use, and the named member must be
 //! declared directly on the resolved class. The result is always
 //! [`Resolution::Scoped`]: dynamic dispatch can select another implementation
 //! (spec §11.3), so receiver evidence never upgrades to `exact`.
 
-use rivet_core::Resolution;
-use rivet_core::extract::{NewBinding, UseHint};
-use rivet_store::UseRow;
+use rivet_core::extract::{CallArg, CallArgKind, CallReceiver, NewBinding, UseHint};
+use rivet_core::{Resolution, SymbolKind};
+use rivet_store::{SymbolRow, UseRow};
 
+use crate::resolve::rules::imports::{self, ImportOutcome};
+use crate::resolve::rules::php_builtins;
+use crate::resolve::rules::receivers::enclosing_class;
 use crate::resolve::rules::resolve_class_spelling;
 use crate::resolve::{RuleCtx, ScopeFacts, SymbolId};
 
@@ -40,6 +53,16 @@ pub(crate) fn resolve(
         return None;
     };
     let variable = use_row.receiver.as_deref()?;
+    // (e) T21b: the scope contains a construct whose effect on locals cannot be
+    // bounded, so no binding anywhere in it is trustworthy.
+    if facts.unanalysable {
+        return None;
+    }
+    // (f) T21b: a by-reference argument in this scope rebinds the variable. An
+    // argument to an indexed declaration with a by-value parameter does not.
+    if call_arg_rebinds(ctx, use_row, facts, variable) {
+        return None;
+    }
     let assignment = sole_assignment(facts, variable)?;
     // (c) The one assignment must be a direct `new`, not a call, parameter, or
     // property read.
@@ -77,10 +100,328 @@ fn sole_assignment<'a>(facts: &'a ScopeFacts, variable: &str) -> Option<&'a NewB
     found
 }
 
+/// Whether any recorded call argument rebinds `variable` (T21b).
+///
+/// The check is deliberately order-independent, like the reassignment test: a
+/// variable passed by reference anywhere in the scope is not a trustworthy
+/// receiver.
+fn call_arg_rebinds(
+    ctx: &RuleCtx<'_>,
+    use_row: &UseRow,
+    facts: &ScopeFacts,
+    variable: &str,
+) -> bool {
+    facts
+        .call_args
+        .iter()
+        .filter(|arg| arg.variable == variable)
+        .any(|arg| call_arg_is_rebinding(ctx, use_row, facts, arg))
+}
+
+/// Whether one call argument rebinds the variable it passes.
+fn call_arg_is_rebinding(
+    ctx: &RuleCtx<'_>,
+    use_row: &UseRow,
+    facts: &ScopeFacts,
+    arg: &CallArg,
+) -> bool {
+    match arg.kind {
+        CallArgKind::Function => match resolve_callee_function(ctx, facts, &arg.callee) {
+            CalleeResolution::Indexed(row) => parameter_rebinds(row, arg.position),
+            // No indexed declaration: a known by-reference builtin suppresses
+            // only at its by-reference position; an unknown global function is
+            // never assumed safe.
+            CalleeResolution::Unindexed => match arg.position {
+                Some(position) => builtin_rebinds(&arg.callee, position),
+                None => true,
+            },
+            CalleeResolution::Unknown => true,
+        },
+        CallArgKind::Method | CallArgKind::StaticMethod => {
+            let Some(receiver) = arg.receiver.as_ref() else {
+                return true;
+            };
+            let class = match receiver {
+                CallReceiver::Class { spelling } => resolve_class_spelling(ctx, spelling, facts),
+                CallReceiver::SelfClass => enclosing_class(ctx, use_row),
+                CallReceiver::Unknown => None,
+            };
+            // An unknown receiver or a member the class does not declare leaves
+            // the callee unresolved, so the argument must suppress.
+            let Some(class) = class else {
+                return true;
+            };
+            match ctx.unique_member(&class.id, &arg.callee) {
+                Some(method) => parameter_rebinds(method, arg.position),
+                None => true,
+            }
+        }
+    }
+}
+
+/// The outcome of resolving a function-call callee for argument adjudication.
+enum CalleeResolution<'a> {
+    /// Exactly one indexed function declaration.
+    Indexed(&'a SymbolRow),
+    /// No indexed function; the name may still name a global builtin.
+    Unindexed,
+    /// The name is owned by something unindexed or conflicting, so it is not a
+    /// builtin candidate and cannot be proven by-value.
+    Unknown,
+}
+
+/// Resolves a function callee the way `functions.rs` resolves a call, but
+/// returns the declaration so its parameter list can be read.
+fn resolve_callee_function<'a>(
+    ctx: &RuleCtx<'a>,
+    facts: &ScopeFacts,
+    spelling: &str,
+) -> CalleeResolution<'a> {
+    if let Some(qname) = imports::fully_qualified(spelling) {
+        return match ctx.unique_function(qname) {
+            Some(row) => CalleeResolution::Indexed(row),
+            None => CalleeResolution::Unindexed,
+        };
+    }
+    // A qualified (namespace-relative) name is a project function, never a
+    // builtin, and its unindexed form is unknown.
+    if spelling.contains('\\') {
+        return CalleeResolution::Unindexed;
+    }
+    // A visible `use function` alias owns the name; if its target is unindexed
+    // the call is unresolved rather than the global builtin.
+    match imports::function_via_imports(ctx, facts, spelling) {
+        ImportOutcome::Bound(row) => return CalleeResolution::Indexed(row),
+        ImportOutcome::Blocked => return CalleeResolution::Unknown,
+        ImportOutcome::NoMatch => {}
+    }
+    // A function declared directly in the use's lexical scope chain shadows the
+    // namespace/global fallback. More than one such declaration is ambiguous.
+    let mut declared: Option<&SymbolRow> = None;
+    for id in &facts.declares {
+        let Some(row) = ctx.symbol_by_id(id) else {
+            continue;
+        };
+        if row.kind != SymbolKind::Function || row.lookup_name != spelling.to_lowercase() {
+            continue;
+        }
+        match declared {
+            None => declared = Some(row),
+            Some(existing) if existing.id == row.id => {}
+            Some(_) => return CalleeResolution::Unknown,
+        }
+    }
+    if let Some(row) = declared {
+        return CalleeResolution::Indexed(row);
+    }
+    if let Some(namespace) = facts.namespace.as_deref().filter(|ns| !ns.is_empty())
+        && let Some(row) = ctx.unique_function(&format!("{namespace}\\{spelling}"))
+    {
+        return CalleeResolution::Indexed(row);
+    }
+    match ctx.unique_function(spelling) {
+        Some(row) => CalleeResolution::Indexed(row),
+        None => CalleeResolution::Unindexed,
+    }
+}
+
+/// Whether the parameter at `position` of an indexed declaration rebinds its
+/// argument.
+fn parameter_rebinds(row: &SymbolRow, position: Option<u32>) -> bool {
+    let Some(position) = position else {
+        return true;
+    };
+    // A parameter list that cannot be read or a position with no declared
+    // parameter is not assumed by-value.
+    row.signature
+        .as_deref()
+        .and_then(|signature| parameter_is_by_ref(signature, position as usize))
+        .unwrap_or(true)
+}
+
+/// Whether `callee` is a known by-reference builtin at `position`.
+fn builtin_rebinds(callee: &str, position: u32) -> bool {
+    let name = callee.trim_start_matches('\\');
+    if name.contains('\\') {
+        // A qualified, unindexed function is not a builtin.
+        return true;
+    }
+    match php_builtins::by_ref_positions(name) {
+        Some(positions) => positions.contains(&position),
+        // An unknown global function is never assumed safe.
+        None => true,
+    }
+}
+
+/// Whether the parameter at 0-based `position` in a declaration `signature` is
+/// declared by reference.
+///
+/// `None` means the parameter list cannot be read or the position has no
+/// declared parameter, so the caller must suppress rather than assume by-value.
+fn parameter_is_by_ref(signature: &str, position: usize) -> Option<bool> {
+    // Block comments are removed first so a `)` or `,` inside one cannot close
+    // or split the parameter list. Line comments are left in place: a collapsed
+    // signature has no newlines, so their extent is unknowable and keeping them
+    // can only produce a safe false positive.
+    let cleaned = strip_block_comments(signature.as_bytes());
+    let cleaned = String::from_utf8_lossy(&cleaned);
+    let list = parameter_list(&cleaned)?;
+    let parameters = split_top_level(list);
+    parameters
+        .get(position)
+        .map(|parameter| parameter_has_reference(parameter))
+}
+
+/// The text between a declaration's parameter parentheses.
+///
+/// The `function` keyword anchors the search so a declaration attribute's
+/// parentheses are not mistaken for the parameter list.
+fn parameter_list(signature: &str) -> Option<&str> {
+    let keyword = signature.find("function")?;
+    let open = signature[keyword..].find('(')? + keyword;
+    let bytes = signature.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(quote_byte) = quote {
+            if byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == quote_byte {
+                quote = None;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&signature[open + 1..index]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Splits a parameter list on top-level commas, ignoring commas nested in
+/// brackets or quoted default values.
+fn split_top_level(list: &str) -> Vec<&str> {
+    let bytes = list.as_bytes();
+    let mut parameters = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(quote_byte) = quote {
+            if byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == quote_byte {
+                quote = None;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    parameters.push(&list[start..index]);
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    parameters.push(&list[start..]);
+    if parameters.len() == 1 && parameters[0].trim().is_empty() {
+        return Vec::new();
+    }
+    parameters
+}
+
+/// Whether one parameter text declares its variable by reference.
+///
+/// The reference modifier sits immediately before the variable (`&$x`,
+/// `&...$x`), so it is the only `&` adjacent to the `$`. An intersection type
+/// (`A&B $x`) has its `&` between type names and does not match. Whitespace
+/// between the `&` and `$` is ignored; a string default containing `&$` is a
+/// safe false positive (it suppresses rather than binds).
+fn parameter_has_reference(parameter: &str) -> bool {
+    let compact: Vec<u8> = parameter
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    compact.windows(2).any(|window| window == b"&$")
+        || compact.windows(4).any(|window| window == b"&...")
+}
+
+/// Removes block comments from a signature, preserving quoted strings.
+///
+/// A `)` or `,` inside a block comment would otherwise close or split the
+/// parameter list. Line comments (`//`, `#`) are deliberately left in place: a
+/// collapsed signature has no newlines, so their extent is unknowable, and
+/// keeping them can only produce a safe false positive (a suppression).
+fn strip_block_comments(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut index = 0;
+    let mut quote: Option<u8> = None;
+    while index < value.len() {
+        let byte = value[index];
+        if let Some(quote_byte) = quote {
+            out.push(byte);
+            if byte == b'\\' {
+                if let Some(escaped) = value.get(index + 1) {
+                    out.push(*escaped);
+                    index += 2;
+                    continue;
+                }
+            } else if byte == quote_byte {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => {
+                quote = Some(byte);
+                out.push(byte);
+                index += 1;
+            }
+            b'/' if value.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < value.len() && !(value[index] == b'*' && value[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(value.len());
+            }
+            _ => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use crate::resolve::resolve_all;
-    use rivet_core::extract::{ImportKind, NewBinding, ScopeImport, UseHint};
+    use rivet_core::extract::{
+        CallArg, CallArgKind, CallReceiver, ImportKind, NewBinding, ScopeImport, UseHint,
+    };
     use rivet_core::{ParseStatus, RefKind, Resolution, Span, SymbolKind};
     use rivet_store::{
         BindingRow, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, Store,
@@ -197,6 +538,64 @@ mod tests {
             scope_key: scope_key.to_string(),
             parent_scope_key: parent.map(str::to_string),
             facts_json,
+        }
+    }
+
+    /// A declaration row carrying a signature for parameter parsing.
+    fn with_signature(
+        file: &str,
+        qname: &str,
+        kind: SymbolKind,
+        parent_id: Option<&str>,
+        signature: &str,
+    ) -> SymbolRow {
+        let mut row = symbol(file, qname, kind, parent_id);
+        row.signature = Some(signature.to_string());
+        row
+    }
+
+    /// A scope row carrying T21b call-argument and unanalysable facts.
+    fn scope_t21b(
+        file: &str,
+        scope_key: &str,
+        parent: Option<&str>,
+        new_bindings: &[NewBinding],
+        call_args: &[CallArg],
+        unanalysable: bool,
+        declares: &[&str],
+    ) -> ScopeRow {
+        let facts_json = serde_json::json!({
+            "imports": [],
+            "typed_bindings": [],
+            "new_bindings": new_bindings,
+            "call_args": call_args,
+            "unanalysable": unanalysable,
+            "declares": declares,
+        })
+        .to_string();
+        ScopeRow {
+            file: file.to_string(),
+            scope_key: scope_key.to_string(),
+            parent_scope_key: parent.map(str::to_string),
+            facts_json,
+        }
+    }
+
+    /// One call-argument fact for the tests.
+    fn call_arg(
+        variable: &str,
+        callee: &str,
+        kind: CallArgKind,
+        position: Option<u32>,
+        receiver: Option<CallReceiver>,
+    ) -> CallArg {
+        CallArg {
+            variable: variable.to_string(),
+            callee: callee.to_string(),
+            kind,
+            position,
+            receiver,
+            span: Span::new(50, 52).expect("valid argument span"),
         }
     }
 
@@ -491,5 +890,269 @@ mod tests {
             )],
         );
         assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    /// A direct `new` assignment for `$s` at the use's scope, with optional
+    /// T21b facts, published against the `A\Svc` fixture.
+    fn t21b_store(
+        symbols: Vec<SymbolRow>,
+        call_args: &[CallArg],
+        unanalysable: bool,
+        declares: &[&str],
+    ) -> Store {
+        seed(
+            symbols,
+            vec![new_use(
+                "C.php", "go", "$s", "top:file", 100, "\\A\\Svc", None,
+            )],
+            vec![scope_t21b(
+                "C.php",
+                "top:file",
+                None,
+                &[assignment("$s", "\\A\\Svc", true, None, (10, 12))],
+                call_args,
+                unanalysable,
+                declares,
+            )],
+        )
+    }
+
+    #[test]
+    fn indexed_by_reference_function_parameter_records_nothing() {
+        let takes_ref = with_signature(
+            "F.php",
+            "takesRef",
+            SymbolKind::Function,
+            None,
+            "function takesRef(&$x): void",
+        );
+        let store = t21b_store(
+            {
+                let mut symbols = svc_symbols();
+                symbols.push(takes_ref.clone());
+                symbols
+            },
+            &[call_arg(
+                "$s",
+                "takesRef",
+                CallArgKind::Function,
+                Some(0),
+                None,
+            )],
+            false,
+            &[&takes_ref.id],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn indexed_by_value_function_parameter_keeps_the_binding() {
+        let takes_value = with_signature(
+            "F.php",
+            "takesValue",
+            SymbolKind::Function,
+            None,
+            "function takesValue($x): void",
+        );
+        let store = t21b_store(
+            {
+                let mut symbols = svc_symbols();
+                symbols.push(takes_value.clone());
+                symbols
+            },
+            &[call_arg(
+                "$s",
+                "takesValue",
+                CallArgKind::Function,
+                Some(0),
+                None,
+            )],
+            false,
+            &[&takes_value.id],
+        );
+        assert_eq!(only_binding(&store).target_id, "Svc.php#A\\Svc::go");
+    }
+
+    #[test]
+    fn by_reference_builtin_records_nothing() {
+        let store = t21b_store(
+            svc_symbols(),
+            &[call_arg(
+                "$s",
+                "preg_match",
+                CallArgKind::Function,
+                Some(2),
+                None,
+            )],
+            false,
+            &[],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn unknown_global_function_records_nothing() {
+        let store = t21b_store(
+            svc_symbols(),
+            &[call_arg(
+                "$s",
+                "strlen",
+                CallArgKind::Function,
+                Some(0),
+                None,
+            )],
+            false,
+            &[],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn unanalysable_scope_records_nothing() {
+        let store = t21b_store(svc_symbols(), &[], true, &[]);
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn indexed_by_reference_method_parameter_records_nothing() {
+        let class = symbol("Svc.php", "A\\Svc", SymbolKind::Class, None);
+        let go = with_signature(
+            "Svc.php",
+            "A\\Svc::go",
+            SymbolKind::Method,
+            Some("Svc.php#A\\Svc"),
+            "public function go(): void",
+        );
+        let takes_ref = with_signature(
+            "Svc.php",
+            "A\\Svc::takesRef",
+            SymbolKind::Method,
+            Some("Svc.php#A\\Svc"),
+            "public function takesRef(&$x): void",
+        );
+        let store = t21b_store(
+            vec![class, go, takes_ref],
+            &[call_arg(
+                "$s",
+                "takesRef",
+                CallArgKind::Method,
+                Some(0),
+                Some(CallReceiver::Class {
+                    spelling: "\\A\\Svc".to_string(),
+                }),
+            )],
+            false,
+            &[],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn method_on_an_unknown_receiver_records_nothing() {
+        let store = t21b_store(
+            svc_symbols(),
+            &[call_arg(
+                "$s",
+                "takesValue",
+                CallArgKind::Method,
+                Some(0),
+                Some(CallReceiver::Unknown),
+            )],
+            false,
+            &[],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn a_named_argument_position_records_nothing() {
+        let store = t21b_store(
+            svc_symbols(),
+            &[call_arg(
+                "$s",
+                "takesValue",
+                CallArgKind::Function,
+                None,
+                None,
+            )],
+            false,
+            &[],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn a_call_argument_for_another_variable_keeps_the_binding() {
+        let takes_ref = with_signature(
+            "F.php",
+            "takesRef",
+            SymbolKind::Function,
+            None,
+            "function takesRef(&$x): void",
+        );
+        let store = t21b_store(
+            {
+                let mut symbols = svc_symbols();
+                symbols.push(takes_ref.clone());
+                symbols
+            },
+            &[call_arg(
+                "$other",
+                "takesRef",
+                CallArgKind::Function,
+                Some(0),
+                None,
+            )],
+            false,
+            &[&takes_ref.id],
+        );
+        assert_eq!(only_binding(&store).target_id, "Svc.php#A\\Svc::go");
+    }
+
+    #[test]
+    fn signature_parameter_reference_parsing() {
+        use super::parameter_is_by_ref;
+        assert_eq!(parameter_is_by_ref("function f(&$x): void", 0), Some(true));
+        assert_eq!(parameter_is_by_ref("function f($x): void", 0), Some(false));
+        assert_eq!(
+            parameter_is_by_ref("function f(int $a, &$b): void", 1),
+            Some(true)
+        );
+        assert_eq!(
+            parameter_is_by_ref("public function f(A&B $x): void", 0),
+            Some(false)
+        );
+        assert_eq!(
+            parameter_is_by_ref("function f(&...$xs): void", 0),
+            Some(true)
+        );
+        assert_eq!(
+            parameter_is_by_ref("function f($x = [1, 2]): void", 0),
+            Some(false)
+        );
+        assert_eq!(parameter_is_by_ref("function f($x): void", 3), None);
+        assert_eq!(parameter_is_by_ref("function f()", 0), None);
+        assert_eq!(
+            parameter_is_by_ref("public function f(#[Attr(1)] &$x): void", 0),
+            Some(true)
+        );
+        assert_eq!(
+            parameter_is_by_ref("function f(& /* c */ $x): void", 0),
+            Some(true)
+        );
+        assert_eq!(
+            parameter_is_by_ref("function f(/* ) , */ &$x): void", 0),
+            Some(true),
+            "a comment cannot close or split the parameter list"
+        );
+        assert_eq!(
+            parameter_is_by_ref("function f($x = 'a&$b'): void", 0),
+            Some(true),
+            "a string default containing &$ suppresses rather than binds"
+        );
+        assert_eq!(
+            parameter_is_by_ref("function f(# comment\n &$x): void", 0),
+            Some(true)
+        );
     }
 }

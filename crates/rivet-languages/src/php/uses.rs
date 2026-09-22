@@ -15,12 +15,17 @@
 //! Comments, single-quoted strings, and the literal portions of interpolated
 //! strings are skipped; expressions interpolated inside `"{...}"` are walked.
 //! Declaration names and bare variable names are never uses.
+//!
+//! T21b records two more scope facts: a positional call argument that passes a
+//! bare variable (so the resolver can decide whether the callee's parameter
+//! rebinds it), and a per-scope `unanalysable` flag for a dynamic variable
+//! write, a `$GLOBALS` write, `extract`, `eval`, or a dynamic-callee call.
 
 use std::collections::{BTreeMap, HashMap};
 
 use rivet_core::extract::{
-    ExtractedImport, ExtractedScope, ExtractedUse, ImportKind, NewBinding, ScopeFacts, ScopeImport,
-    TypedBinding, UseHint,
+    CallArg, CallArgKind, CallReceiver, ExtractedImport, ExtractedScope, ExtractedUse, ImportKind,
+    NewBinding, ScopeFacts, ScopeImport, TypedBinding, UseHint,
 };
 use rivet_core::{ExtractedSymbol, RefKind, Span, SymbolKind};
 use tree_sitter::Node;
@@ -114,14 +119,20 @@ impl Walker<'_> {
             // walking a binding target (T21a). A binding-target mention records
             // an extra binding fact, so a variable the walker cannot account
             // for never looks singly assigned to the `new`-receiver rule.
-            // `dynamic_variable_name` names a variable indirectly and is not
-            // tracked.
             "variable_name" => {
                 if write {
                     self.bind_variable(node, Binding::Other);
                 }
             }
-            "dynamic_variable_name" => {}
+            // `dynamic_variable_name` names a variable indirectly. A read is
+            // harmless, but a write (`$$name = ...`, `${$expr} = ...`) rebinds
+            // a variable the walker cannot name, so the whole scope is
+            // unanalysable (T21b).
+            "dynamic_variable_name" => {
+                if write {
+                    self.mark_unanalysable(node);
+                }
+            }
             // The closed set of PHP constructs that can bind a variable. Each
             // routes its target mentions through `write`, so the resolver's
             // "exactly one recorded assignment" test rejects a variable that is
@@ -166,11 +177,28 @@ impl Walker<'_> {
                     self.visit(value, false);
                 }
             }
+            // An include executes the included file in the current scope, so it
+            // can define or overwrite any local; the scope is unanalysable
+            // (T21b).
+            "include_expression"
+            | "include_once_expression"
+            | "require_expression"
+            | "require_once_expression" => {
+                self.mark_unanalysable(node);
+                for child in named_children(node) {
+                    self.visit(child, false);
+                }
+            }
             // A subscript target (`$a[$i] = ...`) writes its base container;
-            // the indices are reads.
+            // the indices are reads. A write to `$GLOBALS[...]` can rebind any
+            // global, which the walker cannot map to a local name, so the whole
+            // scope becomes unanalysable (T21b).
             "subscript_expression" => {
                 let mut children = named_children(node).into_iter();
                 if let Some(base) = children.next() {
+                    if write && base.kind() == "variable_name" && self.text(base) == "$GLOBALS" {
+                        self.mark_unanalysable(node);
+                    }
                     self.visit(base, write);
                 }
                 for index in children {
@@ -395,48 +423,86 @@ impl Walker<'_> {
     }
 
     fn visit_function_call(&mut self, node: Node<'_>) {
-        if let Some(function) = node.child_by_field_name("function") {
+        let function = node.child_by_field_name("function");
+        let mut callee: Option<String> = None;
+        let mut dynamic = false;
+        if let Some(function) = function {
             match function.kind() {
                 "name" | "qualified_name" | "relative_name" => {
+                    callee = Some(self.text(function));
                     self.push_use(function, RefKind::Call, None, UseHint::Unresolved);
                 }
-                _ => self.visit(function, false),
+                _ => {
+                    // A dynamic callee (`$fn(...)`, `($expr)(...)`) can name any
+                    // function, including `extract`; with an argument it can
+                    // rebind any local, so the scope is unanalysable (T21b).
+                    callee = Some(self.text(function));
+                    dynamic = true;
+                    self.visit(function, false);
+                }
             }
         }
+        if let Some(callee) = callee.as_deref()
+            && is_unbounded_builtin(callee)
+        {
+            self.mark_unanalysable(node);
+        }
         if let Some(arguments) = node.child_by_field_name("arguments") {
+            if dynamic && has_argument(arguments) {
+                self.mark_unanalysable(node);
+            }
+            if let Some(callee) = callee.as_deref() {
+                self.record_call_args(arguments, callee, CallArgKind::Function, None);
+            }
             self.visit(arguments, false);
         }
     }
 
     fn visit_member_call(&mut self, node: Node<'_>) {
         let object = node.child_by_field_name("object");
-        if let Some(name) = node.child_by_field_name("name")
-            && name.kind() == "name"
-        {
-            let receiver = object.map(|object| self.text(object));
-            let hint = object
-                .map(|object| self.receiver_hint(object))
-                .unwrap_or(UseHint::Unresolved);
-            self.push_use(name, RefKind::Call, receiver, hint);
+        let mut callee: Option<String> = None;
+        let mut receiver: Option<CallReceiver> = None;
+        if let Some(name) = node.child_by_field_name("name") {
+            callee = Some(self.text(name));
+            if name.kind() == "name" {
+                let receiver_text = object.map(|object| self.text(object));
+                let hint = object
+                    .map(|object| self.receiver_hint(object))
+                    .unwrap_or(UseHint::Unresolved);
+                receiver = Some(call_receiver_from_hint(&hint));
+                self.push_use(name, RefKind::Call, receiver_text, hint);
+            } else {
+                // A dynamic member name cannot be resolved to one declaration.
+                receiver = Some(CallReceiver::Unknown);
+            }
         }
         if let Some(object) = object {
             self.visit(object, false);
         }
         if let Some(arguments) = node.child_by_field_name("arguments") {
+            if let (Some(callee), Some(receiver)) = (callee.as_deref(), receiver) {
+                self.record_call_args(arguments, callee, CallArgKind::Method, Some(receiver));
+            }
             self.visit(arguments, false);
         }
     }
 
     fn visit_scoped_call(&mut self, node: Node<'_>) {
         let scope = node.child_by_field_name("scope");
-        if let Some(name) = node.child_by_field_name("name")
-            && name.kind() == "name"
-        {
-            let receiver = scope.map(|scope| self.text(scope));
-            let hint = scope
-                .map(|scope| self.receiver_hint(scope))
-                .unwrap_or(UseHint::Unresolved);
-            self.push_use(name, RefKind::Call, receiver, hint);
+        let mut callee: Option<String> = None;
+        let mut receiver: Option<CallReceiver> = None;
+        if let Some(name) = node.child_by_field_name("name") {
+            callee = Some(self.text(name));
+            if name.kind() == "name" {
+                let receiver_text = scope.map(|scope| self.text(scope));
+                let hint = scope
+                    .map(|scope| self.receiver_hint(scope))
+                    .unwrap_or(UseHint::Unresolved);
+                receiver = Some(self.call_receiver_from_scope(scope, &hint));
+                self.push_use(name, RefKind::Call, receiver_text, hint);
+            } else {
+                receiver = Some(CallReceiver::Unknown);
+            }
         }
         if let Some(scope) = scope {
             // A class-name scope is carried as the receiver, not a second use.
@@ -448,8 +514,89 @@ impl Walker<'_> {
             }
         }
         if let Some(arguments) = node.child_by_field_name("arguments") {
+            if let (Some(callee), Some(receiver)) = (callee.as_deref(), receiver) {
+                self.record_call_args(arguments, callee, CallArgKind::StaticMethod, Some(receiver));
+            }
             self.visit(arguments, false);
         }
+    }
+
+    /// The class a static-call scope names, for call-argument adjudication.
+    fn call_receiver_from_scope(&self, scope: Option<Node<'_>>, hint: &UseHint) -> CallReceiver {
+        let Some(scope) = scope else {
+            return CallReceiver::Unknown;
+        };
+        match scope.kind() {
+            "name" | "qualified_name" | "relative_name" => CallReceiver::Class {
+                spelling: self.text(scope),
+            },
+            "relative_scope" => match self.text(scope).to_ascii_lowercase().as_str() {
+                "self" | "static" => CallReceiver::SelfClass,
+                // `parent` names an ancestor v0.1 does not traverse.
+                _ => CallReceiver::Unknown,
+            },
+            _ => call_receiver_from_hint(hint),
+        }
+    }
+
+    /// Records one [`CallArg`] per positional argument that passes a bare
+    /// variable to `callee`, so the resolver can decide whether the callee's
+    /// parameter rebinds it (T21b).
+    ///
+    /// An argument written with an explicit `&` is already recorded as an
+    /// ordinary rebinding (T21a) and is skipped. A named argument cannot be
+    /// mapped to a parameter position without the declaration order, so it is
+    /// recorded with no position and the resolver suppresses.
+    fn record_call_args(
+        &mut self,
+        arguments: Node<'_>,
+        callee: &str,
+        kind: CallArgKind,
+        receiver: Option<CallReceiver>,
+    ) {
+        let scope_key = self.scope_key_for_node(arguments);
+        let mut position: u32 = 0;
+        for argument in named_children(arguments) {
+            if argument.kind() != "argument" {
+                continue;
+            }
+            let named = argument.child_by_field_name("name").is_some();
+            let explicit_ref = argument.child_by_field_name("reference_modifier").is_some();
+            let this_position = position;
+            position += 1;
+            if explicit_ref {
+                continue;
+            }
+            let label = argument.child_by_field_name("name").map(|node| node.id());
+            let value = named_children(argument)
+                .into_iter()
+                .find(|child| Some(child.id()) != label && child.kind() != "reference_modifier");
+            let Some(value) = value.filter(|value| value.kind() == "variable_name") else {
+                continue;
+            };
+            let Ok(span) = Span::new(value.start_byte() as u32, value.end_byte() as u32) else {
+                continue;
+            };
+            let fact = CallArg {
+                variable: self.text(value),
+                callee: callee.to_string(),
+                kind,
+                position: (!named).then_some(this_position),
+                receiver: receiver.clone(),
+                span,
+            };
+            self.scope_facts
+                .entry(scope_key.clone())
+                .or_default()
+                .call_args
+                .push(fact);
+        }
+    }
+
+    /// Marks the scope that owns `node` as unanalysable (T21b).
+    fn mark_unanalysable(&mut self, node: Node<'_>) {
+        let scope_key = self.scope_key_for_node(node);
+        self.scope_facts.entry(scope_key).or_default().unanalysable = true;
     }
 
     fn visit_object_creation(&mut self, node: Node<'_>) {
@@ -877,6 +1024,38 @@ fn object_creation_class(node: Node<'_>) -> Option<Node<'_>> {
         .find(|child| !matches!(child.kind(), "arguments" | "anonymous_class"))
 }
 
+/// Maps a member receiver's evidence hint to the class lookup a call argument
+/// needs (T21b).
+fn call_receiver_from_hint(hint: &UseHint) -> CallReceiver {
+    match hint {
+        UseHint::NewExpr { class_spelling, .. } => CallReceiver::Class {
+            spelling: class_spelling.clone(),
+        },
+        UseHint::Typed { type_spelling } => CallReceiver::Class {
+            spelling: type_spelling.clone(),
+        },
+        UseHint::This | UseHint::SelfOrStatic => CallReceiver::SelfClass,
+        UseHint::Imported { .. } | UseHint::Unresolved => CallReceiver::Unknown,
+    }
+}
+
+/// Whether `callee` names the unbounded global builtins `extract` or `eval`.
+///
+/// A namespaced function of the same short name is a different function and is
+/// not this builtin, so only an unqualified or fully qualified global spelling
+/// matches.
+fn is_unbounded_builtin(callee: &str) -> bool {
+    let name = callee.trim_start_matches('\\');
+    !name.contains('\\') && matches!(name.to_ascii_lowercase().as_str(), "extract" | "eval")
+}
+
+/// Whether an `arguments` node carries at least one argument.
+fn has_argument(arguments: Node<'_>) -> bool {
+    named_children(arguments)
+        .iter()
+        .any(|child| child.kind() == "argument")
+}
+
 /// The `function`/`const` token that selects a non-class import kind.
 fn import_kind(node: Option<Node<'_>>) -> Option<ImportKind> {
     match node.map(|node| node.kind()) {
@@ -1060,7 +1239,7 @@ mod tests {
     use super::FILE_SCOPE_KEY;
     use crate::{LanguageId, grammar};
     use rivet_core::ExtractedFile;
-    use rivet_core::extract::NewBinding;
+    use rivet_core::extract::{CallArgKind, CallReceiver, NewBinding, ScopeFacts};
     use tree_sitter::Parser;
 
     fn extract(source: &str) -> ExtractedFile {
@@ -1072,6 +1251,16 @@ mod tests {
             .parse(source.as_bytes(), None)
             .expect("parser must return a tree");
         crate::php::extract(source.as_bytes(), &tree)
+    }
+
+    /// The file scope's facts, where a top-level snippet records its bindings.
+    fn file_scope(file: &ExtractedFile) -> &ScopeFacts {
+        &file
+            .scopes
+            .iter()
+            .find(|scope| scope.scope_key == FILE_SCOPE_KEY)
+            .expect("the file scope always exists")
+            .facts
     }
 
     /// The number of binding facts recorded for `variable` in the file scope.
@@ -1188,5 +1377,100 @@ mod tests {
         assert!(file.diagnostics.is_empty());
         assert_eq!(binding_count(&file, "$s"), 1);
         assert!(binds_direct_new(&file, "$s"));
+    }
+
+    /// T21b cases 3-6: a construct whose effect on locals cannot be bounded
+    /// marks the whole scope unanalysable.
+    #[test]
+    fn unanalysable_constructs_mark_the_scope() {
+        for source in [
+            "<?php\n$s = new Alpha();\n$$name = 1;\n$s->go();\n",
+            "<?php\n$s = new Alpha();\n${$name} = 1;\n$s->go();\n",
+            "<?php\n$s = new Alpha();\n$GLOBALS['s'] = 1;\n$s->go();\n",
+            "<?php\n$s = new Alpha();\nextract($arr);\n$s->go();\n",
+            "<?php\n$s = new Alpha();\neval('$x = 1;');\n$s->go();\n",
+            "<?php\n$s = new Alpha();\ninclude 'other.php';\n$s->go();\n",
+            "<?php\n$s = new Alpha();\nrequire_once 'other.php';\n$s->go();\n",
+        ] {
+            let file = extract(source);
+            assert!(file.diagnostics.is_empty(), "snippet must parse: {source}");
+            assert!(
+                file_scope(&file).unanalysable,
+                "the scope must be unanalysable: {source}"
+            );
+        }
+    }
+
+    /// A read of a dynamic variable or a read of `$GLOBALS` does not rebind
+    /// anything, so it must not make the scope unanalysable.
+    #[test]
+    fn reads_do_not_mark_the_scope_unanalysable() {
+        let file =
+            extract("<?php\n$s = new Alpha();\n$v = $$name;\n$w = $GLOBALS['x'];\n$s->go();\n");
+        assert!(file.diagnostics.is_empty());
+        assert!(!file_scope(&file).unanalysable);
+    }
+
+    /// A namespaced function of the same short name is not the builtin.
+    #[test]
+    fn a_namespaced_extract_is_not_the_builtin() {
+        let file = extract("<?php\n$s = new Alpha();\n\\Foo\\extract($arr);\n$s->go();\n");
+        assert!(file.diagnostics.is_empty());
+        assert!(!file_scope(&file).unanalysable);
+    }
+
+    /// T21b cases 1-2: a bare-variable positional argument is recorded with its
+    /// callee and position for the resolver to adjudicate.
+    #[test]
+    fn call_arguments_record_the_variable_and_position() {
+        let file = extract("<?php\n$s = new Alpha();\ntakesRef($s, $t);\n");
+        assert!(file.diagnostics.is_empty());
+        let args = &file_scope(&file).call_args;
+        assert_eq!(args.len(), 2, "both arguments are recorded: {args:?}");
+        assert_eq!(args[0].variable, "$s");
+        assert_eq!(args[0].callee, "takesRef");
+        assert_eq!(args[0].kind, CallArgKind::Function);
+        assert_eq!(args[0].position, Some(0));
+        assert_eq!(args[0].receiver, None);
+        assert_eq!(args[1].variable, "$t");
+        assert_eq!(args[1].position, Some(1));
+    }
+
+    /// A method call records the receiver evidence the resolver needs.
+    #[test]
+    fn method_call_arguments_record_the_receiver_hint() {
+        let file = extract("<?php\n$svc = new Alpha();\n$svc->takesRef($s);\n");
+        assert!(file.diagnostics.is_empty());
+        let args = &file_scope(&file).call_args;
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].kind, CallArgKind::Method);
+        assert_eq!(args[0].callee, "takesRef");
+        assert_eq!(
+            args[0].receiver,
+            Some(CallReceiver::Class {
+                spelling: "Alpha".to_string()
+            })
+        );
+    }
+
+    /// A named argument has no mappable position and is recorded as unknown.
+    #[test]
+    fn named_arguments_record_no_position() {
+        let file = extract("<?php\n$s = new Alpha();\ntakesRef(x: $s);\n");
+        assert!(file.diagnostics.is_empty());
+        let args = &file_scope(&file).call_args;
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].variable, "$s");
+        assert_eq!(args[0].position, None);
+    }
+
+    /// An explicit `&$s` at the call site is already a T21a rebinding, so it is
+    /// not duplicated as a call-argument candidate.
+    #[test]
+    fn explicit_by_reference_arguments_are_not_duplicated() {
+        let file = extract("<?php\n$s = new Alpha();\ntakesRef(&$s);\n");
+        assert!(file.diagnostics.is_empty());
+        assert!(file_scope(&file).call_args.is_empty());
+        assert_eq!(binding_count(&file, "$s"), 2, "T21a records the rebinding");
     }
 }

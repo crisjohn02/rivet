@@ -18,7 +18,7 @@ mod rules;
 
 use std::collections::HashMap;
 
-use rivet_core::extract::{NewBinding, ScopeImport};
+use rivet_core::extract::{CallArg, NewBinding, ScopeImport};
 use rivet_core::{Resolution, SymbolKind};
 use rivet_store::{BindingRow, Error, ScopeRow, Store, SymbolRow, UseRow};
 use serde::Deserialize;
@@ -50,6 +50,15 @@ pub(crate) struct ScopeFacts {
     /// PHP variables do not cross function bodies, so only the use's own scope
     /// is considered; parent scopes are deliberately excluded.
     pub(crate) new_bindings: Vec<NewBinding>,
+    /// Call arguments recorded directly in the use's own scope that pass a bare
+    /// variable and may rebind it (T21b). Like `new_bindings`, only the use's
+    /// own scope contributes.
+    pub(crate) call_args: Vec<CallArg>,
+    /// Whether the use's own scope contains a construct whose effect on local
+    /// variables cannot be bounded (T21b): a dynamic variable write, a
+    /// `$GLOBALS` write, `extract`, `eval`, or a dynamic-callee call. When set,
+    /// no `new`-receiver binding is recorded anywhere in that scope.
+    pub(crate) unanalysable: bool,
 }
 
 /// One parsed `scopes` row's facts that resolution needs.
@@ -58,12 +67,14 @@ struct ScopeData<'a> {
     imports: Vec<ScopeImport>,
     declares: Vec<SymbolId>,
     new_bindings: Vec<NewBinding>,
+    call_args: Vec<CallArg>,
+    unanalysable: bool,
 }
 
 /// The persisted `scopes.facts_json` shape, read back without reparsing.
 ///
 /// `typed_bindings` is ignored in T19; T20/T21 extend this struct when their
-/// rules need more facts.
+/// rules need more facts. T21b adds `call_args` and `unanalysable`.
 #[derive(Deserialize, Default)]
 struct PersistedScopeFacts {
     #[serde(default)]
@@ -72,6 +83,10 @@ struct PersistedScopeFacts {
     declares: Vec<SymbolId>,
     #[serde(default)]
     new_bindings: Vec<NewBinding>,
+    #[serde(default)]
+    call_args: Vec<CallArg>,
+    #[serde(default)]
+    unanalysable: bool,
 }
 
 /// Symbol lookups shared by every rule.
@@ -259,6 +274,8 @@ impl<'a> Resolver<'a> {
                     imports: parsed.imports,
                     declares: parsed.declares,
                     new_bindings: parsed.new_bindings,
+                    call_args: parsed.call_args,
+                    unanalysable: parsed.unanalysable,
                 },
             );
         }
@@ -313,6 +330,8 @@ impl<'a> Resolver<'a> {
             declares: Vec::new(),
             namespace: None,
             new_bindings: Vec::new(),
+            call_args: Vec::new(),
+            unanalysable: false,
         };
         let mut key = Some(use_row.scope_key.as_str());
         let mut own_scope = true;
@@ -326,6 +345,8 @@ impl<'a> Resolver<'a> {
             // the use's own scope contributes them.
             if own_scope {
                 facts.new_bindings = scope.new_bindings.clone();
+                facts.call_args = scope.call_args.clone();
+                facts.unanalysable = scope.unanalysable;
                 own_scope = false;
             }
             if facts.namespace.is_none() {

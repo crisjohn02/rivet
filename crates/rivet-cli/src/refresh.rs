@@ -790,7 +790,7 @@ fn use_rows(
 /// to its canonical ID, the only form usable after a reparse.
 #[cfg(feature = "lang-php")]
 fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String]) -> Vec<ScopeRow> {
-    use rivet_core::extract::{NewBinding, ScopeImport, TypedBinding};
+    use rivet_core::extract::{CallArg, NewBinding, ScopeImport, TypedBinding};
 
     /// The exact persisted `scopes.facts_json` shape.
     #[derive(serde::Serialize)]
@@ -798,6 +798,8 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         imports: &'a [ScopeImport],
         typed_bindings: &'a [TypedBinding],
         new_bindings: &'a [NewBinding],
+        call_args: &'a [CallArg],
+        unanalysable: bool,
         declares: Vec<&'a str>,
     }
 
@@ -815,6 +817,8 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                 imports: &scope.facts.imports,
                 typed_bindings: &scope.facts.typed_bindings,
                 new_bindings: &scope.facts.new_bindings,
+                call_args: &scope.facts.call_args,
+                unanalysable: scope.facts.unanalysable,
                 declares,
             };
             ScopeRow {
