@@ -1,4 +1,4 @@
-//! T19/T20/T21 integration tests: persisted resolution bindings.
+//! T19/T20/T21/T21a integration tests: persisted resolution bindings.
 //!
 //! The authored PHP fixture is copied into a temporary Git root, indexed with
 //! the real binary, and inspected by opening the committed `.rivet/index.db`
@@ -21,7 +21,10 @@
 //!
 //! A separate temporary fixture checks the `use function` alias rule and the
 //! PHP namespaced-to-global fallback, and another checks that a reassigned or
-//! conditionally assigned `new` receiver stays unbound.
+//! conditionally assigned `new` receiver stays unbound. A further temporary
+//! fixture (T21a) checks that a receiver rebound by `foreach`, destructuring,
+//! `catch`, a by-reference capture, or a compound assignment stays unbound
+//! through the real binary while a safe single assignment still binds.
 
 #![cfg(feature = "lang-php")]
 
@@ -496,6 +499,84 @@ fn new_receiver_conservatism_rejects_reassignment_and_control_flow() {
 
     // Only the safe call's `go` use produces a receiver binding; the four
     // `new \A\Svc()`/`new \B\Svc()` type uses bind `exact` separately.
+    let bound_go = uses
+        .iter()
+        .filter(|row| row.spelling == "go" && binding_for(&bindings, row).is_some())
+        .count();
+    assert_eq!(bound_go, 1, "only the safe call binds: {value}");
+}
+
+#[test]
+fn every_php_rebinding_form_leaves_the_new_receiver_unbound() {
+    let temp = TempDir::new("new-receiver-forms");
+    let root = temp.path();
+    fs::create_dir_all(root.join(".git")).expect("create .git");
+
+    // Same-name classes so an unjustified binding would be observable.
+    write_php(
+        root,
+        "A.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace A;\nfinal class Svc\n{\n    public function go(): void\n    {\n    }\n}\n",
+    );
+    write_php(
+        root,
+        "B.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace B;\nfinal class Svc\n{\n    public function go(): void\n    {\n    }\n}\n",
+    );
+
+    // Each function assigns `new \A\Svc()`, rebinds `$s` by a different form,
+    // then calls `$s->go()`. None of these calls may bind.
+    write_php(
+        root,
+        "Forms.php",
+        "<?php\ndeclare(strict_types=1);\nfunction byForeach(array $xs): void\n{\n    $s = new \\A\\Svc();\n    foreach ($xs as $s) {\n    }\n    $s->go();\n}\nfunction byDestructuring(array $pair): void\n{\n    $s = new \\A\\Svc();\n    [$a, $s] = $pair;\n    $s->go();\n}\nfunction byCatch(): void\n{\n    $s = new \\A\\Svc();\n    try {\n    } catch (\\Throwable $s) {\n    }\n    $s->go();\n}\n",
+    );
+
+    // Control: a plain simple reassignment is already correctly unbound.
+    write_php(
+        root,
+        "Reassigned.php",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\n$s = mk();\n$s->go();\n",
+    );
+
+    // No rebinding: the safe single assignment still binds.
+    write_php(
+        root,
+        "Safe.php",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\n$s->go();\n",
+    );
+
+    let value = index_json(root);
+    let store = open_store(root);
+    let uses = all_use_rows(&store);
+    let bindings = store.list_bindings().expect("list bindings");
+
+    // One `go` call per rebinding form plus the control, none of them bound.
+    let rebound: Vec<&UseRow> = uses
+        .iter()
+        .filter(|row| row.spelling == "go" && row.file != "Safe.php")
+        .collect();
+    assert_eq!(
+        rebound.len(),
+        4,
+        "one go call per rebinding form plus the control: {rebound:?}"
+    );
+    for row in rebound {
+        assert!(
+            binding_for(&bindings, row).is_none(),
+            "a rebound receiver must not bind: {row:?}"
+        );
+    }
+
+    // The safe call still binds to the class of its single direct `new`.
+    let safe = uses
+        .iter()
+        .find(|row| row.file == "Safe.php" && row.spelling == "go")
+        .expect("Safe.php has a go call");
+    let safe_binding = binding_for(&bindings, safe).expect("the safe receiver must bind");
+    assert_eq!(safe_binding.target_id, "A.php#A\\Svc::go");
+    assert_eq!(safe_binding.resolution.as_str(), "scoped");
+
     let bound_go = uses
         .iter()
         .filter(|row| row.spelling == "go" && binding_for(&bindings, row).is_some())

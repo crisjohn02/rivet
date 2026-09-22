@@ -94,8 +94,10 @@ pub fn extract_uses(
 impl Walker<'_> {
     /// Visit one node, classifying it or descending generically.
     ///
-    /// `write` is true only while walking the left side of an assignment, so a
-    /// property access there becomes [`RefKind::Write`].
+    /// `write` is true while walking a binding target: the left side of an
+    /// assignment, a `foreach` target, a `catch` parameter, and so on. A
+    /// property access there becomes [`RefKind::Write`], and a bare variable
+    /// mention there is recorded as a rebinding (T21a).
     fn visit(&mut self, node: Node<'_>, write: bool) {
         match node.kind() {
             // Literal text and comments are never uses.
@@ -108,8 +110,73 @@ impl Walker<'_> {
                     }
                 }
             }
-            // Variable names alone are not references.
-            "variable_name" | "dynamic_variable_name" => {}
+            // A variable mention is a read unless the walker reached it while
+            // walking a binding target (T21a). A binding-target mention records
+            // an extra binding fact, so a variable the walker cannot account
+            // for never looks singly assigned to the `new`-receiver rule.
+            // `dynamic_variable_name` names a variable indirectly and is not
+            // tracked.
+            "variable_name" => {
+                if write {
+                    self.bind_variable(node, Binding::Other);
+                }
+            }
+            "dynamic_variable_name" => {}
+            // The closed set of PHP constructs that can bind a variable. Each
+            // routes its target mentions through `write`, so the resolver's
+            // "exactly one recorded assignment" test rejects a variable that is
+            // rebound by any of them. A mention reached anywhere else is a read.
+            "list_literal" => {
+                for child in named_children(node) {
+                    self.visit(child, true);
+                }
+            }
+            "by_ref" => {
+                for child in named_children(node) {
+                    self.visit(child, true);
+                }
+            }
+            "augmented_assignment_expression" | "reference_assignment_expression" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    self.visit(left, true);
+                }
+                if let Some(right) = node.child_by_field_name("right") {
+                    self.visit(right, false);
+                }
+            }
+            // `$s++`/`++$s` rebind the variable as well as read it.
+            "update_expression" => {
+                if let Some(argument) = node.child_by_field_name("argument") {
+                    self.visit(argument, true);
+                }
+            }
+            "foreach_statement" => self.visit_foreach(node),
+            "catch_clause" => self.visit_catch(node),
+            "anonymous_function_use_clause" => self.visit_closure_uses(node),
+            "unset_statement" | "global_declaration" => {
+                for child in named_children(node) {
+                    self.visit(child, true);
+                }
+            }
+            "static_variable_declaration" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    self.visit(name, true);
+                }
+                if let Some(value) = node.child_by_field_name("value") {
+                    self.visit(value, false);
+                }
+            }
+            // A subscript target (`$a[$i] = ...`) writes its base container;
+            // the indices are reads.
+            "subscript_expression" => {
+                let mut children = named_children(node).into_iter();
+                if let Some(base) = children.next() {
+                    self.visit(base, write);
+                }
+                for index in children {
+                    self.visit(index, false);
+                }
+            }
             // Imports are handled whole so their target names are not mistaken
             // for identifier uses.
             "namespace_use_declaration" => self.handle_use(node),
@@ -186,12 +253,15 @@ impl Walker<'_> {
             "scoped_property_access_expression" => self.visit_scoped_property(node, write),
             "class_constant_access_expression" => self.visit_class_constant(node),
             "assignment_expression" => self.visit_assignment(node),
-            // Named arguments carry a label that is not a reference.
+            // Named arguments carry a label that is not a reference. A
+            // by-reference argument can let the callee rebind the variable, so
+            // it is visited as a binding target.
             "argument" => {
                 let label = node.child_by_field_name("name").map(|label| label.id());
+                let by_ref = node.child_by_field_name("reference_modifier").is_some();
                 for child in named_children(node) {
-                    if Some(child.id()) != label {
-                        self.visit(child, false);
+                    if Some(child.id()) != label && child.kind() != "reference_modifier" {
+                        self.visit(child, by_ref);
                     }
                 }
             }
@@ -224,6 +294,14 @@ impl Walker<'_> {
 
     /// Enter a function body, then visit its parameters, return type, and body.
     fn visit_function(&mut self, node: Node<'_>) {
+        // A closure's capture list is evaluated in the enclosing scope, so it
+        // must be visited before the closure's own variable scope is pushed.
+        // A by-reference capture lets the closure rebind the outer variable.
+        for child in named_children(node) {
+            if child.kind() == "anonymous_function_use_clause" {
+                self.visit(child, false);
+            }
+        }
         let ordinal = self.next_body_ordinal;
         self.next_body_ordinal += 1;
         self.body_stack.push(Some(ordinal));
@@ -257,6 +335,62 @@ impl Walker<'_> {
         let type_spelling = self.text(type_node);
         if let Some(name) = node.child_by_field_name("name") {
             self.bind_variable(name, Binding::Typed(type_spelling));
+        }
+    }
+
+    /// Visit a `foreach` header: the iterated expression is read, the target is
+    /// a binding.
+    ///
+    /// The `as` token separates the iterated expression from the target without
+    /// guessing from node kinds, because a bare variable target and a bare
+    /// variable iterable share the same kind.
+    fn visit_foreach(&mut self, node: Node<'_>) {
+        let mut cursor = node.walk();
+        let as_byte = node
+            .children(&mut cursor)
+            .find(|child| child.kind() == "as")
+            .map(|child| child.start_byte());
+        let body_id = node.child_by_field_name("body").map(|body| body.id());
+        let Some(as_byte) = as_byte else {
+            // An unrecognized `foreach` shape: treat every variable mention as a
+            // binding so an unknown form cannot leave a stale receiver intact.
+            for child in named_children(node) {
+                self.visit(child, true);
+            }
+            return;
+        };
+        for child in named_children(node) {
+            if Some(child.id()) == body_id || child.start_byte() < as_byte {
+                self.visit(child, false);
+            } else {
+                self.visit(child, true);
+            }
+        }
+    }
+
+    /// Visit a `catch` clause: the caught exception binds its variable.
+    fn visit_catch(&mut self, node: Node<'_>) {
+        if let Some(ty) = node.child_by_field_name("type") {
+            self.visit(ty, false);
+        }
+        if let Some(name) = node.child_by_field_name("name") {
+            self.visit(name, true);
+        }
+        if let Some(body) = node.child_by_field_name("body") {
+            self.visit(body, false);
+        }
+    }
+
+    /// Visit a closure's `use (...)` list.
+    ///
+    /// A by-reference capture lets the closure rebind the outer variable, so it
+    /// is recorded as a binding. A by-value capture reads a copy and cannot
+    /// rebind the outer variable, so it is left alone.
+    fn visit_closure_uses(&mut self, node: Node<'_>) {
+        for child in named_children(node) {
+            if child.kind() == "by_ref" {
+                self.visit(child, true);
+            }
         }
     }
 
@@ -377,7 +511,13 @@ impl Walker<'_> {
     fn visit_assignment(&mut self, node: Node<'_>) {
         let left = node.child_by_field_name("left");
         let right = node.child_by_field_name("right");
-        if let Some(left) = left {
+        // A non-variable left is a binding target (a destructuring list, a
+        // subscript, or a member). Visiting it as a write records any variable
+        // it rebinds. A plain `$x` left is handled below so its own name is not
+        // recorded twice.
+        if let Some(left) = left
+            && left.kind() != "variable_name"
+        {
             self.visit(left, true);
         }
         if let Some(right) = right {
@@ -913,4 +1053,140 @@ fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
 
 fn text_of(node: Node<'_>, source: &[u8]) -> String {
     String::from_utf8_lossy(&source[node.start_byte()..node.end_byte()]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FILE_SCOPE_KEY;
+    use crate::{LanguageId, grammar};
+    use rivet_core::ExtractedFile;
+    use rivet_core::extract::NewBinding;
+    use tree_sitter::Parser;
+
+    fn extract(source: &str) -> ExtractedFile {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&grammar(LanguageId::Php))
+            .expect("pinned PHP grammar must load");
+        let tree = parser
+            .parse(source.as_bytes(), None)
+            .expect("parser must return a tree");
+        crate::php::extract(source.as_bytes(), &tree)
+    }
+
+    /// The number of binding facts recorded for `variable` in the file scope.
+    fn binding_count(file: &ExtractedFile, variable: &str) -> usize {
+        file.scopes
+            .iter()
+            .find(|scope| scope.scope_key == FILE_SCOPE_KEY)
+            .map(|scope| {
+                scope
+                    .facts
+                    .new_bindings
+                    .iter()
+                    .filter(|binding| binding.variable == variable)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Whether the persisted facts would let the `new`-receiver rule select a
+    /// single direct-`new` assignment for `variable` in the file scope. This
+    /// mirrors the resolver's `sole_assignment` check, so a `false` result is
+    /// exactly "the rule records no binding".
+    fn binds_direct_new(file: &ExtractedFile, variable: &str) -> bool {
+        let Some(scope) = file
+            .scopes
+            .iter()
+            .find(|scope| scope.scope_key == FILE_SCOPE_KEY)
+        else {
+            return false;
+        };
+        let mut found: Option<&NewBinding> = None;
+        for binding in &scope.facts.new_bindings {
+            if binding.variable != variable {
+                continue;
+            }
+            if found.is_some() {
+                return false;
+            }
+            found = Some(binding);
+        }
+        found.is_some_and(|binding| binding.direct_new)
+    }
+
+    /// A snippet that assigns `new Alpha()`, rebinds `$s`, then calls
+    /// `$s->go()` must record the rebinding and never bind.
+    fn assert_rebound(source: &str) {
+        let file = extract(source);
+        assert!(file.diagnostics.is_empty(), "snippet must parse: {source}");
+        assert_eq!(
+            binding_count(&file, "$s"),
+            2,
+            "the rebinding must be recorded: {source}"
+        );
+        assert!(
+            !binds_direct_new(&file, "$s"),
+            "a rebound receiver must record no binding: {source}"
+        );
+    }
+
+    #[test]
+    fn foreach_target_rebinding_records_nothing() {
+        assert_rebound("<?php\n$s = new Alpha();\nforeach ($xs as $s) {}\n$s->go();\n");
+    }
+
+    #[test]
+    fn destructuring_rebinding_records_nothing() {
+        assert_rebound("<?php\n$s = new Alpha();\n[$a, $s] = $pair;\n$s->go();\n");
+        assert_rebound("<?php\n$s = new Alpha();\nlist($a, $s) = $pair;\n$s->go();\n");
+    }
+
+    #[test]
+    fn reference_assignment_rebinding_records_nothing() {
+        assert_rebound("<?php\n$s = new Alpha();\n$s = &$o;\n$s->go();\n");
+    }
+
+    #[test]
+    fn catch_parameter_rebinding_records_nothing() {
+        assert_rebound("<?php\n$s = new Alpha();\ntry {} catch (\\Throwable $s) {}\n$s->go();\n");
+    }
+
+    #[test]
+    fn by_reference_closure_capture_records_nothing() {
+        assert_rebound(
+            "<?php\n$s = new Alpha();\n$f = function () use (&$s) { $s = mk(); };\n$f();\n$s->go();\n",
+        );
+    }
+
+    #[test]
+    fn compound_assignment_rebinding_records_nothing() {
+        assert_rebound("<?php\n$s = new Alpha();\n$s ??= mk();\n$s->go();\n");
+        assert_rebound("<?php\n$s = new Alpha();\n$s .= 'x';\n$s->go();\n");
+        assert_rebound("<?php\n$s = new Alpha();\n$s += 1;\n$s->go();\n");
+    }
+
+    #[test]
+    fn update_expression_rebinding_records_nothing() {
+        assert_rebound("<?php\n$s = new Alpha();\n$s++;\n$s->go();\n");
+    }
+
+    #[test]
+    fn unset_rebinding_records_nothing() {
+        assert_rebound("<?php\n$s = new Alpha();\nunset($s);\n$s->go();\n");
+    }
+
+    #[test]
+    fn plain_reassignment_records_nothing() {
+        // Control: the one form the walker already recorded stays unbound.
+        assert_rebound("<?php\n$s = new Alpha();\n$s = mk();\n$s->go();\n");
+    }
+
+    #[test]
+    fn safe_single_assignment_still_binds_direct_new() {
+        let file = extract("<?php\n$s = new Alpha();\n$s->go();\n");
+        assert!(file.diagnostics.is_empty());
+        assert_eq!(binding_count(&file, "$s"), 1);
+        assert!(binds_direct_new(&file, "$s"));
+    }
 }
