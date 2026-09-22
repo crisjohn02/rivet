@@ -12,7 +12,7 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 | Next task | T13 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 4+7 index_json+7 symbol_json, rivet-core 60, rivet-index 3, rivet-languages 1+6, rivet-parser 0+4, rivet-store 22; 0 failed); `cargo build -p rivet-cli --no-default-features` and `--features lang-php` compile. |
+| Last checks | rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 4+7 index_json+7 symbol_json, rivet-core 60, rivet-index 3, rivet-languages 1+6, rivet-parser 0+4, rivet-store 22; 0 failed); `cargo build -p rivet-cli --no-default-features` and `--features lang-php` compile. Checkpoint C timing (orchestrator, release build, 52 files / 3 PHP, no-change content-mode query incl. hashing): 16 ms per `rivet symbol` call; debug build 32 ms. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
