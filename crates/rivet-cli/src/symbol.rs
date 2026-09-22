@@ -1,14 +1,14 @@
 //! `rivet symbol <query>` (spec §10; OUTPUT-CONTRACT "Coordinates and symbol
 //! objects", "Pagination and resolution", and the `rivet symbol` block).
 //!
-//! T12 resolves canonical IDs, native qualified names, dotted paths, and short
-//! names against stored symbol rows after a refresh. `file:line`, signatures,
-//! doc comments, and real call lists arrive later: signatures in T14, `file:line`
-//! in T13, and call lists in T24.
+//! T13 resolves canonical IDs, native qualified names, `file:line`, dotted
+//! paths, and short names against stored symbol rows after a refresh, and
+//! paginates ambiguous candidates deterministically. Signatures, doc comments,
+//! and real call lists arrive later: signatures in T14 and call lists in T24.
 
 use serde_json::{Map, Value, json};
 
-use rivet_index::{resolve_query, suggestions};
+use rivet_index::{QueryOutcome, resolve_query, suggestions};
 use rivet_store::{Store, SymbolRow};
 
 use crate::index;
@@ -56,7 +56,31 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     // Refresh first so query results describe the current working tree.
     let report = index::run(index::Options::default())?;
     let store = open_store()?;
-    let matches = resolve_query(&store, query).map_err(index::store_error)?;
+    let matches = match resolve_query(&store, query).map_err(index::store_error)? {
+        QueryOutcome::Symbols(matches) => matches,
+        QueryOutcome::PathNotIndexed { path } => {
+            return Err(CliError::symbol_not_found(
+                format!("query '{query}' matched no symbols"),
+                format!(
+                    "{path} is not indexed or is excluded; run `rivet index` and check exclusions."
+                ),
+                Vec::new(),
+            ));
+        }
+        QueryOutcome::NoEnclosingSymbol { suggestions } => {
+            return Err(CliError::symbol_not_found(
+                format!("no symbol encloses {query}"),
+                "Pick the nearest symbol, or query it by name.",
+                suggestions,
+            ));
+        }
+        QueryOutcome::InvalidFileLine { path, reason } => {
+            return Err(CliError::invalid_arguments(
+                format!("invalid file:line query for '{path}': {reason}"),
+                "Use a repository-relative path with `/` separators and no `..`.",
+            ));
+        }
+    };
 
     match matches.len() {
         0 => {
