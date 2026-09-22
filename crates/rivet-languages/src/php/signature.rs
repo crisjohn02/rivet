@@ -6,8 +6,14 @@
 //! text of an immediately preceding `/** ... */` docblock, if any.
 //! [`signature_summary`] renders the container collapsed form from stored
 //! member signatures (spec §16.2).
+//!
+//! A declaration can name several members at once (`public int $left,
+//! $right = 2;`). Each member is its own symbol, and its stored signature is
+//! the shared modifier/type prefix plus that member's own element text, so it
+//! names only that member (`public int $right = 2`) rather than repeating the
+//! whole declaration under each name.
 
-use rivet_core::{ExtractedSymbol, SymbolKind};
+use rivet_core::{ExtractedSymbol, Span, SymbolKind};
 use tree_sitter::Node;
 
 use super::is_container;
@@ -34,6 +40,25 @@ fn header(node: Node<'_>, source: &[u8]) -> String {
     let raw = text(source, node.start_byte(), end);
     let raw = raw.strip_suffix(';').unwrap_or(&raw);
     collapse_whitespace(raw)
+}
+
+/// The collapsed declaration header for one element of a multi-name
+/// declaration.
+///
+/// A property or constant declaration can name several members at once. The
+/// shared prefix — modifiers, type, and the declaration keyword — runs from the
+/// declaration start to its first element; appending this element's own text
+/// gives a signature that names only this member:
+/// `public int $right = 2`, not `public int $left, $right = 2`.
+pub(crate) fn element_header(declaration: Node<'_>, element: Node<'_>, source: &[u8]) -> String {
+    let mut cursor = declaration.walk();
+    let first = declaration
+        .children(&mut cursor)
+        .find(|child| matches!(child.kind(), "property_element" | "const_element"));
+    let prefix_end = first.map_or(element.start_byte(), |node| node.start_byte());
+    let prefix = text(source, declaration.start_byte(), prefix_end);
+    let member = text(source, element.start_byte(), element.end_byte());
+    collapse_whitespace(&format!("{prefix}{member}"))
 }
 
 /// The immediately preceding docblock for `node`, or `None`.
@@ -96,16 +121,24 @@ fn trim_indentation(raw: &str, indent: usize) -> String {
 ///
 /// For a class/interface/enum (and a trait, which is class-kind), this is the
 /// container signature line, `{`, one line per direct member in source order,
-/// and `}`. A method member collapses its body to ` { … }`; every other member
-/// kind (property, constant, enum case) ends with `;`. A non-container symbol
-/// returns its own signature unchanged.
+/// and `}`. A method member with a body collapses it to ` { … }`; a bodyless
+/// method (abstract or interface) and every other member kind (property,
+/// constant, enum case) end with `;`. A non-container symbol returns its own
+/// signature unchanged.
 ///
-/// `source` is part of the adapter contract; member headers are already stored
-/// on each [`ExtractedSymbol`], so it is not consulted here.
+/// A promoted constructor property is declared inside the constructor's
+/// parameter list and already appears there, so it is not listed again as a
+/// standalone member: the constructor signature is the one place a promoted
+/// property is visible in the collapsed form. It remains an addressable symbol
+/// in the extracted facts; only this summary omits the duplicate line.
+///
+/// `source` is used to tell a method with a body from a bodyless one: the
+/// stored signature stops at the body `{`, so only the declaration span shows
+/// whether a body follows.
 pub fn signature_summary(
     symbol: &ExtractedSymbol,
     members: &[ExtractedSymbol],
-    _source: &str,
+    source: &str,
 ) -> String {
     if !is_container(symbol.kind) {
         return symbol.signature.clone().unwrap_or_default();
@@ -114,21 +147,57 @@ pub fn signature_summary(
     let mut summary = String::new();
     summary.push_str(symbol.signature.as_deref().unwrap_or(""));
     summary.push_str("\n{\n");
+    let mut emitted: Vec<Span> = Vec::new();
     for member in members {
+        // Skip a member nested inside an already-emitted member. In practice
+        // this is the promoted constructor property, whose span lies inside
+        // the constructor's. Members of one multi-name declaration share a
+        // span but do not contain each other, so they are all listed.
+        if emitted
+            .iter()
+            .any(|span| strictly_contains(span, &member.span))
+        {
+            continue;
+        }
         let signature = member.signature.as_deref().unwrap_or("");
         summary.push_str("    ");
         summary.push_str(signature);
         match member.kind {
-            // A method body is replaced by `{ … }`; an interface or abstract
-            // method has no body to replace but is still callable, so it keeps
-            // the same collapsed shape.
-            SymbolKind::Method => summary.push_str(" { … }\n"),
-            // Properties, constants, and enum cases are body-free already.
+            // Only a method that actually has a body collapses to `{ … }`; an
+            // abstract or interface method has nothing to replace.
+            SymbolKind::Method if has_body(member, source) => summary.push_str(" { … }\n"),
             _ => summary.push_str(";\n"),
         }
+        emitted.push(member.span);
     }
     summary.push('}');
     summary
+}
+
+/// Whether `outer` strictly contains `inner`.
+///
+/// Strict so that two members sharing one declaration span (a multi-name
+/// property or constant) are not treated as nesting.
+fn strictly_contains(outer: &Span, inner: &Span) -> bool {
+    outer.start_byte() <= inner.start_byte()
+        && inner.end_byte() <= outer.end_byte()
+        && (outer.start_byte() < inner.start_byte() || inner.end_byte() < outer.end_byte())
+}
+
+/// Whether the declaration at `symbol.span` ends with a body block.
+///
+/// The stored signature stops at the body `{`, so it cannot distinguish an
+/// abstract or interface method from one with a body. The declaration span
+/// does: a body ends with `}`, a bodyless declaration with `;`.
+fn has_body(symbol: &ExtractedSymbol, source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let start = symbol.span.start_byte() as usize;
+    let end = (symbol.span.end_byte() as usize).min(bytes.len());
+    bytes[start..end]
+        .iter()
+        .rev()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| *byte == b'}')
 }
 
 /// Decodes a source byte range as UTF-8 (lossy only if the caller violated the
@@ -300,9 +369,10 @@ final class SurveyService
         (container, members)
     }
 
-    /// An interface summary lists its bodyless methods with collapsed bodies.
+    /// An interface summary lists its bodyless methods without a body marker:
+    /// an interface method has no body to collapse.
     #[test]
-    fn interface_collapsed_form_lists_bodyless_methods() {
+    fn interface_collapsed_form_lists_bodyless_methods_without_a_body() {
         let (source, extracted) = extract_fixture("Interface.php");
         let source = String::from_utf8(source).expect("fixture is UTF-8");
         let (interface, members) = container_members(&extracted, "App\\Contracts\\Named");
@@ -311,10 +381,42 @@ final class SurveyService
 interface Named
 {
     public const KIND = 'named';
-    public function name(): string { … }
-    public function set(int $value): void { … }
+    public function name(): string;
+    public function set(int $value): void;
 }";
-        assert_eq!(signature_summary(&interface, &members, &source), expected);
+        let summary = signature_summary(&interface, &members, &source);
+        assert_eq!(summary, expected);
+        assert!(
+            !summary.contains('…'),
+            "no interface member may carry a body marker: {summary:?}"
+        );
+    }
+
+    /// An interface summary proves the body-marker rule independently of the
+    /// exact expected string: no rendered member line carries ` { … }`, because
+    /// an interface method declares no body.
+    #[test]
+    fn interface_summary_has_no_body_marker() {
+        let (source, extracted) = extract_fixture("Interface.php");
+        let source = String::from_utf8(source).expect("fixture is UTF-8");
+        let (interface, members) = container_members(&extracted, "App\\Contracts\\Named");
+
+        let summary = signature_summary(&interface, &members, &source);
+        assert!(
+            !summary.contains('…') && !summary.contains("{ … }"),
+            "an interface method has no body to collapse: {summary:?}"
+        );
+        let method_lines = summary
+            .lines()
+            .filter(|line| line.contains("function "))
+            .collect::<Vec<_>>();
+        assert_eq!(method_lines.len(), 2, "{summary:?}");
+        assert!(
+            method_lines
+                .iter()
+                .all(|line| line.trim_end().ends_with(';')),
+            "each interface method line ends with `;`: {method_lines:?}"
+        );
     }
 
     /// An enum summary lists its cases (recorded as `const`) with `;`.
@@ -362,9 +464,10 @@ trait Greets
         );
     }
 
-    /// Every member kind appears once per declared name: multi-name
-    /// declarations repeat the shared header, and promoted properties are
-    /// ordinary `;` members after the constructor.
+    /// Each member kind appears once per declared name: a multi-name
+    /// declaration renders one line per name with only that name, a bodyless
+    /// abstract method has no body marker, and a promoted property appears once
+    /// inside the constructor signature rather than again as a member.
     #[test]
     fn class_collapsed_form_covers_multi_name_and_promoted_members() {
         let (source, extracted) = extract_fixture("Members.php");
@@ -374,16 +477,14 @@ trait Greets
         let expected = "\
 abstract class AbstractThing
 {
-    public const FIRST = 1, SECOND = 2;
-    public const FIRST = 1, SECOND = 2;
+    public const FIRST = 1;
+    public const SECOND = 2;
     public static int $count = 0;
     public readonly string $title;
-    public int $left, $right = 2;
-    public int $left, $right = 2;
-    abstract public function describe(): string { … }
+    public int $left;
+    public int $right = 2;
+    abstract public function describe(): string;
     public function __construct(private int $seed, public string $tag = 'x') { … }
-    private int $seed;
-    public string $tag = 'x';
 }";
         assert_eq!(signature_summary(&class, &members, &source), expected);
     }

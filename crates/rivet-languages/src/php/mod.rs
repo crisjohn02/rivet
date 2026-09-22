@@ -266,7 +266,7 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
                     };
                     raw.push(member(
                         kind,
-                        &header,
+                        &member_header(&header, declaration, element, source),
                         node_text(name, source),
                         declaration.id(),
                         enclosing_container(element),
@@ -302,7 +302,7 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
                     };
                     raw.push(member(
                         kind,
-                        &header,
+                        &member_header(&header, declaration, element, source),
                         node_text(name, source),
                         declaration.id(),
                         enclosing_container(element),
@@ -357,6 +357,26 @@ fn member(
         node_id,
         container_id: container.map(|node| node.id()),
         signature: header.signature.clone(),
+        doc_comment: header.doc_comment.clone(),
+    }
+}
+
+/// The shared declaration fields with a signature that names only `element`.
+///
+/// A multi-name property or constant declaration yields one symbol per element,
+/// all sharing the whole declaration span and doc comment. Replacing only the
+/// signature keeps each member's own name in its header without moving any
+/// stored byte span.
+fn member_header(
+    header: &DeclarationHeader,
+    declaration: Node<'_>,
+    element: Node<'_>,
+    source: &[u8],
+) -> DeclarationHeader {
+    DeclarationHeader {
+        start_byte: header.start_byte,
+        end_byte: header.end_byte,
+        signature: signature::element_header(declaration, element, source),
         doc_comment: header.doc_comment.clone(),
     }
 }

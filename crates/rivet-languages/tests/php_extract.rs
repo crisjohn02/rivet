@@ -306,6 +306,32 @@ fn promoted_and_multi_name_members_are_extracted() {
             "multi-name members share the declaration span"
         );
     }
+
+    // Each member's stored signature names only itself, not the shared header.
+    assert_eq!(
+        find("App\\Members\\AbstractThing::FIRST")
+            .signature
+            .as_deref(),
+        Some("public const FIRST = 1")
+    );
+    assert_eq!(
+        find("App\\Members\\AbstractThing::SECOND")
+            .signature
+            .as_deref(),
+        Some("public const SECOND = 2")
+    );
+    assert_eq!(
+        find("App\\Members\\AbstractThing::$left")
+            .signature
+            .as_deref(),
+        Some("public int $left")
+    );
+    assert_eq!(
+        find("App\\Members\\AbstractThing::$right")
+            .signature
+            .as_deref(),
+        Some("public int $right = 2")
+    );
 }
 
 /// An interface's bodyless method keeps a sensible signature: `header()` drops
