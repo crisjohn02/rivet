@@ -43,6 +43,9 @@ enum Command {
         /// Freshness mode, overriding config.
         #[arg(long, value_name = "content|metadata")]
         freshness: Option<String>,
+        /// Answer from the committed snapshot. Rejected for `index`.
+        #[arg(long = "no-refresh")]
+        no_refresh: bool,
     },
     /// Locate a symbol declaration.
     Symbol {
@@ -60,6 +63,12 @@ enum Command {
         /// Include the symbol's source slice from stored bytes.
         #[arg(long)]
         source: bool,
+        /// Freshness mode, overriding config.
+        #[arg(long, value_name = "content|metadata")]
+        freshness: Option<String>,
+        /// Answer from the committed snapshot without refreshing.
+        #[arg(long = "no-refresh")]
+        no_refresh: bool,
     },
     /// Find references to a symbol.
     Refs {
@@ -113,12 +122,14 @@ fn main() {
             timing,
             languages,
             freshness,
+            no_refresh,
         } => {
             let options = index::Options {
                 force,
                 timing,
                 languages,
                 freshness,
+                no_refresh,
             };
             match index::run(options) {
                 Ok(report) => {
@@ -137,12 +148,16 @@ fn main() {
             offset,
             signature_only,
             source,
+            freshness,
+            no_refresh,
         } => {
             let options = symbol::Options {
                 limit,
                 offset,
                 signature_only,
                 source,
+                freshness,
+                no_refresh,
             };
             match symbol::run(&query, options) {
                 Ok(value) => {

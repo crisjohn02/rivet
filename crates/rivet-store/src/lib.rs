@@ -217,6 +217,9 @@ pub struct InventoryInput {
     /// Every extracted symbol for the current inventory. Symbols are replaced
     /// per file inside the same transaction as the file rows.
     pub symbols: Vec<SymbolRow>,
+    /// `--force`: delete every stored fact and rebuild it in this same
+    /// transaction, so all current file rows count as `updated`.
+    pub force: bool,
 }
 
 /// Counts and digest describing one [`Store::publish_inventory`] call.
@@ -349,11 +352,28 @@ impl Store {
     /// refused without modifying it. WAL journaling is enabled only after the
     /// format is known to be compatible.
     pub fn open(rivet_dir: &Path) -> Result<Store, Error> {
+        Store::open_with_rebuild(rivet_dir, false)
+    }
+
+    /// Opens the index cache, dropping and recreating the schema when an
+    /// existing database has an incompatible format version.
+    ///
+    /// This is the `index --force` path: the cache is disposable, so after
+    /// [`validate_destination`] accepts the destination an incompatible
+    /// database is torn down and the version-1 schema recreated (spec §13;
+    /// ARCHITECTURE "Concurrency and source consistency"). User source and
+    /// configuration are never touched.
+    pub fn open_rebuildable(rivet_dir: &Path) -> Result<Store, Error> {
+        Store::open_with_rebuild(rivet_dir, true)
+    }
+
+    /// Shared implementation of [`Store::open`] and [`Store::open_rebuildable`].
+    fn open_with_rebuild(rivet_dir: &Path, allow_rebuild: bool) -> Result<Store, Error> {
         validate_destination(rivet_dir)?;
         let path = rivet_dir.join(INDEX_DB_FILE);
         let conn = Connection::open(&path)?;
         configure_connection(&conn)?;
-        initialize(&conn)?;
+        initialize(&conn, allow_rebuild)?;
         // Set WAL only after the format is accepted so a refused database is
         // left byte-for-byte unchanged (spec §27).
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -367,7 +387,7 @@ impl Store {
     pub fn open_in_memory() -> Result<Store, Error> {
         let conn = Connection::open_in_memory()?;
         configure_connection(&conn)?;
-        initialize(&conn)?;
+        initialize(&conn, false)?;
         Ok(Store { conn })
     }
 
@@ -409,11 +429,17 @@ impl Store {
     /// stay untouched (spec §12.3; ARCHITECTURE "Refresh and invalidation" and
     /// "Concurrency and source consistency"). A duplicate new path aborts the
     /// transaction rather than collapsing two logically distinct inputs.
+    ///
+    /// When `input.force` is set, every stored fact (`files`, `symbols`,
+    /// `uses`, `bindings`, `scopes`, `diagnostics`) is deleted first inside the
+    /// same transaction and rebuilt, so every current file row counts as
+    /// `updated` (spec §13). The database file itself is never deleted.
     pub fn publish_inventory(&mut self, input: InventoryInput) -> Result<PublishReport, Error> {
         let InventoryInput {
             fingerprint,
             files,
             symbols,
+            force,
         } = input;
 
         // Sort by path bytes so writes and the digest are deterministic and
@@ -433,8 +459,20 @@ impl Store {
             .filter(|path| !incoming.contains(path.as_str()))
             .count() as u64;
 
-        // Delete rows that left the eligible set before writing the new ones.
-        {
+        // A forced rebuild discards every stored fact before writing the new
+        // inventory. Child tables are cleared before their parents so foreign
+        // keys never see a dangling reference; `diagnostics` has no foreign key
+        // and is cleared explicitly.
+        if force {
+            tx.execute("DELETE FROM bindings", [])?;
+            tx.execute("DELETE FROM uses", [])?;
+            tx.execute("DELETE FROM scopes", [])?;
+            tx.execute("DELETE FROM diagnostics", [])?;
+            tx.execute("DELETE FROM symbols", [])?;
+            tx.execute("DELETE FROM files", [])?;
+        } else {
+            // Delete rows that left the eligible set before writing the new
+            // ones.
             let mut delete = tx.prepare("DELETE FROM files WHERE path = ?1")?;
             for path in previous.keys() {
                 if !incoming.contains(path.as_str()) {
@@ -463,23 +501,31 @@ impl Store {
                      parse_status = ?7
                  WHERE path = ?1",
             )?;
-            for file in &sorted {
-                match previous.get(&file.path) {
-                    Some((content_hash, parse_status, language))
-                        if *content_hash == file.content_hash
-                            && *parse_status == file.parse_status
-                            && *language == file.language =>
-                    {
-                        unchanged += 1;
-                        write_file_row(&mut update, file)?;
-                    }
-                    Some(_) => {
-                        updated += 1;
-                        write_file_row(&mut update, file)?;
-                    }
-                    None => {
-                        updated += 1;
-                        write_file_row(&mut insert, file)?;
+            if force {
+                // Every current row was just deleted, so all of them are new.
+                for file in &sorted {
+                    updated += 1;
+                    write_file_row(&mut insert, file)?;
+                }
+            } else {
+                for file in &sorted {
+                    match previous.get(&file.path) {
+                        Some((content_hash, parse_status, language))
+                            if *content_hash == file.content_hash
+                                && *parse_status == file.parse_status
+                                && *language == file.language =>
+                        {
+                            unchanged += 1;
+                            write_file_row(&mut update, file)?;
+                        }
+                        Some(_) => {
+                            updated += 1;
+                            write_file_row(&mut update, file)?;
+                        }
+                        None => {
+                            updated += 1;
+                            write_file_row(&mut insert, file)?;
+                        }
                     }
                 }
             }
@@ -797,12 +843,57 @@ fn pragma_foreign_keys(conn: &Connection) -> Result<bool, Error> {
 }
 
 /// Creates the schema when empty, or validates an existing format version.
-fn initialize(conn: &Connection) -> Result<(), Error> {
+///
+/// When `allow_rebuild` is set and the stored version differs, the disposable
+/// cache is torn down and recreated instead of being refused.
+fn initialize(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
     match read_existing_version(conn)? {
         None => create_schema(conn),
         Some(found) if found == INDEX_FORMAT_VERSION => Ok(()),
+        Some(_) if allow_rebuild => rebuild_schema(conn),
         Some(found) => Err(Error::IncompatibleIndexFormat { found }),
     }
+}
+
+/// Drops every user table and recreates the version-1 schema atomically.
+///
+/// Foreign keys are disabled for the teardown so tables can be dropped in any
+/// order; they are re-enabled (and re-verified) before returning. Used only by
+/// [`Store::open_rebuildable`] on a database already accepted by
+/// [`validate_destination`].
+fn rebuild_schema(conn: &Connection) -> Result<(), Error> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let tables: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()?
+    };
+
+    let tx = conn.unchecked_transaction()?;
+    for name in &tables {
+        tx.execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_identifier(name)))?;
+    }
+    tx.execute_batch(SCHEMA_SQL)?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["index_format_version", INDEX_FORMAT_VERSION],
+    )?;
+    tx.commit()?;
+
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    if !pragma_foreign_keys(conn)? {
+        return Err(Error::Configuration {
+            detail: "PRAGMA foreign_keys did not remain ON after rebuild".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Quotes a SQLite identifier by doubling embedded double quotes.
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Reads `meta.index_format_version`, or `None` when no `meta` table exists.
@@ -1025,6 +1116,7 @@ mod tests {
             fingerprint,
             files,
             symbols: Vec::new(),
+            force: false,
         }
     }
 
@@ -1152,6 +1244,53 @@ mod tests {
             .unwrap();
         assert_eq!((after.updated, after.unchanged, after.deleted), (0, 2, 0));
         assert_ne!(after.digest, before.digest);
+    }
+
+    #[test]
+    fn forced_publish_rebuilds_all_rows_and_keeps_digest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let files = vec![sample_file("a.php"), sample_file("b.php")];
+        let before = publish(&mut store, files.clone());
+
+        let after = store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files,
+                symbols: Vec::new(),
+                force: true,
+            })
+            .unwrap();
+        assert_eq!((after.updated, after.unchanged, after.deleted), (2, 0, 0));
+        assert_eq!(after.digest, before.digest, "content is unchanged");
+        assert_eq!(store.list_files().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn open_rebuildable_recreates_incompatible_schema() {
+        let temp = TempDir::new("rebuild");
+        let rivet_dir = temp.path();
+        {
+            let store = Store::open(rivet_dir).unwrap();
+            store.set_meta("index_format_version", "99").unwrap();
+            store.upsert_file(&sample_file("a.php")).unwrap();
+        }
+
+        // A plain open still refuses the incompatible database.
+        assert!(matches!(
+            Store::open(rivet_dir).unwrap_err(),
+            Error::IncompatibleIndexFormat { .. }
+        ));
+
+        let store = Store::open_rebuildable(rivet_dir).unwrap();
+        assert_eq!(
+            store.get_meta("index_format_version").unwrap().as_deref(),
+            Some(INDEX_FORMAT_VERSION)
+        );
+        assert!(
+            store.list_files().unwrap().is_empty(),
+            "the rebuild must discard the old inventory"
+        );
+        assert!(store.pragma_foreign_keys().unwrap());
     }
 
     #[test]
@@ -1452,6 +1591,7 @@ mod tests {
                     sample_file("m.php"),
                 ],
                 symbols: rows,
+                force: false,
             })
             .unwrap();
 
@@ -1481,6 +1621,7 @@ mod tests {
                 fingerprint: sample_fingerprint(),
                 files: vec![sample_file("a.php")],
                 symbols: vec![sample_symbol("a.php", "a#one", "one", 0)],
+                force: false,
             })
             .unwrap();
         assert_eq!(store.list_symbols().unwrap().len(), 1);
@@ -1493,6 +1634,7 @@ mod tests {
                 fingerprint: sample_fingerprint(),
                 files: vec![failed],
                 symbols: Vec::new(),
+                force: false,
             })
             .unwrap();
         assert!(store.list_symbols().unwrap().is_empty());

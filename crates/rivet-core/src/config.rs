@@ -44,6 +44,11 @@ default_limit = 50
 ";
 
 /// How freshness is verified before answering a query.
+///
+/// `Content` and `Metadata` are the only values accepted from
+/// `.rivet/config.toml` or `--freshness`; `Cached` is reported only by an
+/// explicit `--no-refresh` query that answers from the committed snapshot
+/// (spec §12.4; OUTPUT-CONTRACT "Common index metadata").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Freshness {
     /// Read and hash source content.
@@ -51,6 +56,8 @@ pub enum Freshness {
     Content,
     /// Trust size and modification time.
     Metadata,
+    /// No refresh: answer from the committed snapshot.
+    Cached,
 }
 
 impl Freshness {
@@ -59,6 +66,7 @@ impl Freshness {
         match self {
             Freshness::Content => "content",
             Freshness::Metadata => "metadata",
+            Freshness::Cached => "cached",
         }
     }
 }

@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use rivet_core::{Config, ConfigError, Freshness, RootError, WalkError};
 use rivet_languages::is_language_compiled;
 
-use crate::refresh::{RefreshMode, open_context, open_store, refresh};
+use crate::refresh::{RefreshMode, open_context, open_store, open_store_rebuildable, refresh};
 use crate::transport::CliError;
 
 /// Maximum number of diagnostic items emitted; counts stay exhaustive.
@@ -21,8 +21,7 @@ pub(crate) const DIAGNOSTIC_CAP: usize = 50;
 /// Options accepted by `rivet index`.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// `--force`: accepted for contract compatibility. T15 always discovers
-    /// changed content; T16 implements the explicit forced rebuild.
+    /// `--force`: delete every stored fact and rebuild it in one transaction.
     pub force: bool,
     /// `--timing`: include `elapsed_ms` in JSON output.
     pub timing: bool,
@@ -30,6 +29,8 @@ pub struct Options {
     pub languages: Option<String>,
     /// `--freshness content|metadata`: override the configured freshness.
     pub freshness: Option<String>,
+    /// `--no-refresh`: rejected for `index` (queries only).
+    pub no_refresh: bool,
 }
 
 /// Coverage skip counts, one per non-`ok` parse status.
@@ -92,12 +93,20 @@ pub struct Report {
 /// this wrapper only decides the effective flags and formats the outcome.
 pub fn run(options: Options) -> Result<Report, CliError> {
     let Options {
-        force: _force,
+        force,
         timing,
         languages,
         freshness,
+        no_refresh,
     } = options;
 
+    // Argument validation happens before any filesystem work (spec §27).
+    if no_refresh {
+        return Err(CliError::invalid_arguments(
+            "`index` cannot be combined with `--no-refresh`",
+            "Run `rivet index` to refresh, or use `--no-refresh` with a query command.",
+        ));
+    }
     let requested_languages = parse_languages(languages.as_deref())?;
     let requested_freshness = parse_freshness(freshness.as_deref())?;
 
@@ -106,22 +115,30 @@ pub fn run(options: Options) -> Result<Report, CliError> {
         Some(languages) => context.config.languages.enabled = languages,
         None => validate_configured_languages(&context.config)?,
     }
-    // `--freshness metadata` is recorded but T15 hashes source content in
-    // both modes; trusting size/mtime is T16.
     let effective_freshness = requested_freshness.unwrap_or(context.config.index.freshness);
+    let mode = refresh_mode(effective_freshness);
 
-    let mut store = open_store(&context.root)?;
-    let outcome = refresh(
-        &context.root.root,
-        &context.config,
-        &mut store,
-        RefreshMode::Content,
-    )?;
+    let mut store = if force {
+        open_store_rebuildable(&context.root)?
+    } else {
+        open_store(&context.root)?
+    };
+    let outcome = refresh(&context.root.root, &context.config, &mut store, mode, force)?;
 
     let mut report = outcome.report;
-    report.freshness = effective_freshness;
     report.timing = timing;
     Ok(report)
+}
+
+/// Maps an effective freshness to the refresh behavior it selects.
+///
+/// `Cached` never reaches this function: it cannot come from config or
+/// `--freshness`, and `--no-refresh` is rejected for `index`.
+pub(crate) fn refresh_mode(freshness: Freshness) -> RefreshMode {
+    match freshness {
+        Freshness::Metadata => RefreshMode::Metadata,
+        Freshness::Content | Freshness::Cached => RefreshMode::Content,
+    }
 }
 
 /// Builds the top-level `index --json` object (without `schema_version`, which
@@ -220,7 +237,7 @@ fn parse_languages(value: Option<&str>) -> Result<Option<Vec<String>>, CliError>
 }
 
 /// Parses `--freshness`, rejecting unknown values before any filesystem work.
-fn parse_freshness(value: Option<&str>) -> Result<Option<Freshness>, CliError> {
+pub(crate) fn parse_freshness(value: Option<&str>) -> Result<Option<Freshness>, CliError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -285,7 +302,7 @@ pub(crate) fn walk_error(error: WalkError) -> CliError {
 pub(crate) fn store_error(error: rivet_store::Error) -> CliError {
     let hint = match &error {
         rivet_store::Error::IncompatibleIndexFormat { .. } => {
-            "Delete .rivet/index.db and re-run the index."
+            "Run `rivet index --force` to rebuild the disposable cache."
         }
         rivet_store::Error::InvalidDestination { .. } => {
             "Check that .rivet/ is a real writable directory, not a symlink."

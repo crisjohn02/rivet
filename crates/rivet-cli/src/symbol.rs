@@ -13,7 +13,7 @@ use rivet_index::{QueryOutcome, resolve_query, suggestions};
 use rivet_store::{Store, SymbolRow};
 
 use crate::index;
-use crate::refresh::{RefreshMode, open_context, open_store, refresh};
+use crate::refresh::{cached_report, open_cached_store, open_context, open_store, refresh};
 use crate::transport::CliError;
 
 /// The default `--limit` and its documented maximum (OUTPUT-CONTRACT
@@ -33,6 +33,10 @@ pub struct Options {
     pub signature_only: bool,
     /// `--source`: include the symbol's source slice from stored bytes.
     pub source: bool,
+    /// `--freshness content|metadata`: override the configured freshness.
+    pub freshness: Option<String>,
+    /// `--no-refresh`: answer from the committed snapshot without refreshing.
+    pub no_refresh: bool,
 }
 
 /// Runs one `rivet symbol` and returns the success object (without the
@@ -43,6 +47,8 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
         offset,
         signature_only,
         source,
+        freshness,
+        no_refresh,
     } = options;
 
     // Argument validation happens before any filesystem work (spec §27).
@@ -52,21 +58,33 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
             "Pass only one of `--source` or `--signature-only`.",
         ));
     }
+    if no_refresh && freshness.is_some() {
+        return Err(CliError::invalid_arguments(
+            "`--no-refresh` cannot be combined with `--freshness`",
+            "Drop `--freshness` when answering from the committed snapshot.",
+        ));
+    }
     let limit = parse_limit(limit)?;
     let offset = offset.unwrap_or(0);
+    // Parse `--freshness` before any filesystem work (spec §27).
+    let requested_freshness = index::parse_freshness(freshness.as_deref())?;
 
     // Refresh first so query results describe the current working tree, then
-    // read every row from the committed snapshot in the same store.
+    // read every row from the committed snapshot in the same store. With
+    // `--no-refresh`, open the committed snapshot directly and never walk.
     let context = open_context()?;
     index::validate_configured_languages(&context.config)?;
-    let mut store = open_store(&context.root)?;
-    let outcome = refresh(
-        &context.root.root,
-        &context.config,
-        &mut store,
-        RefreshMode::Content,
-    )?;
-    let report = outcome.report;
+    let (store, report) = if no_refresh {
+        let store = open_cached_store(&context.root)?;
+        let report = cached_report(&store, false)?;
+        (store, report)
+    } else {
+        let effective_freshness = requested_freshness.unwrap_or(context.config.index.freshness);
+        let mode = index::refresh_mode(effective_freshness);
+        let mut store = open_store(&context.root)?;
+        let report = refresh(&context.root.root, &context.config, &mut store, mode, false)?.report;
+        (store, report)
+    };
     let matches = match resolve_query(&store, query).map_err(index::store_error)? {
         QueryOutcome::Symbols(matches) => matches,
         QueryOutcome::PathNotIndexed { path } => {
