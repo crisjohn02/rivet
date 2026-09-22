@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T03 |
-| Next task | T04 |
+| Last completed task | T04 |
+| Next task | T05 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | rustc/cargo 1.98.1. T03 added `rivet-core` `span.rs`/`id.rs`/`kinds.rs` (no new deps): `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass; `cargo test -p rivet-core` 12 passed, 0 failed. |
+| Last checks | rustc/cargo 1.98.1 (T03). T04 added the three-file PHP fixture plus gold spans outside it; `python3 tests/gold/check_gold.py` passes (21 gold entries verified); `php -l` reports no syntax errors. No Rust changes. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -49,7 +49,7 @@ Read: BUILDING workspace/dependency guidance; ARCHITECTURE workspace boundaries;
 | [x] | T01 | Create the local Rust workspace and runnable CLI shell. Check the installed toolchain, create the six planned crate boundaries with minimal contents, and keep packages unpublished. Add a minimal `.gitignore` for generated build/cache files. | Workspace checks successfully and `rivet --version` runs. Record the toolchain used. No scanner/parser/database implementation. |
 | [x] | T02 | Pin compatible Tree-sitter, PHP, TypeScript/TSX grammar dependencies; wire language features and add tiny grammar smoke samples. | PHP and TSX snippets parse with their correct grammars; no-default, PHP-only, and default builds work. Commit the lockfile when version control is available. No TypeScript extraction. |
 | [x] | T03 | Implement shared spans, symbol IDs, and resolution enums only. | Checks cover UTF-8/CRLF positions, `%`/`#` escaping, and duplicate ordinals. No database or language resolution. |
-| [ ] | T04 | Add a three-file authored PHP fixture and exact gold spans outside the fixture source. Include two same-name methods, an alias, and a top-level call. | Expected declarations/use locations are independently readable from the fixture. Record which cases remain unresolved by design. Do not build a general fixture framework. |
+| [x] | T04 | Add a three-file authored PHP fixture and exact gold spans outside the fixture source. Include two same-name methods, an alias, and a top-level call. | Expected declarations/use locations are independently readable from the fixture. Record which cases remain unresolved by design. Do not build a general fixture framework. |
 
 **Checkpoint A:** run workspace tests and feature builds once. Record compatibility decisions in the checkpoint or BUILDING, without expanding the architecture.
 
