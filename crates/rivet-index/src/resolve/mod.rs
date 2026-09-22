@@ -44,7 +44,9 @@ pub(crate) struct ScopeFacts {
     pub(crate) imports: Vec<ScopeImport>,
     /// Canonical IDs declared directly in the use's scope chain, nearest first.
     pub(crate) declares: Vec<SymbolId>,
-    /// The enclosing namespace's qualified name, when the file declares one.
+    /// The qualified name of the namespace block that owns the use, found as
+    /// the `module` declared in its block's top-level scope. `None` in a file
+    /// with no namespace and in a global `namespace { }` block (AF1).
     pub(crate) namespace: Option<String>,
     /// Simple variable assignments recorded directly in the use's own scope.
     /// PHP variables do not cross function bodies, so only the use's own scope
@@ -59,6 +61,10 @@ pub(crate) struct ScopeFacts {
     /// `$GLOBALS` write, `extract`, `eval`, or a dynamic-callee call. When set,
     /// no `new`-receiver binding is recorded anywhere in that scope.
     pub(crate) unanalysable: bool,
+    /// Whether any scope on the use's chain cannot be attributed to exactly
+    /// one namespace block (AF1). Every rule depends on the namespace, so the
+    /// driver records no binding for such a use.
+    pub(crate) namespace_unattributed: bool,
 }
 
 /// One parsed `scopes` row's facts that resolution needs.
@@ -69,12 +75,14 @@ struct ScopeData<'a> {
     new_bindings: Vec<NewBinding>,
     call_args: Vec<CallArg>,
     unanalysable: bool,
+    namespace_unattributed: bool,
 }
 
 /// The persisted `scopes.facts_json` shape, read back without reparsing.
 ///
 /// `typed_bindings` is ignored in T19; T20/T21 extend this struct when their
-/// rules need more facts. T21b adds `call_args` and `unanalysable`.
+/// rules need more facts. T21b adds `call_args` and `unanalysable`; AF1 adds
+/// `namespace_unattributed`.
 #[derive(Deserialize, Default)]
 struct PersistedScopeFacts {
     #[serde(default)]
@@ -87,6 +95,8 @@ struct PersistedScopeFacts {
     call_args: Vec<CallArg>,
     #[serde(default)]
     unanalysable: bool,
+    #[serde(default)]
+    namespace_unattributed: bool,
 }
 
 /// Symbol lookups shared by every rule.
@@ -276,6 +286,7 @@ impl<'a> Resolver<'a> {
                     new_bindings: parsed.new_bindings,
                     call_args: parsed.call_args,
                     unanalysable: parsed.unanalysable,
+                    namespace_unattributed: parsed.namespace_unattributed,
                 },
             );
         }
@@ -309,6 +320,11 @@ impl<'a> Resolver<'a> {
                 continue;
             };
             let facts = self.scope_facts_for(use_row);
+            // A use no single namespace block owns has no trustworthy lexical
+            // context; never guess one (AF1).
+            if facts.namespace_unattributed {
+                continue;
+            }
             for rule in RULES {
                 if let Some((target_id, resolution)) = rule(&self.ctx, use_row, &facts) {
                     bindings.push(BindingRow {
@@ -332,6 +348,7 @@ impl<'a> Resolver<'a> {
             new_bindings: Vec::new(),
             call_args: Vec::new(),
             unanalysable: false,
+            namespace_unattributed: false,
         };
         let mut key = Some(use_row.scope_key.as_str());
         let mut own_scope = true;
@@ -341,6 +358,7 @@ impl<'a> Resolver<'a> {
             };
             facts.imports.extend(scope.imports.iter().cloned());
             facts.declares.extend(scope.declares.iter().cloned());
+            facts.namespace_unattributed |= scope.namespace_unattributed;
             // Variable assignments do not cross function bodies in PHP, so only
             // the use's own scope contributes them.
             if own_scope {

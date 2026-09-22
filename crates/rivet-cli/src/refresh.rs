@@ -800,6 +800,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         new_bindings: &'a [NewBinding],
         call_args: &'a [CallArg],
         unanalysable: bool,
+        namespace_unattributed: bool,
         declares: Vec<&'a str>,
     }
 
@@ -819,6 +820,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                 new_bindings: &scope.facts.new_bindings,
                 call_args: &scope.facts.call_args,
                 unanalysable: scope.facts.unanalysable,
+                namespace_unattributed: scope.facts.namespace_unattributed,
                 declares,
             };
             ScopeRow {

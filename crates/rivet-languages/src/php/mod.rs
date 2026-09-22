@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 use rivet_core::{Diagnostic, ExtractedFile, ExtractedSymbol, Span, SymbolKind};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
+mod namespaces;
 mod signature;
 mod uses;
 pub use signature::signature_summary;
@@ -79,9 +80,10 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
         };
     }
 
-    let raw = collect_raw(source, root);
+    let layout = namespaces::NamespaceLayout::new(root, source);
+    let raw = collect_raw(source, root, &layout);
     let symbols = build_symbols(raw);
-    let (uses, imports, scopes) = uses::extract_uses(source, root, &symbols);
+    let (uses, imports, scopes) = uses::extract_uses(source, root, &symbols, &layout);
     ExtractedFile {
         symbols,
         uses,
@@ -140,13 +142,16 @@ fn scan_tree(root: Node<'_>) -> Scan {
 }
 
 /// Run the symbol query and turn captures into unresolved raw records.
-fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
+fn collect_raw(
+    source: &[u8],
+    root: Node<'_>,
+    layout: &namespaces::NamespaceLayout,
+) -> Vec<RawSymbol> {
     let query = symbols_query();
     let capture_names = query.capture_names();
     let mut query_cursor = QueryCursor::new();
     let mut matches = query_cursor.matches(query, root, source);
     let mut raw: Vec<RawSymbol> = Vec::new();
-    let mut namespaces: Vec<(u32, Option<String>)> = Vec::new();
     let mut child_cursor = root.walk();
     let mut element_cursor = root.walk();
 
@@ -222,9 +227,10 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
         };
         match kind {
             SymbolKind::Module => {
+                // A global `namespace { }` block has no name and is not an
+                // addressable symbol; `layout` still records it as a block.
                 if let Some(name) = name_node {
                     let name = node_text(name, source);
-                    namespaces.push((start_byte, Some(name.clone())));
                     raw.push(RawSymbol {
                         kind,
                         name,
@@ -329,13 +335,14 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
     }
 
     // Namespaces are siblings of the declarations they cover in the semicolon
-    // form, so associate by source order rather than ancestry.
-    namespaces.sort_by_key(|(start, _)| *start);
+    // form, so the shared layout associates by block range rather than
+    // ancestry. A global `namespace { }` block yields no namespace, so its
+    // declarations keep bare global names (AF1).
     for record in &mut raw {
         if record.kind == SymbolKind::Module {
             continue;
         }
-        record.namespace = namespace_at(&namespaces, record.start_byte);
+        record.namespace = layout.namespace_at(record.start_byte);
     }
     raw
 }
@@ -504,16 +511,6 @@ pub fn lookup_name(name: &str, kind: SymbolKind) -> String {
     match kind {
         SymbolKind::Property | SymbolKind::Const => name.to_string(),
         _ => name.to_lowercase(),
-    }
-}
-
-/// The active namespace name at `byte`, by source order.
-fn namespace_at(namespaces: &[(u32, Option<String>)], byte: u32) -> Option<String> {
-    let index = namespaces.partition_point(|(start, _)| *start < byte);
-    if index == 0 {
-        None
-    } else {
-        namespaces[index - 1].1.clone()
     }
 }
 
