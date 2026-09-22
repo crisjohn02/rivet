@@ -427,6 +427,7 @@ name = "rivet-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ignore",
  "rivet-core",
  "rivet-index",
  "rivet-languages",

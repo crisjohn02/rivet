@@ -1,19 +1,15 @@
 //! rivet command-line interface.
 //!
 //! Arguments, root discovery, scan/refresh orchestration, output, exit codes.
-
-mod index;
-mod references;
-mod refresh;
-mod refs;
-mod symbol;
-mod transport;
+//! The command implementations live in the `rivet_cli` library target so
+//! integration tests can drive the shared pipelines directly.
 
 use clap::Parser;
 use clap::error::ErrorKind;
 use serde_json::Map;
 
-use transport::{CliError, emit_error, emit_success};
+use rivet_cli::transport::{CliError, emit_error, emit_success};
+use rivet_cli::{index, refs, symbol};
 
 /// Agent-native codebase CLI: structural code navigation and token-budgeted context for coding agents.
 #[derive(Debug, Parser)]

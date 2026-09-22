@@ -17,6 +17,10 @@ lang-typescript = ["rivet-parser/lang-typescript", "rivet-languages/lang-typescr
 
 [dependencies]
 clap = { workspace = true }
+# Context test globs are gitignore-style path patterns (`tests/**`), so the
+# same pinned matcher the traversal uses is reused instead of a second pattern
+# language. T26's `context` module only.
+ignore = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rivet-core = { path = "../rivet-core" }
