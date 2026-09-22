@@ -32,6 +32,15 @@ function, and method names are lowercased (PHP is case-insensitive there).
 Property and constant names — including enum cases — keep their exact spelling
 (PHP is case-sensitive there).
 
+A use's lookup name (AF4) is its normalized short name (`use_short_name`): the
+last segment of a qualified spelling, without a leading `$`. Call, type, and
+class or function import uses fold ASCII case; property and constant accesses,
+`use const` aliases, and `unknown` uses (a bare identifier whose kind is not
+known) keep their case. Matching a use to a declaration folds by the
+*declaration's* kind (`rivet_index::lookup_name_matches`), comparing properties
+without the `$` on either side; `rivet symbol` short-name lookup applies the
+same comparison.
+
 Signatures are the declaration header as written, from the modifiers through
 the body `{` or the final `;`, with whitespace collapsed and a trailing `;`
 dropped. A `/** ... */` docblock immediately above (no blank line) attaches.
@@ -59,6 +68,21 @@ line per direct member, and `}`; method bodies collapse to `{ … }`.
 - A global scope records its explicit call sites and any `goto`; a function
   body records the names it can rebind through `global` or a literal
   `$GLOBALS` key, and whether it can rebind a global it does not name.
+
+## Explicit class references (AF4)
+
+- `Foo::make()`, `Foo::BAR`, `Foo::$prop`, and `Foo::class` record `Foo` as a
+  `type` use, which binds `exact` through the normal class path. The member
+  carries a `named_class` hint and binds `scoped` only when `Foo` declares it
+  directly. `::class` records no member use.
+- `self::` keeps its `self_or_static` hint and binds `scoped`; `static::` and
+  `parent::` bind nothing.
+- An `instanceof` class operand is a `type` use. A `catch` type already was.
+- An anonymous class body is walked. Its uses attach to the nearest named
+  container, but `$this`, `self`, `static`, and `new self` inside it record no
+  receiver evidence, since they name the anonymous class. Its own typed
+  properties still type `$this->prop` receivers.
+- An enum case's own name is not a use.
 
 ## Not resolved in v0.1
 

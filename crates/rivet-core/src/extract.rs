@@ -102,6 +102,14 @@ pub enum UseHint {
         #[serde(default)]
         origin: TypedOrigin,
     },
+    /// The receiver is a class named explicitly in a static call, a
+    /// class-constant access, or a static property access (`Foo::make()`,
+    /// `Foo::BAR`, `Foo::$prop`) (AF4). `self`, `static`, and `parent` are
+    /// never recorded this way.
+    NamedClass {
+        /// The class name exactly as written before `::`.
+        class_spelling: String,
+    },
     /// The use names an imported binding.
     Imported {
         /// The local binding name introduced by the import.

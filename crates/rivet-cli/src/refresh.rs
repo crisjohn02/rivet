@@ -774,10 +774,20 @@ fn use_rows(
     use rivet_core::{LineCol, LineIndex};
 
     let lines = LineIndex::new(source);
+    // The alias token of a `use const` import names a case-sensitive
+    // constant (AF4); the use itself records only `import`.
+    let const_imports: std::collections::HashSet<(u32, u32)> = extracted
+        .imports
+        .iter()
+        .filter(|import| import.kind == rivet_core::extract::ImportKind::Const)
+        .map(|import| (import.span.start_byte(), import.span.end_byte()))
+        .collect();
     extracted
         .uses
         .iter()
         .map(|use_| {
+            let const_import = use_.ref_kind == rivet_core::RefKind::Import
+                && const_imports.contains(&(use_.span.start_byte(), use_.span.end_byte()));
             let position = lines
                 .line_col(use_.span.start_byte())
                 .unwrap_or(LineCol { line: 1, column: 1 });
@@ -789,7 +799,7 @@ fn use_rows(
                     .and_then(|index| ids.get(index).cloned()),
                 scope_key: use_.scope_key.clone(),
                 spelling: use_.spelling.clone(),
-                lookup_name: use_lookup_name(&use_.spelling, use_.ref_kind),
+                lookup_name: use_lookup_name(&use_.spelling, use_.ref_kind, const_import),
                 ref_kind: use_.ref_kind,
                 start_byte: use_.span.start_byte(),
                 end_byte: use_.span.end_byte(),
@@ -887,22 +897,33 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
 
 /// The persisted `lookup_name` for one use.
 ///
-/// PHP call, type, and import names are case-insensitive, so those fold to
-/// lowercase; property and constant reads/writes keep their exact spelling.
-/// An `Unknown` use has no known referenced kind, so it is stored lowercase.
-/// Folding is ASCII-only, as PHP folds identifiers (AF2), so it matches the
-/// declaration side in [`rivet_languages::php::lookup_name`].
+/// The name is the use's normalized short name (AF4), so it is comparable with
+/// the `lookup_name` of the declaration it could name: the last segment of a
+/// qualified spelling (`\App\Foo`, `Sub\Missing\Foo`, and `namespace\Foo`
+/// all give `Foo`) with any leading `$` removed (`Foo::$count` gives `count`,
+/// like `$x->count`).
+///
+/// Case folding builds on AF2. PHP call, type, and class or function import
+/// names are case-insensitive, so those fold ASCII letters to lowercase, as
+/// [`rivet_languages::php::lookup_name`] folds the declaration side. Property
+/// and constant reads and writes, and the alias of a `use const` import
+/// (`const_import`), keep their exact spelling. An `unknown` use (a bare
+/// identifier such as the constant `LIMIT`) has no known referenced kind, so it
+/// keeps its exact spelling too, and the comparison folds it according to the
+/// candidate declaration's kind instead ([`rivet_index::lookup_name_matches`]).
 #[cfg(feature = "lang-php")]
-fn use_lookup_name(spelling: &str, ref_kind: rivet_core::RefKind) -> String {
+fn use_lookup_name(spelling: &str, ref_kind: rivet_core::RefKind, const_import: bool) -> String {
     use rivet_core::{RefKind, SymbolKind};
 
+    let short = rivet_languages::php::use_short_name(spelling);
     match ref_kind {
-        RefKind::Read | RefKind::Write | RefKind::Assignment => {
-            rivet_languages::php::lookup_name(spelling, SymbolKind::Property)
+        RefKind::Read | RefKind::Write | RefKind::Assignment | RefKind::Unknown => {
+            rivet_languages::php::lookup_name(short, SymbolKind::Property)
         }
-        RefKind::Call | RefKind::Type | RefKind::Import | RefKind::Unknown => {
-            spelling.to_ascii_lowercase()
+        RefKind::Import if const_import => {
+            rivet_languages::php::lookup_name(short, SymbolKind::Const)
         }
+        RefKind::Call | RefKind::Type | RefKind::Import => short.to_ascii_lowercase(),
     }
 }
 

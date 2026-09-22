@@ -5,7 +5,15 @@
 //! names a member of the class that encloses its containing symbol. The member
 //! binds only when that class declares it; inheritance is not traversed in
 //! v0.1, so a missing member records nothing. `parent::` is deliberately not
-//! bound because it names an ancestor class.
+//! bound because it names an ancestor class, and `static::` is not bound
+//! because it is late static binding, which v0.1 does not resolve (spec §11.4;
+//! AF4). Inside an anonymous class the extractor records no `This` or
+//! `SelfOrStatic` hint at all, because there they name the anonymous class.
+//!
+//! Rule 3 (AF4): a [`UseHint::NamedClass`] receiver (`Foo::make()`,
+//! `Foo::BAR`, `Foo::$prop`) resolves the class spelling through the same
+//! scope chain as a `type` use, then binds the named member only when that
+//! class declares it directly.
 //!
 //! Rule 2: a [`UseHint::Typed`] receiver resolves its type spelling through the
 //! same alias/fully-qualified/namespace-relative scope chain as a `type` use,
@@ -73,6 +81,9 @@ pub(crate) fn resolve(
             }
             resolve_class_spelling(ctx, &type_spelling, facts)?
         }
+        UseHint::NamedClass { class_spelling } => {
+            resolve_class_spelling(ctx, &class_spelling, facts)?
+        }
         _ => return None,
     };
     ctx.unique_member(&class.id, &use_row.spelling, member)
@@ -92,14 +103,16 @@ fn is_bare_variable(receiver: &str) -> bool {
 
 /// Whether a `This`/`SelfOrStatic` hint names the enclosing class itself.
 ///
-/// `$this` always does; `self` and `static` do too, but `parent` names the
-/// ancestor class, which v0.1 does not traverse.
+/// `$this` always does, and so does `self`. `parent` names the ancestor
+/// class, which v0.1 does not traverse, and `static` is late static binding,
+/// which may name a subclass (AF4; spec §11.4).
 fn names_enclosing_class(use_row: &UseRow, hint: &UseHint) -> bool {
     match hint {
         UseHint::This => use_row.receiver.as_deref() == Some("$this"),
-        UseHint::SelfOrStatic => use_row.receiver.as_deref().is_some_and(|receiver| {
-            receiver.eq_ignore_ascii_case("self") || receiver.eq_ignore_ascii_case("static")
-        }),
+        UseHint::SelfOrStatic => use_row
+            .receiver
+            .as_deref()
+            .is_some_and(|receiver| receiver.eq_ignore_ascii_case("self")),
         _ => false,
     }
 }
@@ -386,9 +399,10 @@ mod tests {
     }
 
     #[test]
-    fn static_missing_member_records_nothing() {
-        // `static::` resolves against the declaring class like `self::`, so a
-        // member the class does not declare stays unbound.
+    fn static_receiver_is_not_bound_even_when_the_member_exists() {
+        // `static::` is late static binding and may name a subclass, which
+        // v0.1 does not resolve (AF4; spec §11.4). Before AF4 this bound the
+        // enclosing class's `run` scoped.
         let class = symbol("Widget.php", "App\\Widget", SymbolKind::Class, None);
         let method = symbol(
             "Widget.php",
@@ -400,7 +414,7 @@ mod tests {
             vec![class, method],
             vec![use_row(
                 "Widget.php",
-                "launch",
+                "run",
                 RefKind::Call,
                 Some("static"),
                 Some("Widget.php#App\\Widget::run"),
@@ -408,6 +422,74 @@ mod tests {
                 "{\"kind\":\"self_or_static\"}",
             )],
             vec![scope("Widget.php", "2:0", None, &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    /// A `Foo::member` use under `namespace App` with a `NamedClass` hint.
+    fn named_class_store(spelling: &str, ref_kind: RefKind, members: Vec<SymbolRow>) -> Store {
+        let mut symbols = vec![
+            symbol("Ns.php", "App", SymbolKind::Module, None),
+            symbol("Foo.php", "App\\Foo", SymbolKind::Class, None),
+        ];
+        symbols.extend(members);
+        seed(
+            symbols,
+            vec![use_row(
+                "Ns.php",
+                spelling,
+                ref_kind,
+                Some("Foo"),
+                None,
+                "ns0:file",
+                "{\"kind\":\"named_class\",\"class_spelling\":\"Foo\"}",
+            )],
+            vec![scope("Ns.php", "ns0:file", None, &[], &["Ns.php#App"])],
+        )
+    }
+
+    #[test]
+    fn named_class_static_call_binds_a_declared_method_scoped() {
+        let make = symbol(
+            "Foo.php",
+            "App\\Foo::make",
+            SymbolKind::Method,
+            Some("Foo.php#App\\Foo"),
+        );
+        let store = named_class_store("make", RefKind::Call, vec![make]);
+        let binding = only_binding(&store);
+        assert_eq!(binding.target_id, "Foo.php#App\\Foo::make");
+        assert_eq!(binding.resolution, Resolution::Scoped);
+    }
+
+    #[test]
+    fn named_class_static_call_to_an_undeclared_method_records_nothing() {
+        // No inheritance traversal: a method the class does not declare
+        // directly binds nothing, even when a same-name property exists.
+        let items = symbol(
+            "Foo.php",
+            "App\\Foo::$make",
+            SymbolKind::Property,
+            Some("Foo.php#App\\Foo"),
+        );
+        let store = named_class_store("make", RefKind::Call, vec![items]);
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn named_class_with_an_unindexed_class_records_nothing() {
+        let store = seed(
+            vec![symbol("Ns.php", "App", SymbolKind::Module, None)],
+            vec![use_row(
+                "Ns.php",
+                "make",
+                RefKind::Call,
+                Some("Missing"),
+                None,
+                "ns0:file",
+                "{\"kind\":\"named_class\",\"class_spelling\":\"Missing\"}",
+            )],
+            vec![scope("Ns.php", "ns0:file", None, &[], &["Ns.php#App"])],
         );
         assert!(resolve_all(&store).expect("resolve").is_empty());
     }
