@@ -12,7 +12,7 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 | Next task | T36 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T35: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 609 passed, 0 failed; `python3 tests/gold/check_gold.py` verified 51 authored entries and skipped the private sample without env, and verified 51 + 28 private `fluent` entries with `RIVET_PRIVATE_GOLD_DIR`/`RIVET_CORPUS_DIR` set. |
+| Last checks | PF1: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 618 passed, 0 failed; `python3 tests/gold/check_gold.py` verified 51 authored entries and skipped the private sample without env, and verified 51 + 28 private `fluent` entries with `RIVET_PRIVATE_GOLD_DIR`/`RIVET_CORPUS_DIR` set. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -130,7 +130,7 @@ A whole-codebase adversarial audit on 2026-09-22 found defects the suites did no
 | [x] | AF4 | Close silent misses: walk anonymous class bodies (11); store a use's normalized short lookup name so unresolved qualified and constant uses name-match (12); record class references in static calls, class-constant access and `::class` (13); record an `instanceof` operand as a type use, restoring the binding AF2 correctly withdrew. | Each audit reproduction appears in refs; nothing previously correct changes tier. |
 | [x] | AF5 | Contract and coverage honesty: an invalid or unextracted TypeScript file is not reported as indexed (14); index-dependent errors carry `index` (15); `updated` counts regenerated files (16); the non-UTF-8 diagnostic reports a repository-relative path (17); `--no-refresh` rejects a cache from another extractor or resolver fingerprint (suspicion 2, confirmed before AF5). | Each item matches OUTPUT-CONTRACT or ARCHITECTURE, with a regression test. |
 | [x] | AF6 | Make `index --force` actually rebuild: reparse every eligible file from its bytes on disk rather than reinserting stored facts, so it can recover a cache whose facts are suspect. Found while reviewing T32. | Tampered stored facts that a normal refresh keeps are repaired by `--force`; `updated` counts files genuinely regenerated; the digest equals a normal index of the same content. |
-| [ ] | PF1 | Make a no-change refresh cheap. On the pinned `fluent` corpus a refresh that changes nothing takes 29.6 s against 3.9 s for a cold build, and every query refreshes first. Found by T35. | A no-change refresh writes no fact rows and re-resolves nothing, per the ARCHITECTURE pseudocode; it is far faster than a cold build on `fluent`; `--force` approaches cold-build time; outputs and digests are unchanged. |
+| [x] | PF1 | Make a no-change refresh cheap. On the pinned `fluent` corpus a refresh that changes nothing takes 29.6 s against 3.9 s for a cold build, and every query refreshes first. Found by T35. | A no-change refresh writes no fact rows and re-resolves nothing, per the ARCHITECTURE pseudocode; it is far faster than a cold build on `fluent`; `--force` approaches cold-build time; outputs and digests are unchanged. |
 
 ## F. Make the PHP slice safe and usable in a pilot
 

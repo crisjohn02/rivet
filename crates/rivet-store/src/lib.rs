@@ -80,6 +80,7 @@ CREATE TABLE symbols (
 CREATE INDEX symbols_lookup ON symbols(lookup_name);
 CREATE INDEX symbols_qname ON symbols(qualified_name);
 CREATE INDEX symbols_file ON symbols(file, start_byte);
+CREATE INDEX IF NOT EXISTS symbols_parent ON symbols(parent_id);
 
 CREATE TABLE uses (
   use_id INTEGER PRIMARY KEY,
@@ -124,6 +125,24 @@ CREATE TABLE diagnostics (
   start_byte INTEGER
 );
 ";
+
+/// The index on `symbols.parent_id` (PF1).
+///
+/// `symbols.parent_id REFERENCES symbols(id) ON DELETE SET NULL` makes every
+/// symbol delete look up that symbol's children. Without an index whose
+/// leading column is `parent_id` each lookup scans the whole `symbols` table,
+/// so replacing all N symbols costs O(N²) row checks. Every other foreign key
+/// already has an index on its referencing column.
+///
+/// The index is part of [`SCHEMA_SQL`] for a new database and is added to an
+/// existing version-1 database when it opens ([`ensure_additive_indexes`]).
+/// It changes no stored fact and no query result, so it needs no
+/// index-format version bump: an older build reading a database that has it
+/// behaves exactly as before, and a database without it is still valid.
+const PARENT_INDEX_NAME: &str = "symbols_parent";
+
+/// Creates [`PARENT_INDEX_NAME`] when missing.
+const PARENT_INDEX_SQL: &str = "CREATE INDEX IF NOT EXISTS symbols_parent ON symbols(parent_id)";
 
 /// Converts a [`rivet_core::walk::FileEntry`] nanosecond timestamp to the
 /// signed 64-bit integer SQLite stores.
@@ -317,8 +336,9 @@ pub struct InventoryInput {
     /// transaction.
     pub scopes: Vec<ScopeRow>,
     /// Every resolved binding for the current inventory. The whole table is
-    /// replaced: bindings are re-resolved for all uses on every publish
-    /// (spec §12.3). Each `use_id` must name a use in `uses`.
+    /// replaced: bindings are re-resolved for all uses whenever they are
+    /// replaced (spec §12.3; always, unless a [`StagePlan`] keeps them). Each
+    /// `use_id` must name a use in `uses`.
     pub bindings: Vec<BindingRow>,
     /// `--force`: delete every stored fact and rebuild it in this same
     /// transaction, so all current file rows count as `updated`.
@@ -328,6 +348,44 @@ pub struct InventoryInput {
     /// file reparsed after an extractor fingerprint change). Each counts as
     /// `updated`, never `unchanged`. A path not in `files` is ignored.
     pub regenerated: Vec<String>,
+}
+
+/// Which stored facts a [`WriteTxn::stage_refresh`] call may keep instead of
+/// rewriting (PF1; ARCHITECTURE "Refresh and invalidation": "replace file
+/// facts" only for changed content, and "if content, membership, or resolver
+/// fingerprint changed: clear bindings; re-resolve all persisted uses").
+///
+/// [`StagePlan::full`] keeps nothing, which is what
+/// [`WriteTxn::stage_inventory`] and [`Store::publish_inventory`] use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagePlan {
+    /// Current paths whose facts were regenerated (reparsed) by the caller.
+    /// `None` rewrites the facts of every current file.
+    ///
+    /// With `Some`, a current file's symbols, uses, and scopes are replaced
+    /// when it is listed here, is new, or its content hash, parse status,
+    /// language, or source presence differs from the stored row. Every other
+    /// current file keeps its stored fact rows untouched, and any rows the
+    /// caller supplied for it are ignored: the caller guarantees its stored
+    /// facts are still current (a refresh reuses them verbatim).
+    pub reparsed: Option<HashSet<String>>,
+    /// Whether the whole `bindings` table is cleared and replaced by
+    /// [`InventoryInput::bindings`]. When `false` the stored bindings are kept,
+    /// `InventoryInput::bindings` must be empty, and the staging fails unless
+    /// the publication changes no file's content, status, language, or facts
+    /// and deletes no file, since any such change can move a binding in an
+    /// unchanged file (T22).
+    pub replace_bindings: bool,
+}
+
+impl StagePlan {
+    /// Rewrite every fact and every binding.
+    pub fn full() -> StagePlan {
+        StagePlan {
+            reparsed: None,
+            replace_bindings: true,
+        }
+    }
 }
 
 /// Counts and digest describing one [`Store::publish_inventory`] call.
@@ -910,6 +968,72 @@ impl Store {
             Ok(rows.collect::<rusqlite::Result<Vec<BindingRow>>>()?)
         })
     }
+
+    /// Returns every persisted use ordered by `(file bytes, start_byte,
+    /// end_byte, ref_kind, use_id)`: per file, the same order as
+    /// [`Store::list_uses_for_file`], in one query.
+    pub fn list_uses(&self) -> Result<Vec<UseRow>, Error> {
+        self.select_uses(
+            &format!(
+                "SELECT {USE_COLUMNS} FROM uses \
+                 ORDER BY file COLLATE BINARY, start_byte, end_byte, \
+                 ref_kind COLLATE BINARY, use_id"
+            ),
+            [],
+        )
+    }
+
+    /// Returns every persisted scope ordered by `(file bytes, scope_key
+    /// bytes)`: per file, the same order as [`Store::list_scopes_for_file`],
+    /// in one query.
+    pub fn list_scopes(&self) -> Result<Vec<ScopeRow>, Error> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SCOPE_COLUMNS} FROM scopes \
+                 ORDER BY file COLLATE BINARY, scope_key COLLATE BINARY"
+            ))?;
+            let rows = stmt.query_map([], scope_row_from)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<ScopeRow>>>()?)
+        })
+    }
+
+    /// Returns the number of persisted symbols.
+    pub fn count_symbols(&self) -> Result<u64, Error> {
+        self.count_rows("SELECT COUNT(*) FROM symbols")
+    }
+
+    /// Returns the number of persisted uses.
+    pub fn count_uses(&self) -> Result<u64, Error> {
+        self.count_rows("SELECT COUNT(*) FROM uses")
+    }
+
+    /// Returns the number of persisted bindings.
+    pub fn count_bindings(&self) -> Result<u64, Error> {
+        self.count_rows("SELECT COUNT(*) FROM bindings")
+    }
+
+    /// Runs one `SELECT COUNT(*)` statement.
+    fn count_rows(&self, sql: &str) -> Result<u64, Error> {
+        self.read(|conn| {
+            let count: i64 = conn.query_row(sql, [], |row| row.get(0))?;
+            Ok(count as u64)
+        })
+    }
+
+    /// The number of rows inserted, updated, or deleted through this store's
+    /// connection since it opened, including foreign-key actions (SQLite
+    /// `sqlite3_total_changes64`). Tests use the difference across a refresh to
+    /// prove how many rows it wrote without depending on timing.
+    pub fn total_changes(&self) -> u64 {
+        self.conn.total_changes()
+    }
+
+    /// The underlying connection, for tests and diagnostics that inspect the
+    /// database directly (for example with temporary triggers). A write through
+    /// it bypasses every invariant this store maintains.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
 }
 
 /// The writer lock: one open `BEGIN IMMEDIATE` transaction on a [`Store`].
@@ -958,6 +1082,26 @@ impl WriteTxn<'_> {
     /// for the `force` and `regenerated` semantics. An error leaves the
     /// transaction open for the caller to drop, which rolls it back.
     pub fn stage_inventory(&mut self, input: InventoryInput) -> Result<StagedInventory, Error> {
+        self.stage_refresh(input, StagePlan::full())
+    }
+
+    /// [`WriteTxn::stage_inventory`] that keeps what `plan` allows (PF1).
+    ///
+    /// A `files` row is written only when one of its columns changes: a row
+    /// whose content hash, parse status, language, source presence, mtime,
+    /// and size all equal the stored row is left alone, and a row whose only
+    /// change is mtime or size has just those two columns updated. Facts are
+    /// replaced only for the files [`StagePlan::reparsed`] selects, and the
+    /// `bindings` table only when [`StagePlan::replace_bindings`] is set. The
+    /// `meta` values are written in [`WriteTxn::commit`] only when they differ.
+    /// A refresh that changes nothing therefore modifies no row at all.
+    ///
+    /// `force` ignores `plan` and rewrites everything.
+    pub fn stage_refresh(
+        &mut self,
+        input: InventoryInput,
+        plan: StagePlan,
+    ) -> Result<StagedInventory, Error> {
         let InventoryInput {
             fingerprint,
             files,
@@ -968,6 +1112,12 @@ impl WriteTxn<'_> {
             force,
             regenerated,
         } = input;
+        let plan = if force { StagePlan::full() } else { plan };
+        if !plan.replace_bindings && !bindings.is_empty() {
+            return Err(Error::TransactionState {
+                detail: "bindings were supplied but the plan keeps the stored bindings".to_string(),
+            });
+        }
         let tx: &Connection = &self.store.conn;
         // OUTPUT-CONTRACT "Administrative commands": "`updated` counts current
         // file rows with changed source/status/language or regenerated facts".
@@ -985,10 +1135,53 @@ impl WriteTxn<'_> {
             .filter(|path| !incoming.contains(path.as_str()))
             .count() as u64;
 
-        // Bindings are re-resolved for every persisted use on every publish, so
-        // the whole table is cleared before the new facts are written and the
-        // fresh rows are inserted after all uses exist (spec §12.3).
-        tx.execute("DELETE FROM bindings", [])?;
+        // Which current files get their facts rewritten, decided before any
+        // write from the stored rows. `None` in the plan selects every file.
+        let replace_facts: HashSet<&str> = sorted
+            .iter()
+            .filter(|file| match (&plan.reparsed, previous.get(&file.path)) {
+                (None, _) | (Some(_), None) => true,
+                (Some(reparsed), Some(stored)) => {
+                    reparsed.contains(&file.path) || !stored.same_content(file)
+                }
+            })
+            .map(|file| file.path.as_str())
+            .collect();
+
+        // Keeping the stored bindings is only sound when no fact, content,
+        // status, language, or membership changed (T22: a change in one file
+        // can move a binding in another). A reparse that reproduced a failed
+        // file's empty facts changes nothing and is allowed.
+        if !plan.replace_bindings {
+            let content_changed = deleted > 0
+                || sorted.iter().any(|file| match previous.get(&file.path) {
+                    None => true,
+                    Some(stored) => {
+                        !stored.same_content(file)
+                            || regenerated.contains(&file.path)
+                            // A rewritten `ok` file gets new use IDs, and
+                            // deleting its old uses cascades to their bindings.
+                            || (replace_facts.contains(file.path.as_str())
+                                && (file.parse_status == ParseStatus::Ok
+                                    || stored.parse_status == ParseStatus::Ok))
+                    }
+                });
+            if content_changed {
+                return Err(Error::TransactionState {
+                    detail: "the plan keeps stored bindings although file content, status, \
+                             membership, or facts changed"
+                        .to_string(),
+                });
+            }
+        }
+
+        // Bindings are re-resolved for every persisted use whenever anything
+        // they depend on changed, so the whole table is cleared before the new
+        // facts are written and the fresh rows are inserted after all uses
+        // exist (spec §12.3).
+        if plan.replace_bindings {
+            tx.execute("DELETE FROM bindings", [])?;
+        }
 
         // A forced rebuild discards every stored fact before writing the new
         // inventory. Child tables are cleared before their parents so foreign
@@ -1002,12 +1195,15 @@ impl WriteTxn<'_> {
             tx.execute("DELETE FROM files", [])?;
         } else {
             // Delete rows that left the eligible set before writing the new
-            // ones. `previous` is a `HashMap`; deletion order is unobservable.
+            // ones, in path order.
+            let mut gone: Vec<&String> = previous
+                .keys()
+                .filter(|path| !incoming.contains(path.as_str()))
+                .collect();
+            gone.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
             let mut delete = tx.prepare("DELETE FROM files WHERE path = ?1")?;
-            for path in previous.keys() {
-                if !incoming.contains(path.as_str()) {
-                    delete.execute(params![path])?;
-                }
+            for path in gone {
+                delete.execute(params![path])?;
             }
         }
 
@@ -1031,6 +1227,10 @@ impl WriteTxn<'_> {
                      parse_status = ?7
                  WHERE path = ?1",
             )?;
+            // ARCHITECTURE "Refresh and invalidation": "Update mtime/size even
+            // when the new hash equals the old hash."
+            let mut update_metadata =
+                tx.prepare("UPDATE files SET mtime_ns = ?2, size = ?3 WHERE path = ?1")?;
             if force {
                 // Every current row was just deleted, so all of them are new.
                 for file in &sorted {
@@ -1040,14 +1240,19 @@ impl WriteTxn<'_> {
             } else {
                 for file in &sorted {
                     match previous.get(&file.path) {
-                        Some((content_hash, parse_status, language))
-                            if *content_hash == file.content_hash
-                                && *parse_status == file.parse_status
-                                && *language == file.language
-                                && !regenerated.contains(&file.path) =>
-                        {
-                            unchanged += 1;
-                            write_file_row(&mut update, file)?;
+                        Some(stored) if stored.same_content(file) => {
+                            if regenerated.contains(&file.path) {
+                                updated += 1;
+                            } else {
+                                unchanged += 1;
+                            }
+                            if stored.mtime_ns != file.mtime_ns || stored.size != file.size {
+                                update_metadata.execute(params![
+                                    file.path,
+                                    file.mtime_ns,
+                                    file.size as i64
+                                ])?;
+                            }
                         }
                         Some(_) => {
                             updated += 1;
@@ -1062,29 +1267,38 @@ impl WriteTxn<'_> {
             }
         }
 
-        // Replace symbols, uses, and scopes per current file in the same
-        // transaction. Iterating every current file (not just those with
-        // facts) removes stale facts from a file that became
+        // Replace symbols, uses, and scopes for the selected current files in
+        // the same transaction. Every selected file is replaced even when it
+        // now has no facts, which removes stale facts from a file that became
         // parse_error/resource_limit in this refresh.
         let mut symbols_by_file: HashMap<String, Vec<SymbolRow>> = HashMap::new();
         for symbol in symbols {
-            symbols_by_file
-                .entry(symbol.file.clone())
-                .or_default()
-                .push(symbol);
+            if replace_facts.contains(symbol.file.as_str()) {
+                symbols_by_file
+                    .entry(symbol.file.clone())
+                    .or_default()
+                    .push(symbol);
+            }
         }
         let mut uses_by_file: HashMap<String, Vec<UseRow>> = HashMap::new();
         for row in uses {
-            uses_by_file.entry(row.file.clone()).or_default().push(row);
+            if replace_facts.contains(row.file.as_str()) {
+                uses_by_file.entry(row.file.clone()).or_default().push(row);
+            }
         }
         let mut scopes_by_file: HashMap<String, Vec<ScopeRow>> = HashMap::new();
         for row in scopes {
-            scopes_by_file
-                .entry(row.file.clone())
-                .or_default()
-                .push(row);
+            if replace_facts.contains(row.file.as_str()) {
+                scopes_by_file
+                    .entry(row.file.clone())
+                    .or_default()
+                    .push(row);
+            }
         }
         for file in &sorted {
+            if !replace_facts.contains(file.path.as_str()) {
+                continue;
+            }
             let symbol_rows = symbols_by_file.remove(&file.path).unwrap_or_default();
             replace_file_symbols_in_tx(tx, &file.path, &symbol_rows)?;
             let use_rows = uses_by_file.remove(&file.path).unwrap_or_default();
@@ -1092,7 +1306,9 @@ impl WriteTxn<'_> {
             let scope_rows = scopes_by_file.remove(&file.path).unwrap_or_default();
             replace_file_scopes_in_tx(tx, &file.path, &scope_rows)?;
         }
-        insert_bindings_in_tx(tx, &bindings)?;
+        if plan.replace_bindings {
+            insert_bindings_in_tx(tx, &bindings)?;
+        }
 
         let digest_files = sorted
             .into_iter()
@@ -1108,6 +1324,12 @@ impl WriteTxn<'_> {
             unchanged,
             deleted,
         })
+    }
+
+    /// Sets one `meta` value inside this transaction, writing nothing when the
+    /// stored value is already `value`.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), Error> {
+        upsert_meta_if_changed(&self.store.conn, key, value)
     }
 
     /// Computes the deterministic snapshot digest of `staged`, writes the four
@@ -1497,7 +1719,7 @@ fn initialize(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
     // Fast path without a lock: a current database needs no write, and an
     // incompatible one is refused without being modified (spec §27).
     match read_existing_version(conn)? {
-        Some(found) if found == INDEX_FORMAT_VERSION => return Ok(()),
+        Some(found) if found == INDEX_FORMAT_VERSION => return ensure_additive_indexes(conn),
         Some(found) if !allow_rebuild => return Err(Error::IncompatibleIndexFormat { found }),
         _ => {}
     }
@@ -1539,7 +1761,9 @@ fn initialize_locked(conn: &Connection, allow_rebuild: bool) -> Result<(), Error
     }
     let outcome = match read_existing_version(conn) {
         Ok(None) => create_schema(conn),
-        Ok(Some(found)) if found == INDEX_FORMAT_VERSION => Ok(()),
+        Ok(Some(found)) if found == INDEX_FORMAT_VERSION => {
+            conn.execute_batch(PARENT_INDEX_SQL).map_err(Error::from)
+        }
         Ok(Some(_)) if allow_rebuild => rebuild_schema(conn),
         Ok(Some(found)) => Err(Error::IncompatibleIndexFormat { found }),
         Err(error) => Err(error),
@@ -1554,6 +1778,41 @@ fn initialize_locked(conn: &Connection, allow_rebuild: bool) -> Result<(), Error
             Err(error)
         }
     }
+}
+
+/// Adds the additive indexes a version-1 database created before them lacks
+/// (PF1: [`PARENT_INDEX_NAME`]).
+///
+/// The presence check is a read, so a current database is not written. A
+/// missing index is created in its own short write transaction under the
+/// connection's busy timeout. The index affects only how fast facts are
+/// deleted, never a stored fact or a query result, so when it cannot be
+/// created because another process holds the writer lock past the timeout, or
+/// the database is read-only, the store opens without it and a later open adds
+/// it. Any other failure is an error.
+fn ensure_additive_indexes(conn: &Connection) -> Result<(), Error> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+        params![PARENT_INDEX_NAME],
+        |row| row.get(0),
+    )?;
+    if present > 0 {
+        return Ok(());
+    }
+    match conn.execute_batch(PARENT_INDEX_SQL) {
+        Ok(()) => Ok(()),
+        Err(error) if is_busy(&error) || is_read_only(&error) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether `error` is SQLite refusing a write to a read-only database.
+fn is_read_only(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ReadOnly
+    )
 }
 
 /// Drops every user table and recreates the version-1 schema inside the
@@ -1657,33 +1916,57 @@ fn write_file_row(stmt: &mut rusqlite::Statement<'_>, file: &FileRow) -> Result<
     Ok(())
 }
 
-/// Comparison fields of a previously published `files` row: content hash,
-/// parse status, and language. Used to classify updated vs unchanged.
-type PreviousFile = (Option<String>, ParseStatus, Option<String>);
+/// The stored columns of a previously published `files` row that decide
+/// whether it changed, without its source bytes.
+#[derive(Debug)]
+struct PreviousFile {
+    content_hash: Option<String>,
+    parse_status: ParseStatus,
+    language: Option<String>,
+    has_source: bool,
+    mtime_ns: i64,
+    size: u64,
+}
 
-/// Loads the current inventory keyed by path, with the comparison fields only.
+impl PreviousFile {
+    /// Whether `file` has this row's content hash, parse status, language,
+    /// and source presence: the row counts as `unchanged`, its source column
+    /// needs no write (the hash covers the stored bytes), and its facts are
+    /// the stored facts unless the caller regenerated them.
+    fn same_content(&self, file: &FileRow) -> bool {
+        self.content_hash == file.content_hash
+            && self.parse_status == file.parse_status
+            && self.language == file.language
+            && self.has_source == file.source.is_some()
+    }
+}
+
+/// Loads the current inventory keyed by path, without source bytes.
 fn load_previous_inventory(tx: &Connection) -> Result<HashMap<String, PreviousFile>, Error> {
-    let raw: Vec<(String, Option<String>, String, Option<String>)> = {
-        let mut stmt =
-            tx.prepare("SELECT path, content_hash, parse_status, language FROM files")?;
-        let rows = stmt.query_map(
-            [],
-            |row| -> rusqlite::Result<(String, Option<String>, String, Option<String>)> {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            },
-        )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-
-    let mut previous = HashMap::with_capacity(raw.len());
-    for (path, content_hash, status, language) in raw {
+    let mut stmt = tx.prepare(
+        "SELECT path, content_hash, parse_status, language, source IS NOT NULL, mtime_ns, size
+         FROM files",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let status: String = row.get(2)?;
         let parse_status = status.parse::<ParseStatus>().map_err(|error| {
             // `parse_status` is the third selected column (index 2).
             rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
         })?;
-        previous.insert(path, (content_hash, parse_status, language));
-    }
-    Ok(previous)
+        let size: i64 = row.get(6)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            PreviousFile {
+                content_hash: row.get(1)?,
+                parse_status,
+                language: row.get(3)?,
+                has_source: row.get(4)?,
+                mtime_ns: row.get(5)?,
+                size: size as u64,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
 }
 
 /// Writes the four fingerprints and the snapshot digest into `meta`.
@@ -1705,13 +1988,21 @@ fn write_fingerprint(
         ("resolver_fingerprint", fingerprint.resolver.as_str()),
         ("snapshot_digest", digest),
     ];
-    let mut upsert = tx.prepare(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )?;
     for (key, value) in entries {
-        upsert.execute(params![key, value])?;
+        upsert_meta_if_changed(tx, key, value)?;
     }
+    Ok(())
+}
+
+/// Inserts or updates one `meta` value, modifying no row when the stored value
+/// already equals `value` (PF1: a no-change refresh writes nothing).
+fn upsert_meta_if_changed(tx: &Connection, key: &str, value: &str) -> Result<(), Error> {
+    let mut upsert = tx.prepare_cached(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value
+         WHERE meta.value IS NOT excluded.value",
+    )?;
+    upsert.execute(params![key, value])?;
     Ok(())
 }
 
@@ -1719,7 +2010,8 @@ fn write_fingerprint(
 mod tests {
     use super::{
         BindingRow, Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput,
-        PublishReport, ScopeRow, Store, SymbolRow, UseRow, clamp_mtime_ns, snapshot_digest,
+        PublishReport, ScopeRow, StagePlan, Store, SymbolRow, UseRow, WRITER_BUSY_TIMEOUT,
+        clamp_mtime_ns, snapshot_digest,
     };
     use rivet_core::{ParseStatus, RefKind, Resolution, SymbolKind, content_hash};
     use rusqlite::params;
@@ -2020,6 +2312,183 @@ mod tests {
         let mut expected = input;
         expected.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
         assert_eq!(store.list_files().unwrap(), expected);
+    }
+
+    /// Whether the PF1 `symbols.parent_id` index exists, and whether SQLite
+    /// uses it to find a symbol's children.
+    fn parent_index_state(conn: &rusqlite::Connection) -> (bool, String) {
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'symbols_parent' AND tbl_name = 'symbols'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM symbols WHERE parent_id = 'x'",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        (present == 1, plan)
+    }
+
+    #[test]
+    fn a_fresh_store_indexes_symbol_parent_ids() {
+        let store = Store::open_in_memory().unwrap();
+        let (present, plan) = parent_index_state(&store.conn);
+        assert!(present);
+        assert!(plan.contains("symbols_parent"), "plan: {plan}");
+
+        let temp = TempDir::new("parent-index-fresh");
+        let store = Store::open(temp.path()).unwrap();
+        assert!(parent_index_state(&store.conn).0);
+    }
+
+    #[test]
+    fn opening_a_store_that_predates_the_parent_index_adds_it_without_a_rebuild() {
+        let temp = TempDir::new("parent-index-old");
+        {
+            let mut store = Store::open(temp.path()).unwrap();
+            publish(&mut store, vec![sample_file("a.php")]);
+            store
+                .replace_file_symbols("a.php", &[sample_symbol("a.php", "a.php#A", "A", 0)])
+                .unwrap();
+            // Recreate the pre-PF1 database: the same version-1 schema without
+            // the index.
+            store
+                .conn
+                .execute_batch("DROP INDEX symbols_parent")
+                .unwrap();
+            assert!(!parent_index_state(&store.conn).0);
+        }
+        let digest_before = {
+            let conn = rusqlite::Connection::open(temp.path().join("index.db")).unwrap();
+            conn.query_row(
+                "SELECT value FROM meta WHERE key = 'snapshot_digest'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+
+        let store = Store::open(temp.path()).unwrap();
+        assert!(parent_index_state(&store.conn).0, "open adds the index");
+        // No format bump and no rebuild: version, digest, and facts are kept.
+        assert_eq!(
+            store.get_meta("index_format_version").unwrap().as_deref(),
+            Some(INDEX_FORMAT_VERSION)
+        );
+        assert_eq!(
+            store.get_meta("snapshot_digest").unwrap(),
+            Some(digest_before)
+        );
+        assert_eq!(store.list_symbols().unwrap().len(), 1);
+        assert_eq!(store.integrity_check().unwrap(), vec!["ok".to_string()]);
+        drop(store);
+
+        // Reopening a current database writes nothing.
+        let store = Store::open(temp.path()).unwrap();
+        assert_eq!(store.total_changes(), 0);
+        assert!(parent_index_state(&store.conn).0);
+    }
+
+    #[test]
+    fn republishing_an_unchanged_inventory_modifies_no_row() {
+        let mut store = Store::open_in_memory().unwrap();
+        let files = vec![sample_file("a.php"), sample_file("b.php")];
+        let first = publish(&mut store, files.clone());
+
+        // A full-plan republish of identical rows (with no facts) changes no
+        // `files` row and no `meta` value.
+        let before = store.total_changes();
+        let again = publish(&mut store, files.clone());
+        assert_eq!(again.digest, first.digest);
+        assert_eq!(store.total_changes(), before, "no file, fact, or meta row");
+
+        // A keep-everything plan on the same inventory writes nothing at all.
+        let before = store.total_changes();
+        let mut txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+        let staged = txn
+            .stage_refresh(
+                inventory(sample_fingerprint(), files.clone()),
+                StagePlan {
+                    reparsed: Some(Default::default()),
+                    replace_bindings: false,
+                },
+            )
+            .unwrap();
+        let report = txn.commit(staged).unwrap();
+        assert_eq!(report.digest, first.digest);
+        assert_eq!((report.updated, report.unchanged), (0, 2));
+        assert_eq!(store.total_changes(), before);
+
+        // An mtime-only change updates exactly that row's metadata.
+        let mut touched = files;
+        touched[1].mtime_ns += 1;
+        let before = store.total_changes();
+        let report = publish(&mut store, touched);
+        assert_eq!(report.digest, first.digest);
+        assert_eq!(store.total_changes(), before + 1);
+        assert_eq!(
+            store.get_file("b.php").unwrap().unwrap().mtime_ns,
+            sample_file("b.php").mtime_ns + 1
+        );
+    }
+
+    #[test]
+    fn keeping_stored_bindings_is_refused_when_content_or_membership_changed() {
+        let keep = StagePlan {
+            reparsed: Some(Default::default()),
+            replace_bindings: false,
+        };
+        let cases: Vec<(&str, Vec<FileRow>)> = vec![
+            (
+                "changed content",
+                vec![sample_file("a.php"), file_with("b.php", b"<?php //")],
+            ),
+            ("deleted file", vec![sample_file("a.php")]),
+            (
+                "new file",
+                vec![
+                    sample_file("a.php"),
+                    sample_file("b.php"),
+                    sample_file("c.php"),
+                ],
+            ),
+        ];
+        for (label, files) in cases {
+            let mut store = Store::open_in_memory().unwrap();
+            let first = publish(&mut store, vec![sample_file("a.php"), sample_file("b.php")]);
+            let mut txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+            let error = txn
+                .stage_refresh(inventory(sample_fingerprint(), files), keep.clone())
+                .expect_err(label);
+            assert!(matches!(error, Error::TransactionState { .. }), "{label}");
+            drop(txn);
+            assert_eq!(
+                store.get_meta("snapshot_digest").unwrap().as_deref(),
+                Some(first.digest.as_str()),
+                "{label}: nothing is published"
+            );
+        }
+
+        // Supplying bindings with a keep plan is refused as well.
+        let mut store = Store::open_in_memory().unwrap();
+        publish(&mut store, vec![sample_file("a.php")]);
+        let mut input = inventory(sample_fingerprint(), vec![sample_file("a.php")]);
+        input.bindings = vec![BindingRow {
+            use_id: 1,
+            target_id: "a.php#A".to_string(),
+            resolution: Resolution::Exact,
+        }];
+        let mut txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+        assert!(matches!(
+            txn.stage_refresh(input, keep),
+            Err(Error::TransactionState { .. })
+        ));
     }
 
     #[test]

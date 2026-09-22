@@ -9,7 +9,10 @@
 //! content (or *all* enabled content when the extractor fingerprint differs),
 //! drops facts for deleted or newly excluded files, and publishes one atomic
 //! snapshot. Files whose content hash and stored parse status are unchanged keep
-//! their stored symbols; their mtime/size are still rewritten. `--force` reuses
+//! their stored symbols, uses, and scopes untouched; only a changed mtime/size
+//! is rewritten. Bindings are cleared and every persisted use re-resolved only
+//! when content, membership, or a fingerprint changed, so a refresh that
+//! changes nothing writes no row and resolves nothing (PF1). `--force` reuses
 //! nothing stored: it rereads and reparses every eligible file, regenerates all
 //! facts and bindings, and replaces every stored fact in the same transaction.
 //!
@@ -38,8 +41,8 @@ use rivet_core::{
 use rivet_languages::{EXTRACTOR_FINGERPRINT, language_for_path};
 use rivet_parser::parse_file_with_limits;
 use rivet_store::{
-    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, Store, SymbolRow, UseRow,
-    clamp_mtime_ns,
+    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, StagePlan, Store,
+    SymbolRow, UseRow, clamp_mtime_ns,
 };
 
 use crate::index::{
@@ -285,6 +288,14 @@ impl RefreshMode {
 ///   functions), later extended by T20/T21 receivers under the same value.
 const RESOLVER_FINGERPRINT: &str = "php-rules-v2";
 
+/// The `meta` key recording whether the committed bindings were resolved with
+/// the global function fallback suppressed because an enabled PHP file was not
+/// indexed (AF2). Part of that input comes from skipped non-UTF-8 paths, which
+/// have no `files` row, so a refresh compares the stored value to decide
+/// whether the stored bindings are still current (PF1). A cache that predates
+/// the key re-resolves once and records it.
+const UNINDEXED_PHP_META_KEY: &str = "resolver_unindexed_php";
+
 /// The shared result of one refresh.
 ///
 /// The embedded [`Report`] is the same data `rivet index` formats, so query
@@ -382,8 +393,10 @@ fn refresh_with_retry(
 /// invalidation" pseudocode: take the writer lock (`BEGIN IMMEDIATE`, busy
 /// timeout 5 seconds); load the fingerprints and inventory; walk; read, hash,
 /// and conditionally reparse each eligible file in path order; replace file
-/// facts; drop deleted files; re-resolve every use; recheck the observed file
-/// metadata and eligible path set; compute the digest and commit.
+/// facts; drop deleted files; re-resolve every use when content, membership,
+/// or a fingerprint changed (and otherwise keep the stored bindings); recheck
+/// the observed file metadata and eligible path set; compute the digest and
+/// commit.
 ///
 /// Returns `Ok(None)` when the recheck detects a race: the transaction was
 /// rolled back and nothing was published. Any error also drops the writer
@@ -433,20 +446,31 @@ fn refresh_inventory(
         .map_err(store_error)?;
     let fingerprint_matches = stored_extractor.as_deref() == Some(EXTRACTOR_FINGERPRINT);
 
-    // Resolver invalidation. A changed resolver fingerprint deliberately has no
-    // separate trigger in this function: every refresh re-resolves all persisted
-    // uses over exactly the symbol/use/scope rows it is about to publish, and
-    // `publish_inventory` unconditionally clears the whole `bindings` table
-    // before reinserting the fresh rows (spec §12.3; ARCHITECTURE "Refresh and
-    // invalidation"). There is no early return in `refresh_inventory`, so no
-    // refresh path can keep stale bindings; the resolver fingerprint only feeds
-    // the snapshot digest. Explicit `--no-refresh` does not refresh, so it
-    // refuses a cache whose stored resolver (or extractor) fingerprint differs
-    // from this build's (`check_cached_fingerprints`, AF5). This is proven by
+    // Resolver invalidation (ARCHITECTURE "Refresh and invalidation": "if
+    // content, membership, or resolver fingerprint changed: clear bindings;
+    // re-resolve all persisted uses/scopes"). A stored resolver fingerprint
+    // that differs from this build's is one of the triggers computed after the
+    // walk (`resolve_needed`); when any trigger fires, every persisted use is
+    // re-resolved over exactly the symbol/use/scope rows about to be published
+    // and the whole `bindings` table is replaced (T22). When none fires, the
+    // stored bindings were produced by these rules from these exact facts, so
+    // they are kept and nothing is re-resolved (PF1). Explicit `--no-refresh`
+    // does not refresh, so it refuses a cache whose stored resolver (or
+    // extractor) fingerprint differs from this build's
+    // (`check_cached_fingerprints`, AF5). This is proven by
     // `tests/refresh.rs::stale_bindings_are_re_resolved_without_reparsing`.
+    let stored_resolver = store
+        .get_meta("resolver_fingerprint")
+        .map_err(store_error)?;
+    let resolver_matches = stored_resolver.as_deref() == Some(RESOLVER_FINGERPRINT);
+    let stored_unindexed_php = store
+        .get_meta(UNINDEXED_PHP_META_KEY)
+        .map_err(store_error)?;
 
-    // Load the current inventory and facts once. Reused files keep their
-    // stored source bytes and symbol/use/scope rows.
+    // Load the current inventory once, and its symbol/use/scope rows only when
+    // they are needed (PF1): a refresh in which nothing changed neither
+    // re-resolves nor rewrites any fact, so it never reads them. Reused files
+    // keep their stored source bytes and fact rows.
     //
     // `--force` (AF6) loads nothing: it is the recovery path for a cache whose
     // stored facts are suspect although no fingerprint changed, so it must not
@@ -456,40 +480,31 @@ fn refresh_inventory(
     // and scope is regenerated, and use IDs restart at 1 exactly as for a
     // first index. The store's `force` path then deletes every stored fact
     // before writing these rows, in this same writer transaction.
-    let (mut stored_by_path, mut stored_symbols, mut stored_uses, mut stored_scopes) = if force {
-        Default::default()
+    let mut stored_by_path: HashMap<String, FileRow> = if force {
+        HashMap::new()
     } else {
-        let files: HashMap<String, FileRow> = store
+        store
             .list_files()
             .map_err(store_error)?
             .into_iter()
             .map(|file| (file.path.clone(), file))
-            .collect();
-        (
-            files,
-            symbols_by_file(store)?,
-            uses_by_file(store)?,
-            scopes_by_file(store)?,
-        )
+            .collect()
     };
-    // Newly reparsed uses get explicit IDs above this high-water mark so the
-    // in-memory resolver can name them before the publish transaction runs.
-    let mut next_use_id = stored_uses
-        .values()
-        .flatten()
-        .filter_map(|row| row.use_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
+    // The content-deciding columns of every stored row, kept for the
+    // change test after the walk (`stored_by_path` is consumed below).
+    let stored_state: HashMap<String, StoredState> = stored_by_path
+        .iter()
+        .map(|(path, file)| (path.clone(), StoredState::of(file)))
+        .collect();
 
     // Walk regular eligible files with local ignore rules. The walked entries
     // carry the metadata observed for each file; the recheck compares it.
     let walk = walk_eligible(root, config).map_err(walk_error)?;
 
     let mut files = Vec::with_capacity(walk.files.len());
-    let mut symbols: Vec<SymbolRow> = Vec::new();
-    let mut uses: Vec<UseRow> = Vec::new();
-    let mut scopes: Vec<ScopeRow> = Vec::new();
+    // Each file's facts in walk order: fresh from a parse, or the stored rows,
+    // which are loaded after the walk only if bindings must be re-resolved.
+    let mut pending: Vec<PendingFacts> = Vec::new();
     let mut skipped = Skipped::default();
     let mut diagnostics = Vec::new();
     let mut files_indexed = 0_u64;
@@ -533,9 +548,6 @@ fn refresh_inventory(
         // user enabled this language, so a diagnostic names the reason.
         if !rivet_parser::has_extractor(id) {
             stored_by_path.remove(&entry.rel_path);
-            stored_symbols.remove(&entry.rel_path);
-            stored_uses.remove(&entry.rel_path);
-            stored_scopes.remove(&entry.rel_path);
             skipped.unsupported += 1;
             diagnostics.push(no_extractor_diagnostic(&entry.rel_path, &language_name));
             files.push(FileRow {
@@ -569,25 +581,13 @@ fn refresh_inventory(
             });
         if metadata_reuse {
             let file = stored.expect("metadata reuse requires a stored row");
-            let facts = if file.parse_status == ParseStatus::Ok {
-                FileFacts {
-                    symbols: stored_symbols.remove(&entry.rel_path).unwrap_or_default(),
-                    uses: stored_uses.remove(&entry.rel_path).unwrap_or_default(),
-                    scopes: stored_scopes.remove(&entry.rel_path).unwrap_or_default(),
-                }
-            } else {
-                stored_symbols.remove(&entry.rel_path);
-                stored_uses.remove(&entry.rel_path);
-                stored_scopes.remove(&entry.rel_path);
-                FileFacts::default()
-            };
+            if file.parse_status == ParseStatus::Ok {
+                pending.push(PendingFacts::Stored(entry.rel_path.clone()));
+            }
             count_status(file.parse_status, &mut files_indexed, &mut skipped);
             if let Some(item) = reused_status_diagnostic(&entry.rel_path, file.parse_status) {
                 diagnostics.push(item);
             }
-            symbols.extend(facts.symbols);
-            uses.extend(facts.uses);
-            scopes.extend(facts.scopes);
             files.push(FileRow {
                 path: entry.rel_path.clone(),
                 language: Some(language_name),
@@ -618,11 +618,7 @@ fn refresh_inventory(
                     ParsedFileFacts {
                         parse_status: ParseStatus::Ok,
                         source,
-                        facts: FileFacts {
-                            symbols: stored_symbols.remove(&entry.rel_path).unwrap_or_default(),
-                            uses: stored_uses.remove(&entry.rel_path).unwrap_or_default(),
-                            scopes: stored_scopes.remove(&entry.rel_path).unwrap_or_default(),
-                        },
+                        facts: PendingFacts::Stored(entry.rel_path.clone()),
                         diagnostic: None,
                     }
                 } else {
@@ -638,7 +634,7 @@ fn refresh_inventory(
                             ParsedFileFacts {
                                 parse_status: status,
                                 source: None,
-                                facts: FileFacts::default(),
+                                facts: PendingFacts::Fresh(FileFacts::default()),
                                 diagnostic: Some(DiagnosticItem {
                                     file: entry.rel_path.clone(),
                                     code: static_diagnostic_code(&diagnostic.code),
@@ -651,7 +647,7 @@ fn refresh_inventory(
                             ParsedFileFacts {
                                 parse_status: ParseStatus::Ok,
                                 source: Some(bytes),
-                                facts: file_facts,
+                                facts: PendingFacts::Fresh(file_facts),
                                 diagnostic: None,
                             }
                         }
@@ -662,9 +658,7 @@ fn refresh_inventory(
                 if let Some(item) = facts.diagnostic {
                     diagnostics.push(item);
                 }
-                symbols.extend(facts.facts.symbols);
-                uses.extend(facts.facts.uses);
-                scopes.extend(facts.facts.scopes);
+                pending.push(facts.facts);
                 files.push(FileRow {
                     path: entry.rel_path.clone(),
                     language: Some(language_name),
@@ -742,18 +736,9 @@ fn refresh_inventory(
     let diagnostics_truncated = diagnostics_total > DIAGNOSTIC_CAP;
     diagnostics.truncate(DIAGNOSTIC_CAP);
 
-    // Give every newly extracted use an explicit ID so the in-memory resolver
-    // can reference it before the publish transaction runs. Reused rows already
-    // carry their stored ID, and the high-water mark keeps new IDs unique.
-    for row in &mut uses {
-        if row.use_id.is_none() {
-            row.use_id = Some(next_use_id);
-            next_use_id = next_use_id.saturating_add(1);
-        }
-    }
-    // Resolve every use for the snapshot being published. The rules run over
-    // the same rows written below, so bindings and facts commit in one
-    // transaction (spec §12.3).
+    // When anything changed (below), resolve every use for the snapshot being
+    // published. The rules run over the same rows written below, so bindings
+    // and facts commit in one transaction (spec §12.3).
     //
     // A PHP file that should have been indexed but was not may declare a
     // namespaced function, so the global function fallback is suppressed
@@ -770,10 +755,107 @@ fn refresh_inventory(
                         .any(|name| name.as_str() == id.name())
             })
         });
-    let bindings = rivet_index::Resolver::new(&symbols, &uses, &scopes)
-        .with_unindexed_php_files(php_unindexed)
-        .resolve();
-    let binding_count = bindings.len() as u64;
+    let unindexed_php_value = if php_unindexed { "true" } else { "false" };
+
+    // Did content, membership, or anything bindings depend on change? The
+    // resolver reads exactly the published symbols, uses, and scopes plus the
+    // unindexed-PHP flag. Facts change only when a file is new, deleted,
+    // changes content hash, parse status, language, or source presence, or is
+    // reparsed into `ok` facts (the extractor fingerprint changed). A config
+    // change can change eligibility and the flag's inputs, so it re-resolves
+    // too. `--force` always re-resolves (AF6).
+    let resolve_needed = force
+        || !config_matches
+        || !fingerprint_matches
+        || !resolver_matches
+        || stored_unindexed_php.as_deref() != Some(unindexed_php_value)
+        || files.len() != stored_state.len()
+        || files.iter().any(|file| {
+            stored_state
+                .get(&file.path)
+                .is_none_or(|state| *state != StoredState::of(file))
+        })
+        || files
+            .iter()
+            .any(|file| file.parse_status == ParseStatus::Ok && reparsed.contains(&file.path));
+    // Materialize the facts being published, in walk order. When bindings
+    // must be re-resolved the resolver needs every persisted use, so the
+    // stored rows of reused files are loaded (in this writer transaction) and
+    // spliced in. Otherwise only freshly parsed facts exist: a reparse into
+    // `ok` facts always sets `resolve_needed`, so these are the empty facts of
+    // files that failed again, and the store keeps every other file's rows.
+    let mut symbols: Vec<SymbolRow> = Vec::new();
+    let mut uses: Vec<UseRow> = Vec::new();
+    let mut scopes: Vec<ScopeRow> = Vec::new();
+    let mut next_use_id = 1_i64;
+    if resolve_needed && !force {
+        let mut stored_symbols = symbols_by_file(store)?;
+        let mut stored_uses = uses_by_file(store)?;
+        let mut stored_scopes = scopes_by_file(store)?;
+        // Newly reparsed uses get explicit IDs above the stored high-water
+        // mark (including the uses of files about to be replaced) so the
+        // in-memory resolver can name them before the publish runs.
+        next_use_id = stored_uses
+            .values()
+            .flatten()
+            .filter_map(|row| row.use_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for facts in pending {
+            let fresh = match facts {
+                PendingFacts::Stored(path) => FileFacts {
+                    symbols: stored_symbols.remove(&path).unwrap_or_default(),
+                    uses: stored_uses.remove(&path).unwrap_or_default(),
+                    scopes: stored_scopes.remove(&path).unwrap_or_default(),
+                },
+                PendingFacts::Fresh(fresh) => fresh,
+            };
+            symbols.extend(fresh.symbols);
+            uses.extend(fresh.uses);
+            scopes.extend(fresh.scopes);
+        }
+    } else {
+        // `--force` reuses nothing, so every entry is fresh. Without
+        // re-resolution no stored use is read, and no fresh use can exist.
+        debug_assert!(
+            force
+                || pending.iter().all(|facts| match facts {
+                    PendingFacts::Stored(_) => true,
+                    PendingFacts::Fresh(fresh) => fresh.uses.is_empty(),
+                }),
+            "fresh uses without re-resolution"
+        );
+        for facts in pending {
+            if let PendingFacts::Fresh(fresh) = facts {
+                symbols.extend(fresh.symbols);
+                uses.extend(fresh.uses);
+                scopes.extend(fresh.scopes);
+            }
+        }
+    }
+    // Give every newly extracted use an explicit ID so the in-memory resolver
+    // can reference it before the publish transaction runs. Reused rows already
+    // carry their stored ID, and the high-water mark keeps new IDs unique.
+    for row in &mut uses {
+        if row.use_id.is_none() {
+            row.use_id = Some(next_use_id);
+            next_use_id = next_use_id.saturating_add(1);
+        }
+    }
+    let (bindings, binding_count) = if resolve_needed {
+        let bindings = rivet_index::Resolver::new(&symbols, &uses, &scopes)
+            .with_unindexed_php_files(php_unindexed)
+            .resolve();
+        let count = bindings.len() as u64;
+        (bindings, count)
+    } else {
+        // Nothing the bindings depend on changed: keep the stored rows.
+        (
+            Vec::new(),
+            txn.store().count_bindings().map_err(store_error)?,
+        )
+    };
 
     let fingerprint = Fingerprint {
         index_format_version: INDEX_FORMAT_VERSION.to_string(),
@@ -781,8 +863,15 @@ fn refresh_inventory(
         extractor: EXTRACTOR_FINGERPRINT.to_string(),
         resolver: RESOLVER_FINGERPRINT.to_string(),
     };
-    let symbol_count = symbols.len() as u64;
-    let use_count = uses.len() as u64;
+    let (symbol_count, use_count) = if resolve_needed {
+        (symbols.len() as u64, uses.len() as u64)
+    } else {
+        // Every published fact is a kept stored row (fresh facts are empty).
+        (
+            txn.store().count_symbols().map_err(store_error)?,
+            txn.store().count_uses().map_err(store_error)?,
+        )
+    };
     // OUTPUT-CONTRACT "Administrative commands": "`updated` counts current file
     // rows with changed source/status/language or regenerated facts". A file
     // reparsed because the stored extractor fingerprint differs has its facts
@@ -797,17 +886,26 @@ fn refresh_inventory(
     } else {
         reparsed.clone()
     };
+    let plan = StagePlan {
+        reparsed: Some(reparsed.iter().cloned().collect()),
+        replace_bindings: resolve_needed,
+    };
     let staged = txn
-        .stage_inventory(InventoryInput {
-            fingerprint,
-            files,
-            symbols,
-            uses,
-            scopes,
-            bindings,
-            force,
-            regenerated,
-        })
+        .stage_refresh(
+            InventoryInput {
+                fingerprint,
+                files,
+                symbols,
+                uses,
+                scopes,
+                bindings,
+                force,
+                regenerated,
+            },
+            plan,
+        )
+        .map_err(store_error)?;
+    txn.set_meta(UNINDEXED_PHP_META_KEY, unindexed_php_value)
         .map_err(store_error)?;
     debug_point!("refresh-staged-{attempt}");
 
@@ -862,30 +960,47 @@ fn symbols_by_file(store: &Store) -> Result<HashMap<String, Vec<SymbolRow>>, Cli
     Ok(by_file)
 }
 
-/// Groups every persisted use row by owning file.
+/// Groups every persisted use row by owning file, each file's rows in
+/// [`Store::list_uses_for_file`] order.
 fn uses_by_file(store: &Store) -> Result<HashMap<String, Vec<UseRow>>, CliError> {
     let mut by_file: HashMap<String, Vec<UseRow>> = HashMap::new();
-    for file in store.list_files().map_err(store_error)? {
-        let rows = store.list_uses_for_file(&file.path).map_err(store_error)?;
-        if !rows.is_empty() {
-            by_file.insert(file.path, rows);
-        }
+    for row in store.list_uses().map_err(store_error)? {
+        by_file.entry(row.file.clone()).or_default().push(row);
     }
     Ok(by_file)
 }
 
-/// Groups every persisted scope row by owning file.
+/// Groups every persisted scope row by owning file, each file's rows in
+/// [`Store::list_scopes_for_file`] order.
 fn scopes_by_file(store: &Store) -> Result<HashMap<String, Vec<ScopeRow>>, CliError> {
     let mut by_file: HashMap<String, Vec<ScopeRow>> = HashMap::new();
-    for file in store.list_files().map_err(store_error)? {
-        let rows = store
-            .list_scopes_for_file(&file.path)
-            .map_err(store_error)?;
-        if !rows.is_empty() {
-            by_file.insert(file.path, rows);
-        }
+    for row in store.list_scopes().map_err(store_error)? {
+        by_file.entry(row.file.clone()).or_default().push(row);
     }
     Ok(by_file)
+}
+
+/// The columns of a `files` row that decide whether its facts or bindings may
+/// have changed: content hash, parse status, language, and whether source
+/// bytes are stored. mtime and size are deliberately absent; a metadata-only
+/// change updates those columns and nothing else.
+#[derive(Debug, PartialEq, Eq)]
+struct StoredState {
+    content_hash: Option<String>,
+    parse_status: ParseStatus,
+    language: Option<String>,
+    has_source: bool,
+}
+
+impl StoredState {
+    fn of(file: &FileRow) -> StoredState {
+        StoredState {
+            content_hash: file.content_hash.clone(),
+            parse_status: file.parse_status,
+            language: file.language.clone(),
+            has_source: file.source.is_some(),
+        }
+    }
 }
 
 /// Builds the report for an explicit `--no-refresh` query from the committed
@@ -1020,12 +1135,20 @@ struct FileFacts {
     scopes: Vec<ScopeRow>,
 }
 
+/// One file's facts as the walk decided them.
+enum PendingFacts {
+    /// Reuse the stored symbol, use, and scope rows of this path.
+    Stored(String),
+    /// Facts produced by this refresh's parse (empty for a failed parse).
+    Fresh(FileFacts),
+}
+
 /// One parsed file's status, stored source, facts, and optional diagnostic,
 /// collected before the file row is pushed.
 struct ParsedFileFacts {
     parse_status: ParseStatus,
     source: Option<Vec<u8>>,
-    facts: FileFacts,
+    facts: PendingFacts,
     diagnostic: Option<DiagnosticItem>,
 }
 
