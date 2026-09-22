@@ -433,6 +433,7 @@ dependencies = [
  "rivet-languages",
  "rivet-parser",
  "rivet-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "toml",

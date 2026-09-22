@@ -21,7 +21,8 @@ pub(crate) const DIAGNOSTIC_CAP: usize = 50;
 /// Options accepted by `rivet index`.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// `--force`: delete every stored fact and rebuild it in one transaction.
+    /// `--force`: reparse every eligible file from disk, reusing no stored fact,
+    /// and replace every stored fact in one transaction (AF6).
     pub force: bool,
     /// `--timing`: include `elapsed_ms` in JSON output.
     pub timing: bool,

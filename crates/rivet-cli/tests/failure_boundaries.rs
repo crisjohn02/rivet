@@ -183,10 +183,10 @@ const THREE_USES_PHP: &[u8] = b"<?php\nnamespace App;\nfunction three(): void { 
 
 /// A fresh repository holding `files`.
 ///
-/// A limit override applies only to files a refresh actually parses, and an
-/// unchanged `ok` file is reused without reparsing (even by `--force`), so a
-/// test that lowers a limit on a file already indexed under the defaults uses
-/// a fresh repository.
+/// A limit override applies only to files a refresh actually parses, and a
+/// normal refresh reuses an unchanged `ok` file without reparsing, so a test
+/// that lowers a limit on a file already indexed under the defaults uses a
+/// fresh repository (or `--force`, which reparses everything; AF6).
 fn repo_with(label: &str, files: &[(&str, &[u8])]) -> TempDir {
     let temp = git_repo(label);
     for (rel, bytes) in files {
