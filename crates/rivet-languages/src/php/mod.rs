@@ -3,8 +3,9 @@
 //! T11 extracts namespaces, classes, interfaces, traits (as class-kind),
 //! enums, functions, methods, properties, and constants into owned
 //! [`ExtractedSymbol`] records with native qualified names
-//! (`App\Services\SurveyService::launch`). Uses, references, signatures, and
-//! doc comments are later tasks.
+//! (`App\Services\SurveyService::launch`). T14 fills each record's collapsed
+//! `signature` and attached `doc_comment`; uses and references are later
+//! tasks.
 //!
 //! Parse policy (docs/ARCHITECTURE.md "Parse and coverage policy"): a file
 //! whose Tree-sitter tree contains any ERROR or MISSING node publishes no
@@ -16,6 +17,9 @@ use std::sync::OnceLock;
 
 use rivet_core::{Diagnostic, ExtractedFile, ExtractedSymbol, Span, SymbolKind};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
+
+mod signature;
+pub use signature::signature_summary;
 
 /// The compiled-once symbol query for the pinned PHP grammar.
 static SYMBOLS_QUERY: OnceLock<Query> = OnceLock::new();
@@ -82,6 +86,8 @@ struct RawSymbol {
     namespace: Option<String>,
     node_id: usize,
     container_id: Option<usize>,
+    signature: String,
+    doc_comment: Option<String>,
 }
 
 /// Walk the tree once with a `TreeCursor`, counting nodes and locating the
@@ -190,6 +196,16 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
         if start_byte >= end_byte {
             continue;
         }
+        // One call fills the signature and doc comment shared by every member
+        // of this declaration node; multi-member property/constant
+        // declarations share the whole-node span as well.
+        let (signature_text, doc_comment) = signature::declaration_header(declaration, source);
+        let header = DeclarationHeader {
+            start_byte,
+            end_byte,
+            signature: signature_text,
+            doc_comment,
+        };
         match kind {
             SymbolKind::Module => {
                 if let Some(name) = name_node {
@@ -203,6 +219,8 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
                         namespace: None,
                         node_id: declaration.id(),
                         container_id: None,
+                        signature: header.signature,
+                        doc_comment: header.doc_comment,
                     });
                 }
             }
@@ -220,9 +238,8 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
                     };
                     raw.push(member(
                         kind,
+                        &header,
                         node_text(name, source),
-                        start_byte,
-                        end_byte,
                         declaration.id(),
                         enclosing_container(element),
                     ));
@@ -243,9 +260,8 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
                     };
                     raw.push(member(
                         kind,
+                        &header,
                         node_text(name, source),
-                        start_byte,
-                        end_byte,
                         declaration.id(),
                         enclosing_container(element),
                     ));
@@ -261,9 +277,8 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
                 };
                 raw.push(member(
                     kind,
+                    &header,
                     node_text(name, source),
-                    start_byte,
-                    end_byte,
                     declaration.id(),
                     container,
                 ));
@@ -283,23 +298,34 @@ fn collect_raw(source: &[u8], root: Node<'_>) -> Vec<RawSymbol> {
     raw
 }
 
+/// Builds a raw member record from its declaration node's shared fields.
 fn member(
     kind: SymbolKind,
+    header: &DeclarationHeader,
     name: String,
-    start_byte: u32,
-    end_byte: u32,
     node_id: usize,
     container: Option<Node<'_>>,
 ) -> RawSymbol {
     RawSymbol {
         kind,
         name,
-        start_byte,
-        end_byte,
+        start_byte: header.start_byte,
+        end_byte: header.end_byte,
         namespace: None,
         node_id,
         container_id: container.map(|node| node.id()),
+        signature: header.signature.clone(),
+        doc_comment: header.doc_comment.clone(),
     }
+}
+
+/// The span, signature, and doc comment shared by every member of one
+/// declaration node (a property/constant declaration can name several).
+struct DeclarationHeader {
+    start_byte: u32,
+    end_byte: u32,
+    signature: String,
+    doc_comment: Option<String>,
 }
 
 /// Sort records, resolve parents and qualified names, and freeze them into
@@ -349,8 +375,8 @@ fn build_symbols(mut raw: Vec<RawSymbol>) -> Vec<ExtractedSymbol> {
                 span: Span::new(record.start_byte, record.end_byte)
                     .expect("a declaration span is non-empty"),
                 parent_index,
-                signature: None,
-                doc_comment: None,
+                signature: Some(record.signature.clone()),
+                doc_comment: record.doc_comment.clone(),
             }
         })
         .collect()

@@ -130,7 +130,8 @@ fn native_qualified_name_returns_the_gold_symbol() {
             .starts_with("blake3:"),
         "{value}"
     );
-    assert!(value["signature"].is_null());
+    // T14 fills the stored signature; this method has no docblock.
+    assert_eq!(value["signature"], "public function launch(): void");
     assert!(value["doc_comment"].is_null());
     assert_eq!(
         value["parent"],
@@ -256,6 +257,14 @@ fn source_and_signature_only_flags() {
     let source = value["source"].as_str().expect("source string");
     assert!(source.starts_with("public function launch"));
     assert!(source.contains("self::DEFAULT_LABEL"));
+    // `--source` is the exact stored span [460, 546) from the gold fixture.
+    assert_eq!(source.len() as u64, LAUNCH_END_BYTE - LAUNCH_START_BYTE);
+    let live = fs::read(temp.path().join("SurveyService.php")).expect("read fixture");
+    assert_eq!(
+        source.as_bytes(),
+        &live[LAUNCH_START_BYTE as usize..LAUNCH_END_BYTE as usize]
+    );
+    assert!(source.ends_with('}'), "{source:?}");
 
     // `--signature-only` omits the call lists entirely.
     let signature_only = run(
