@@ -18,7 +18,7 @@ mod rules;
 
 use std::collections::HashMap;
 
-use rivet_core::extract::ScopeImport;
+use rivet_core::extract::{NewBinding, ScopeImport};
 use rivet_core::{Resolution, SymbolKind};
 use rivet_store::{BindingRow, Error, ScopeRow, Store, SymbolRow, UseRow};
 use serde::Deserialize;
@@ -35,6 +35,7 @@ const RULES: &[RuleFn] = &[
     rules::imports::resolve,
     rules::functions::resolve,
     rules::receivers::resolve,
+    rules::new_expr::resolve,
 ];
 
 /// Lexical facts visible from one use, gathered along its scope chain.
@@ -45,6 +46,10 @@ pub(crate) struct ScopeFacts {
     pub(crate) declares: Vec<SymbolId>,
     /// The enclosing namespace's qualified name, when the file declares one.
     pub(crate) namespace: Option<String>,
+    /// Simple variable assignments recorded directly in the use's own scope.
+    /// PHP variables do not cross function bodies, so only the use's own scope
+    /// is considered; parent scopes are deliberately excluded.
+    pub(crate) new_bindings: Vec<NewBinding>,
 }
 
 /// One parsed `scopes` row's facts that resolution needs.
@@ -52,18 +57,21 @@ struct ScopeData<'a> {
     parent: Option<&'a str>,
     imports: Vec<ScopeImport>,
     declares: Vec<SymbolId>,
+    new_bindings: Vec<NewBinding>,
 }
 
 /// The persisted `scopes.facts_json` shape, read back without reparsing.
 ///
-/// `typed_bindings` and `new_bindings` are ignored in T19; T20/T21 extend this
-/// struct when their rules need them.
+/// `typed_bindings` is ignored in T19; T20/T21 extend this struct when their
+/// rules need more facts.
 #[derive(Deserialize, Default)]
 struct PersistedScopeFacts {
     #[serde(default)]
     imports: Vec<ScopeImport>,
     #[serde(default)]
     declares: Vec<SymbolId>,
+    #[serde(default)]
+    new_bindings: Vec<NewBinding>,
 }
 
 /// Symbol lookups shared by every rule.
@@ -250,6 +258,7 @@ impl<'a> Resolver<'a> {
                     parent: row.parent_scope_key.as_deref(),
                     imports: parsed.imports,
                     declares: parsed.declares,
+                    new_bindings: parsed.new_bindings,
                 },
             );
         }
@@ -303,14 +312,22 @@ impl<'a> Resolver<'a> {
             imports: Vec::new(),
             declares: Vec::new(),
             namespace: None,
+            new_bindings: Vec::new(),
         };
         let mut key = Some(use_row.scope_key.as_str());
+        let mut own_scope = true;
         while let Some(current) = key {
             let Some(scope) = self.scopes.get(&(use_row.file.as_str(), current)) else {
                 break;
             };
             facts.imports.extend(scope.imports.iter().cloned());
             facts.declares.extend(scope.declares.iter().cloned());
+            // Variable assignments do not cross function bodies in PHP, so only
+            // the use's own scope contributes them.
+            if own_scope {
+                facts.new_bindings = scope.new_bindings.clone();
+                own_scope = false;
+            }
             if facts.namespace.is_none() {
                 for id in &scope.declares {
                     if let Some(symbol) = self.ctx.symbol_by_id(id)

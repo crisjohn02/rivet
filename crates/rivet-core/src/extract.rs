@@ -84,6 +84,11 @@ pub enum UseHint {
     NewExpr {
         /// The class name exactly as written at the `new` site.
         class_spelling: String,
+        /// The start byte of the nearest enclosing control-flow block at the
+        /// use site, or `None` at the function body's top level. The resolver
+        /// requires this to match the assignment's block.
+        #[serde(default)]
+        use_block: Option<u32>,
     },
     /// The receiver is a parameter, promoted parameter, or typed property with
     /// the recorded explicit type.
@@ -173,15 +178,38 @@ pub struct TypedBinding {
     pub span: Span,
 }
 
-/// One `new` assignment binding introduced in a lexical scope (T18).
+/// One simple variable assignment introduced in a lexical scope (T18/T21).
+///
+/// T18 recorded only direct `new` assignments. T21 records every simple
+/// `$x = ...` assignment so the `new`-receiver rule can reject a variable that
+/// was reassigned or whose assignment is not a direct `new`. `direct_new` is
+/// true only when the right-hand side is a direct `new <class>(...)`; then
+/// `class_spelling` holds the class name as written. For any other right-hand
+/// side `class_spelling` is empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewBinding {
     /// The assigned variable exactly as written, including a leading `$`.
     pub variable: String,
-    /// The class name exactly as written at the `new` site.
+    /// The class name exactly as written at the `new` site, or empty when the
+    /// assignment is not a direct `new`.
     pub class_spelling: String,
     /// The assigned variable name's byte range.
     pub span: Span,
+    /// Whether the right-hand side is a direct `new <class>(...)`.
+    #[serde(default = "default_true")]
+    pub direct_new: bool,
+    /// The start byte of the nearest enclosing control-flow block within the
+    /// function body, or `None` at the body's top level. Two assignments share
+    /// a block only when this value is equal, so a conditional assignment is
+    /// not confused with an unconditional one.
+    #[serde(default)]
+    pub block: Option<u32>,
+}
+
+/// The serde default for [`NewBinding::direct_new`]: facts persisted before
+/// T21 recorded only direct `new` assignments.
+fn default_true() -> bool {
+    true
 }
 
 /// Owned lexical facts recorded for one scope (T18).
@@ -197,7 +225,8 @@ pub struct ScopeFacts {
     pub imports: Vec<ScopeImport>,
     /// Typed variable bindings introduced directly in this scope.
     pub typed_bindings: Vec<TypedBinding>,
-    /// `new` variable bindings introduced directly in this scope.
+    /// Simple variable assignments introduced directly in this scope, in
+    /// source order. Each records whether it is a direct `new` assignment.
     pub new_bindings: Vec<NewBinding>,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,

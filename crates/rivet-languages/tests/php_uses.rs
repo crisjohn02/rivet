@@ -188,8 +188,12 @@ fn php_authored_receiver_hints_and_imports() {
     // Case e: `$svc->launch()` after `$svc = new \App\...\SurveyService()`.
     let new_call = find_use(&boot, 267, 273);
     match &new_call.hint {
-        UseHint::NewExpr { class_spelling } => {
+        UseHint::NewExpr {
+            class_spelling,
+            use_block,
+        } => {
             assert_eq!(class_spelling, "\\App\\Services\\SurveyService");
+            assert_eq!(*use_block, None, "case e is at file scope");
         }
         other => panic!("expected NewExpr hint, got {other:?}"),
     }

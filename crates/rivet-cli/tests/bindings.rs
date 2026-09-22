@@ -1,25 +1,27 @@
-//! T19/T20 integration tests: persisted resolution bindings.
+//! T19/T20/T21 integration tests: persisted resolution bindings.
 //!
 //! The authored PHP fixture is copied into a temporary Git root, indexed with
 //! the real binary, and inspected by opening the committed `.rivet/index.db`
 //! directly with [`rivet_store::Store::open`]. T19 resolves direct imports and
 //! lexically bound functions as `exact`; T20 adds `$this`/`self` member uses
-//! and explicit receiver types as `scoped`:
+//! and explicit receiver types as `scoped`; T21 adds preceding `new` receiver
+//! hints as `scoped`:
 //!
 //! - bind the `new SurveySvc()` alias type use in `ReportService::runAlias` to
 //!   `App\Services\SurveyService` as `exact`;
 //! - bind the top-level `launch();` in `boot.php` to `App\Boot\launch` as
 //!   `exact`;
-//! - bind `$this->launch()` and `self::DEFAULT_LABEL` inside `SurveyService`
-//!   and the typed-parameter `$svc->launch()` in `ReportService::runTyped` as
+//! - bind `$this->launch()` and `self::DEFAULT_LABEL` inside `SurveyService`,
+//!   the typed-parameter `$svc->launch()` in `ReportService::runTyped`, and the
+//!   `new`-receiver calls in `ReportService::runAlias` and `boot.php` as
 //!   `scoped`;
-//! - leave the untyped `$x->launch()` and every `new`-hint call unresolved
-//!   (T21 owns those);
+//! - leave the untyped `$x->launch()` unresolved;
 //! - report the real `bindings` count in `index --json`; and
 //! - reproduce byte-identical binding rows on a no-edit re-index.
 //!
 //! A separate temporary fixture checks the `use function` alias rule and the
-//! PHP namespaced-to-global fallback.
+//! PHP namespaced-to-global fallback, and another checks that a reassigned or
+//! conditionally assigned `new` receiver stays unbound.
 
 #![cfg(feature = "lang-php")]
 
@@ -140,7 +142,8 @@ fn resolves_exact_imports_and_scoped_receivers_but_not_new_hints() {
     let root = temp.path();
 
     let value = index_json(root);
-    // Ten bindings: six `exact` from T19 and four `scoped` from T20.
+    // Thirteen bindings: six `exact` from T19, four `scoped` from T20, and
+    // three `scoped` from T21.
     //   T19 (exact):
     //   1. ReportService.php import alias `SurveySvc`
     //   2. ReportService.php import `SurveyService`
@@ -153,7 +156,11 @@ fn resolves_exact_imports_and_scoped_receivers_but_not_new_hints() {
     //   8. SurveyService.php `self::DEFAULT_LABEL` constant read
     //   9. SurveyService.php `$this->launch()` call
     //  10. ReportService.php `$svc->launch()` typed-parameter call
-    assert_eq!(value["bindings"], 10, "T20 binding count: {value}");
+    //   T21 (scoped):
+    //  11. ReportService.php `$svc->launch()` after `new SurveySvc()`
+    //  12. boot.php `$svc->launch()` after `new \App\Services\SurveyService()`
+    //  13. boot.php interpolated `{$svc->launch()}`
+    assert_eq!(value["bindings"], 13, "T21 binding count: {value}");
 
     let store = open_store(root);
     let uses = all_use_rows(&store);
@@ -212,18 +219,40 @@ fn resolves_exact_imports_and_scoped_receivers_but_not_new_hints() {
     );
     assert_eq!(typed_binding.resolution.as_str(), "scoped");
 
-    // Untyped receivers (gold g) and `new` hints (T21) stay unbound.
+    // T21: a preceding direct `new` binds the call as `scoped`.
     for (file, start, end, reason) in [
-        ("ReportService.php", 862, 868, "untyped $x receiver"),
-        ("ReportService.php", 591, 597, "new-hint receiver is T21"),
-        ("boot.php", 267, 273, "new-hint receiver is T21"),
-        ("boot.php", 430, 436, "new-hint receiver is T21"),
+        ("ReportService.php", 591, 597, "aliased new SurveySvc()"),
+        ("boot.php", 267, 273, "fully qualified new"),
+        ("boot.php", 430, 436, "interpolated new receiver"),
     ] {
         let row = use_at(&uses, file, start, end, "call");
-        assert!(
-            binding_for(&bindings, row).is_none(),
-            "{reason} must stay unbound: {row:?}"
+        let binding = binding_for(&bindings, row).expect(reason);
+        assert_eq!(
+            binding.target_id, "SurveyService.php#App\\Services\\SurveyService::launch",
+            "{reason} must resolve to the new class's member"
         );
+        assert_eq!(binding.resolution.as_str(), "scoped", "{reason}");
+    }
+
+    // Gold (g): an untyped receiver stays unbound.
+    let untyped = use_at(&uses, "ReportService.php", 862, 868, "call");
+    assert!(
+        binding_for(&bindings, untyped).is_none(),
+        "untyped $x receiver must stay unbound: {untyped:?}"
+    );
+
+    // No receiver-based call may claim `exact`: receiver evidence is `scoped`.
+    for binding in &bindings {
+        let Some(row) = uses.iter().find(|row| row.use_id == Some(binding.use_id)) else {
+            continue;
+        };
+        if row.ref_kind.as_str() == "call" && row.receiver.is_some() {
+            assert_ne!(
+                binding.resolution.as_str(),
+                "exact",
+                "a receiver call must never be exact: {row:?}"
+            );
+        }
     }
 
     // A no-edit re-index reproduces byte-identical binding rows.
@@ -385,4 +414,91 @@ fn typed_receiver_binds_only_its_class_and_inheritance_stays_unbound() {
         binding_for(&bindings, inherited).is_none(),
         "inheritance is not traversed in v0.1: {inherited:?}"
     );
+}
+
+#[test]
+fn new_receiver_conservatism_rejects_reassignment_and_control_flow() {
+    let temp = TempDir::new("new-receiver");
+    let root = temp.path();
+    fs::create_dir_all(root.join(".git")).expect("create .git");
+
+    // Two same-name classes that each declare `go`.
+    write_php(
+        root,
+        "A.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace A;\nfinal class Svc\n{\n    public function go(): void\n    {\n    }\n}\n",
+    );
+    write_php(
+        root,
+        "B.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace B;\nfinal class Svc\n{\n    public function go(): void\n    {\n    }\n}\n",
+    );
+    // Reassignment: the variable holds a different `new` by the second call,
+    // so neither call is trustworthy.
+    write_php(
+        root,
+        "Reassign.php",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\n$s->go();\n$s = new \\B\\Svc();\n$s->go();\n",
+    );
+    // A conditional assignment must not leak to a use outside the block.
+    write_php(
+        root,
+        "Conditional.php",
+        "<?php\ndeclare(strict_types=1);\nif ($c) {\n    $s = new \\A\\Svc();\n}\n$s->go();\n",
+    );
+    // No reassignment and no conditional: the call binds.
+    write_php(
+        root,
+        "Safe.php",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\n$s->go();\n",
+    );
+
+    let value = index_json(root);
+    let store = open_store(root);
+    let uses = all_use_rows(&store);
+    let bindings = store.list_bindings().expect("list bindings");
+
+    // Reassign.php: both `go` calls stay unbound.
+    let reassigned: Vec<&UseRow> = uses
+        .iter()
+        .filter(|row| row.file == "Reassign.php" && row.spelling == "go")
+        .collect();
+    assert_eq!(
+        reassigned.len(),
+        2,
+        "the fixture has two calls: {reassigned:?}"
+    );
+    for row in reassigned {
+        assert!(
+            binding_for(&bindings, row).is_none(),
+            "a reassigned receiver must not bind: {row:?}"
+        );
+    }
+
+    // Conditional.php: the use is outside the assignment's block.
+    let conditional = uses
+        .iter()
+        .find(|row| row.file == "Conditional.php" && row.spelling == "go")
+        .expect("Conditional.php has a go call");
+    assert!(
+        binding_for(&bindings, conditional).is_none(),
+        "a conditional assignment must not bind a use outside it: {conditional:?}"
+    );
+
+    // Safe.php: exactly one `scoped` binding to A\Svc::go.
+    let safe = uses
+        .iter()
+        .find(|row| row.file == "Safe.php" && row.spelling == "go")
+        .expect("Safe.php has a go call");
+    let safe_binding = binding_for(&bindings, safe).expect("the safe receiver must bind");
+    assert_eq!(safe_binding.target_id, "A.php#A\\Svc::go");
+    assert_eq!(safe_binding.resolution.as_str(), "scoped");
+
+    // Only the safe call's `go` use produces a receiver binding; the four
+    // `new \A\Svc()`/`new \B\Svc()` type uses bind `exact` separately.
+    let bound_go = uses
+        .iter()
+        .filter(|row| row.spelling == "go" && binding_for(&bindings, row).is_some())
+        .count();
+    assert_eq!(bound_go, 1, "only the safe call binds: {value}");
 }

@@ -1,10 +1,11 @@
 //! One ordered resolution rule per file (T19/T20 design).
 //!
 //! T19 provides [`imports`] and [`functions`]. T20 adds [`receivers`] and T21
-//! adds `new_expr.rs`; each is registered in `resolve/mod.rs` in that order.
+//! adds [`new_expr`]; each is registered in `resolve/mod.rs` in that order.
 
 pub(crate) mod functions;
 pub(crate) mod imports;
+pub(crate) mod new_expr;
 pub(crate) mod receivers;
 
 use rivet_store::SymbolRow;

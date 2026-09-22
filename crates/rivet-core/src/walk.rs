@@ -464,7 +464,13 @@ mod tests {
         let root = temp.path();
         write(&root.join("normal.txt"), "normal");
         let bad = root.join(OsStr::from_bytes(b"bad-\xff.txt"));
-        fs::write(&bad, "bad").unwrap();
+        if fs::write(&bad, "bad").is_err() {
+            // Some host filesystems (notably APFS on macOS) reject a filename
+            // containing a byte that is not valid UTF-8, so the path cannot be
+            // created here. The walker's non-UTF-8 skip path stays exercised on
+            // Linux filesystems instead of weakening the assertions below.
+            return;
+        }
 
         let result = walk_eligible(root, &Config::default()).unwrap();
         assert_eq!(paths(&result), vec!["normal.txt"]);

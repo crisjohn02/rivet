@@ -447,6 +447,7 @@ impl Walker<'_> {
                 match self.scopes.last().and_then(|scope| scope.get(&text)) {
                     Some(Binding::New(class)) => UseHint::NewExpr {
                         class_spelling: class.clone(),
+                        use_block: enclosing_block_start(node),
                     },
                     Some(Binding::Typed(ty)) => UseHint::Typed {
                         type_spelling: ty.clone(),
@@ -514,9 +515,23 @@ impl Walker<'_> {
                             variable: text.clone(),
                             class_spelling: class_spelling.clone(),
                             span,
+                            direct_new: true,
+                            block: enclosing_block_start(name),
                         });
                 }
-                Binding::Other => {}
+                Binding::Other => {
+                    self.scope_facts
+                        .entry(scope_key)
+                        .or_default()
+                        .new_bindings
+                        .push(NewBinding {
+                            variable: text.clone(),
+                            class_spelling: String::new(),
+                            span,
+                            direct_new: false,
+                            block: enclosing_block_start(name),
+                        });
+                }
             }
         }
         if let Some(scope) = self.scopes.last_mut() {
@@ -830,6 +845,65 @@ fn enclosing_class_like(node: Node<'_>) -> Option<usize> {
         current = candidate.parent();
     }
     None
+}
+
+/// The start byte of the nearest enclosing control-flow block, or `None` at
+/// the top level of the node's function body.
+///
+/// A braced block is identified by its `compound_statement`; a braceless body
+/// falls back to the control-flow node itself. The function body's own
+/// `compound_statement` is the top level and reports `None`, so a use outside a
+/// conditional and an assignment inside it never share a block.
+fn enclosing_block_start(node: Node<'_>) -> Option<u32> {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if is_function_like(parent) {
+            return None;
+        }
+        if parent.kind() == "compound_statement" {
+            if parent.parent().is_some_and(is_function_like) {
+                return None;
+            }
+            return Some(parent.start_byte() as u32);
+        }
+        if is_control_flow(parent) {
+            return Some(parent.start_byte() as u32);
+        }
+        current = parent.parent();
+    }
+    None
+}
+
+/// Whether `node` introduces a conditional or loop body.
+fn is_control_flow(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "if_statement"
+            | "else_clause"
+            | "else_if_clause"
+            | "for_statement"
+            | "foreach_statement"
+            | "while_statement"
+            | "do_statement"
+            | "switch_statement"
+            | "case_statement"
+            | "default_statement"
+            | "try_statement"
+            | "catch_clause"
+            | "finally_clause"
+            | "match_expression"
+            | "match_conditional_expression"
+            | "match_default_expression"
+            | "conditional_expression"
+    )
+}
+
+/// Whether `node` opens a lexical function body.
+fn is_function_like(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "function_definition" | "method_declaration" | "anonymous_function" | "arrow_function"
+    )
 }
 
 fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
