@@ -31,7 +31,11 @@ pub(crate) type RuleFn = fn(&RuleCtx<'_>, &UseRow, &ScopeFacts) -> Option<(Symbo
 
 /// The ordered rule list. The first single-candidate rule wins. T20 registers
 /// `receivers` and T21 registers `new_expr` after these entries.
-const RULES: &[RuleFn] = &[rules::imports::resolve, rules::functions::resolve];
+const RULES: &[RuleFn] = &[
+    rules::imports::resolve,
+    rules::functions::resolve,
+    rules::receivers::resolve,
+];
 
 /// Lexical facts visible from one use, gathered along its scope chain.
 pub(crate) struct ScopeFacts {
@@ -175,11 +179,50 @@ impl<'a> RuleCtx<'a> {
         }
         found
     }
+
+    /// The sole member declared directly in `class_id` whose name matches
+    /// `spelling` under PHP's kind-dependent case rules (T20).
+    ///
+    /// Only methods, properties, and constants can be members. A missing member
+    /// returns `None`: v0.1 never traverses inheritance (docs/ADDING-A-LANGUAGE
+    /// "Not resolved in v0.1").
+    pub(crate) fn unique_member(&self, class_id: &str, spelling: &str) -> Option<&'a SymbolRow> {
+        let mut found: Option<&SymbolRow> = None;
+        for row in self.symbols {
+            if row.parent_id.as_deref() != Some(class_id)
+                || !member_name_matches(row.kind, &row.name, spelling)
+            {
+                continue;
+            }
+            match found {
+                None => found = Some(row),
+                Some(existing) if existing.id == row.id => {}
+                Some(_) => return None,
+            }
+        }
+        found
+    }
 }
 
 /// Whether PHP treats `kind` case-insensitively for lookup.
 fn case_insensitive_kind(kind: SymbolKind) -> bool {
     !matches!(kind, SymbolKind::Property | SymbolKind::Const)
+}
+
+/// PHP's member-name comparison.
+///
+/// Methods are case-insensitive. Properties and constants are case-sensitive;
+/// a property declaration keeps its `$`, while a `$this->name` spelling omits
+/// it, so both sides are compared without the leading `$`.
+fn member_name_matches(kind: SymbolKind, name: &str, spelling: &str) -> bool {
+    match kind {
+        SymbolKind::Method => name.eq_ignore_ascii_case(spelling),
+        SymbolKind::Property => {
+            name.strip_prefix('$').unwrap_or(name) == spelling.strip_prefix('$').unwrap_or(spelling)
+        }
+        SymbolKind::Const => name == spelling,
+        _ => false,
+    }
 }
 
 /// Resolves every persisted use for one snapshot.

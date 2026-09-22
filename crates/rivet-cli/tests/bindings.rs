@@ -1,14 +1,20 @@
-//! T19 integration tests: persisted resolution bindings.
+//! T19/T20 integration tests: persisted resolution bindings.
 //!
 //! The authored PHP fixture is copied into a temporary Git root, indexed with
 //! the real binary, and inspected by opening the committed `.rivet/index.db`
-//! directly with [`rivet_store::Store::open`]. T19 must:
+//! directly with [`rivet_store::Store::open`]. T19 resolves direct imports and
+//! lexically bound functions as `exact`; T20 adds `$this`/`self` member uses
+//! and explicit receiver types as `scoped`:
 //!
 //! - bind the `new SurveySvc()` alias type use in `ReportService::runAlias` to
 //!   `App\Services\SurveyService` as `exact`;
 //! - bind the top-level `launch();` in `boot.php` to `App\Boot\launch` as
 //!   `exact`;
-//! - leave every receiver-based `launch` method call unresolved (T20/T21);
+//! - bind `$this->launch()` and `self::DEFAULT_LABEL` inside `SurveyService`
+//!   and the typed-parameter `$svc->launch()` in `ReportService::runTyped` as
+//!   `scoped`;
+//! - leave the untyped `$x->launch()` and every `new`-hint call unresolved
+//!   (T21 owns those);
 //! - report the real `bindings` count in `index --json`; and
 //! - reproduce byte-identical binding rows on a no-edit re-index.
 //!
@@ -129,19 +135,25 @@ fn binding_for<'a>(bindings: &'a [BindingRow], use_row: &UseRow) -> Option<&'a B
 }
 
 #[test]
-fn resolves_imports_and_top_level_calls_but_not_methods() {
+fn resolves_exact_imports_and_scoped_receivers_but_not_new_hints() {
     let temp = fixture_repo("fixture");
     let root = temp.path();
 
     let value = index_json(root);
-    // Six bindings, all `exact`:
+    // Ten bindings: six `exact` from T19 and four `scoped` from T20.
+    //   T19 (exact):
     //   1. ReportService.php import alias `SurveySvc`
     //   2. ReportService.php import `SurveyService`
     //   3. ReportService.php `new SurveySvc()` type use (the gold alias case)
     //   4. ReportService.php `runTyped(SurveyService $svc)` parameter type
     //   5. boot.php top-level `launch()` call (the gold top-level case)
     //   6. boot.php `new \App\Services\SurveyService()` fully qualified type
-    assert_eq!(value["bindings"], 6, "T19 binding count: {value}");
+    //   T20 (scoped):
+    //   7. SurveyService.php `$this->label` property write
+    //   8. SurveyService.php `self::DEFAULT_LABEL` constant read
+    //   9. SurveyService.php `$this->launch()` call
+    //  10. ReportService.php `$svc->launch()` typed-parameter call
+    assert_eq!(value["bindings"], 10, "T20 binding count: {value}");
 
     let store = open_store(root);
     let uses = all_use_rows(&store);
@@ -162,21 +174,55 @@ fn resolves_imports_and_top_level_calls_but_not_methods() {
     assert_eq!(call_binding.target_id, "boot.php#App\\Boot\\launch");
     assert_eq!(call_binding.resolution.as_str(), "exact");
 
-    // Every receiver-based `launch` call is unresolved in T19.
-    let method_calls: Vec<&UseRow> = uses
-        .iter()
-        .filter(|row| {
-            row.spelling == "launch" && row.ref_kind.as_str() == "call" && row.receiver.is_some()
-        })
-        .collect();
-    assert!(
-        !method_calls.is_empty(),
-        "the fixture has receiver-based launch calls"
+    // Gold (d): `$this->launch()` binds to the enclosing class member, scoped.
+    let this_call = use_at(&uses, "SurveyService.php", 640, 646, "call");
+    let this_binding = binding_for(&bindings, this_call).expect("$this->launch() must bind");
+    assert_eq!(
+        this_binding.target_id,
+        "SurveyService.php#App\\Services\\SurveyService::launch"
     );
-    for row in method_calls {
+    assert_eq!(this_binding.resolution.as_str(), "scoped");
+
+    // `$this->label` (write) binds to the declared property, not a method.
+    let property_write = use_at(&uses, "SurveyService.php", 512, 517, "write");
+    let property_binding =
+        binding_for(&bindings, property_write).expect("$this->label write must bind");
+    assert_eq!(
+        property_binding.target_id,
+        "SurveyService.php#App\\Services\\SurveyService::$label"
+    );
+    assert_eq!(property_binding.resolution.as_str(), "scoped");
+
+    // `self::DEFAULT_LABEL` (read) binds to the class constant, case-sensitively.
+    let const_read = use_at(&uses, "SurveyService.php", 526, 539, "read");
+    let const_binding =
+        binding_for(&bindings, const_read).expect("self::DEFAULT_LABEL read must bind");
+    assert_eq!(
+        const_binding.target_id,
+        "SurveyService.php#App\\Services\\SurveyService::DEFAULT_LABEL"
+    );
+    assert_eq!(const_binding.resolution.as_str(), "scoped");
+
+    // Gold (f): a typed parameter resolves the receiver to its class, scoped.
+    let typed_call = use_at(&uses, "ReportService.php", 736, 742, "call");
+    let typed_binding = binding_for(&bindings, typed_call).expect("typed $svc->launch() must bind");
+    assert_eq!(
+        typed_binding.target_id,
+        "SurveyService.php#App\\Services\\SurveyService::launch"
+    );
+    assert_eq!(typed_binding.resolution.as_str(), "scoped");
+
+    // Untyped receivers (gold g) and `new` hints (T21) stay unbound.
+    for (file, start, end, reason) in [
+        ("ReportService.php", 862, 868, "untyped $x receiver"),
+        ("ReportService.php", 591, 597, "new-hint receiver is T21"),
+        ("boot.php", 267, 273, "new-hint receiver is T21"),
+        ("boot.php", 430, 436, "new-hint receiver is T21"),
+    ] {
+        let row = use_at(&uses, file, start, end, "call");
         assert!(
             binding_for(&bindings, row).is_none(),
-            "T20/T21 must own receiver-based calls: {row:?}"
+            "{reason} must stay unbound: {row:?}"
         );
     }
 
@@ -260,5 +306,83 @@ fn function_import_alias_binds_and_without_it_stays_unresolved() {
     assert!(
         binding_for(&bindings, call).is_none(),
         "an unimported call must stay unresolved"
+    );
+}
+
+/// The `call` use of `spelling` on `receiver` in `file`.
+fn call_use<'a>(uses: &'a [UseRow], file: &str, spelling: &str, receiver: &str) -> &'a UseRow {
+    uses.iter()
+        .find(|row| {
+            row.file == file
+                && row.ref_kind.as_str() == "call"
+                && row.spelling == spelling
+                && row.receiver.as_deref() == Some(receiver)
+        })
+        .unwrap_or_else(|| panic!("missing {file} {spelling} call on {receiver}"))
+}
+
+#[test]
+fn typed_receiver_binds_only_its_class_and_inheritance_stays_unbound() {
+    let temp = TempDir::new("typed-receiver");
+    let root = temp.path();
+    fs::create_dir_all(root.join(".git")).expect("create .git");
+
+    // Two unrelated classes with the same short name both declare `launch`.
+    write_php(
+        root,
+        "A.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace A;\nfinal class Widget\n{\n    public function launch(): void\n    {\n    }\n}\n",
+    );
+    write_php(
+        root,
+        "B.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace B;\nfinal class Widget\n{\n    public function launch(): void\n    {\n    }\n}\n",
+    );
+    // The typed receiver imports A\Widget, so `$p->launch()` must never bind
+    // to B\Widget::launch.
+    write_php(
+        root,
+        "C.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace C;\nuse A\\Widget;\nfinal class Runner\n{\n    public function go(Widget $p): void\n    {\n        $p->launch();\n    }\n}\n",
+    );
+    // Inheritance traversal is future work in v0.1: `Child` does not declare
+    // `launch` even though `Base` does, so a `Child` receiver stays unbound
+    // rather than resolving to the parent's method.
+    write_php(
+        root,
+        "Base.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace D;\nclass Base\n{\n    public function launch(): void\n    {\n    }\n}\n",
+    );
+    write_php(
+        root,
+        "Child.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace D;\nfinal class Child extends Base\n{\n}\n",
+    );
+    write_php(
+        root,
+        "Caller.php",
+        "<?php\ndeclare(strict_types=1);\nnamespace D;\nfinal class Caller\n{\n    public function go(Child $c): void\n    {\n        $c->launch();\n    }\n}\n",
+    );
+
+    let _ = index_json(root);
+    let store = open_store(root);
+    let uses = all_use_rows(&store);
+    let bindings = store.list_bindings().expect("list bindings");
+
+    // The typed receiver binds to the imported class only, as `scoped`.
+    let typed = call_use(&uses, "C.php", "launch", "$p");
+    let binding = binding_for(&bindings, typed).expect("typed receiver must bind");
+    assert_eq!(binding.target_id, "A.php#A\\Widget::launch");
+    assert_eq!(binding.resolution.as_str(), "scoped");
+    assert_ne!(
+        binding.target_id, "B.php#B\\Widget::launch",
+        "the other same-name class must not win"
+    );
+
+    // The child receiver does not reach the parent's member in v0.1.
+    let inherited = call_use(&uses, "Caller.php", "launch", "$c");
+    assert!(
+        binding_for(&bindings, inherited).is_none(),
+        "inheritance is not traversed in v0.1: {inherited:?}"
     );
 }
