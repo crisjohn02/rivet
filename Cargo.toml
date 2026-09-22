@@ -21,6 +21,9 @@ clap = { version = "4.5", features = ["derive"] }
 # Config parsing in rivet-core only. Pinned to the exact registry versions
 # checked with `cargo search`; `serde` needs its derive feature.
 serde = { version = "=1.0.229", features = ["derive"] }
+# JSON transport in rivet-cli only. `preserve_order` keeps object keys in
+# insertion order so the wire contract's documented key order is emitted.
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
 toml = "=1.1.6"
 # Gitignore-aware directory traversal in rivet-core only. Pinned to the exact
 # registry version checked with `cargo search`.

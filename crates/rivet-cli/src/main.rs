@@ -2,23 +2,46 @@
 //!
 //! Arguments, root discovery, scan/refresh orchestration, output, exit codes.
 
-use clap::{Parser, Subcommand};
+mod index;
+mod transport;
+
+use clap::Parser;
+use clap::error::ErrorKind;
+use serde_json::Map;
+
+use transport::{CliError, emit_error, emit_success};
 
 /// Agent-native codebase CLI: structural code navigation and token-budgeted context for coding agents.
 #[derive(Debug, Parser)]
 #[command(name = "rivet", version)]
 struct Cli {
+    /// Emit exactly one machine-readable JSON object.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 /// The six MVP commands.
-#[derive(Debug, Subcommand)]
+#[derive(Debug, clap::Subcommand)]
 enum Command {
     /// Set up rivet configuration and instructions in a repository.
     Init,
     /// Build or refresh the local index.
-    Index,
+    Index {
+        /// Rebuild all facts even when content is unchanged.
+        #[arg(long)]
+        force: bool,
+        /// Include `elapsed_ms` in JSON output.
+        #[arg(long)]
+        timing: bool,
+        /// Comma-separated languages to index, overriding config.
+        #[arg(long, value_name = "a,b")]
+        languages: Option<String>,
+        /// Freshness mode, overriding config.
+        #[arg(long, value_name = "content|metadata")]
+        freshness: Option<String>,
+    },
     /// Locate a symbol declaration.
     Symbol {
         /// Symbol name, qualified name, or file:line to look up.
@@ -43,18 +66,120 @@ impl Command {
     fn name(&self) -> &'static str {
         match self {
             Command::Init => "init",
-            Command::Index => "index",
+            Command::Index { .. } => "index",
             Command::Symbol { .. } => "symbol",
             Command::Refs { .. } => "refs",
             Command::Context { .. } => "context",
             Command::Snippet => "snippet",
         }
     }
+
+    /// The implementing task for a command that is still unimplemented.
+    fn task(&self) -> &'static str {
+        match self {
+            Command::Init | Command::Snippet => "T33",
+            Command::Symbol { .. } => "T12",
+            Command::Refs { .. } => "T23",
+            Command::Context { .. } => "T30",
+            Command::Index { .. } => "T10",
+        }
+    }
 }
 
 fn main() {
-    let cli = Cli::parse();
-    let name = cli.command.name();
-    eprintln!("rivet {name}: not implemented yet (see docs/TASKS.md)");
-    std::process::exit(1);
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => handle_parse_error(error),
+    };
+    let json = cli.json;
+
+    match cli.command {
+        Command::Index {
+            force,
+            timing,
+            languages,
+            freshness,
+        } => {
+            let options = index::Options {
+                force,
+                timing,
+                languages,
+                freshness,
+            };
+            match index::run(options) {
+                Ok(report) => {
+                    if json {
+                        emit_success(index::success_json(&report));
+                    } else {
+                        print!("{}", index::human(&report));
+                    }
+                }
+                Err(error) => fail(json, &error, "index"),
+            }
+        }
+        other => not_implemented(json, &other),
+    }
+}
+
+/// Reports a failed `index` run: a JSON error object in `--json` mode, human
+/// text otherwise, always with the documented exit code.
+fn fail(json: bool, error: &CliError, command: &str) -> ! {
+    if json {
+        emit_error(
+            error.code,
+            error.exit,
+            &error.message,
+            &error.hint,
+            (*error.extra).clone(),
+        );
+    }
+    eprintln!("rivet {command}: {}", error.message);
+    std::process::exit(error.exit);
+}
+
+/// Reports an unimplemented command without ever faking success.
+fn not_implemented(json: bool, command: &Command) -> ! {
+    let name = command.name();
+    let task = command.task();
+    let message =
+        format!("rivet {name} is not implemented yet (expected in {task}; see docs/TASKS.md)");
+    let error = CliError::general(message, "Only `rivet index` is implemented in this build.");
+    if json {
+        emit_error(
+            error.code,
+            error.exit,
+            &error.message,
+            &error.hint,
+            *error.extra,
+        );
+    }
+    eprintln!("{}", error.message);
+    std::process::exit(error.exit);
+}
+
+/// Renders clap parse failures, using the JSON error envelope when `--json` was
+/// present. `--help`/`--version` stay text-only.
+fn handle_parse_error(error: clap::Error) -> ! {
+    if !matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) && json_requested()
+    {
+        let message = error.to_string();
+        let message = message.trim();
+        emit_error(
+            "invalid_arguments",
+            2,
+            message,
+            "Run `rivet index --help` for usage.",
+            Map::new(),
+        );
+    }
+    // Text mode, or the text-only help/version output.
+    error.exit();
+}
+
+/// Reports whether `--json` appeared anywhere on the command line.
+fn json_requested() -> bool {
+    std::env::args_os().any(|argument| argument == "--json")
 }

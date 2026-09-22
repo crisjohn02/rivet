@@ -12,9 +12,14 @@ path = "src/main.rs"
 
 [features]
 default = ["lang-php", "lang-typescript"]
-lang-php = ["rivet-parser/lang-php"]
-lang-typescript = ["rivet-parser/lang-typescript"]
+lang-php = ["rivet-parser/lang-php", "rivet-languages/lang-php"]
+lang-typescript = ["rivet-parser/lang-typescript", "rivet-languages/lang-typescript"]
 
 [dependencies]
 clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rivet-core = { path = "../rivet-core" }
+rivet-languages = { path = "../rivet-languages", default-features = false }
 rivet-parser = { path = "../rivet-parser", default-features = false }
+rivet-store = { path = "../rivet-store" }

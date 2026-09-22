@@ -427,7 +427,12 @@ name = "rivet-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "rivet-core",
+ "rivet-languages",
  "rivet-parser",
+ "rivet-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -24,7 +24,7 @@ Each entry that changes JSON output is marked **[additive]** or **[breaking]**.
 - Dual-licensed under MIT OR Apache-2.0. Added `LICENSE-MIT` and `LICENSE-APACHE`.
 
 ### Code
-- None yet.
+- Sections A and B of the task queue (T01–T10): Rust workspace and CLI shell; pinned Tree-sitter grammars behind `lang-php` and `lang-typescript`; spans, canonical symbol IDs, and shared enums; authored PHP fixture with verified gold spans; root discovery and config validation; eligible-file traversal; bounded reads and BLAKE3 hashing; SQLite store with atomic inventory publication and snapshot digest; first real `rivet index --json` with the shared JSON transport. Navigation commands still return a JSON `general` error naming their task.
 
 ## Schema versions
 
