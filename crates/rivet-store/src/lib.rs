@@ -5,9 +5,12 @@
 //! `.rivet/` destination before touching the database, opens `index.db` with
 //! foreign keys enabled, and either creates the version-1 schema or refuses a
 //! database whose `meta.index_format_version` differs. Minimal row operations
-//! run inside explicit transactions. Walking, parsing, resolution, and atomic
-//! snapshot publication belong to later tasks.
+//! run inside explicit transactions. [`Store::publish_inventory`] atomically
+//! replaces the complete file inventory and writes the configuration
+//! fingerprints plus the deterministic snapshot digest. Walking, parsing, and
+//! resolution belong to later tasks.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -15,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use rivet_core::ParseStatus;
 use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 /// The database file name inside `.rivet/`.
 const INDEX_DB_FILE: &str = "index.db";
@@ -145,6 +148,91 @@ pub struct FileRow {
     pub parse_status: ParseStatus,
 }
 
+/// The four fingerprint inputs that identify an indexed snapshot's
+/// configuration (ARCHITECTURE "Refresh and invalidation").
+///
+/// They are stored in `meta` and fed to [`snapshot_digest`]. None of them
+/// includes wall time or transaction counters, so re-indexing identical
+/// content/configuration yields the same digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    /// Schema/index format version, stored as `meta.index_format_version`.
+    pub index_format_version: String,
+    /// Effective configuration fingerprint, stored as
+    /// `meta.effective_config_fingerprint`.
+    pub effective_config: String,
+    /// Extractor/grammar fingerprint, stored as
+    /// `meta.extractor_fingerprint`.
+    pub extractor: String,
+    /// Resolver fingerprint, stored as `meta.resolver_fingerprint`.
+    pub resolver: String,
+}
+
+/// The complete inventory to publish atomically.
+pub struct InventoryInput {
+    /// Fingerprints written to `meta` alongside the inventory.
+    pub fingerprint: Fingerprint,
+    /// Every currently eligible file. Rows not listed here are deleted.
+    pub files: Vec<FileRow>,
+}
+
+/// Counts and digest describing one [`Store::publish_inventory`] call.
+///
+/// `updated + unchanged == files.len()` of the published input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishReport {
+    /// New rows, or rows whose content hash, parse status, or language changed.
+    pub updated: u64,
+    /// Rows present before and after with none of those three values changed.
+    /// Metadata-only (mtime/size) changes still count as unchanged.
+    pub unchanged: u64,
+    /// Previously present rows removed by this publication.
+    pub deleted: u64,
+    /// The canonical `blake3:` snapshot digest (see [`snapshot_digest`]).
+    pub digest: String,
+}
+
+/// Computes the deterministic snapshot digest of a fingerprint and inventory.
+///
+/// The digest is BLAKE3 over a canonical, length-prefixed byte sequence
+/// (ARCHITECTURE "Refresh and invalidation"): the index-format version,
+/// effective-config, extractor, and resolver fingerprints, then each file in
+/// path-byte order with its path, language or empty, content hash or empty,
+/// and parse/skip status. Every field is prefixed with its byte length as an
+/// 8-byte little-endian integer so distinct field boundaries cannot collide.
+/// mtime, size, absolute root, row IDs, and wall time are excluded, so an
+/// mtime-only edit leaves the digest unchanged. `sorted_files` is sorted here
+/// as well, so the result does not depend on caller input order either.
+pub fn snapshot_digest(fingerprint: &Fingerprint, sorted_files: &[FileRow]) -> String {
+    let mut files: Vec<&FileRow> = sorted_files.iter().collect();
+    files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+
+    let mut hasher = blake3::Hasher::new();
+    push_field(&mut hasher, fingerprint.index_format_version.as_bytes());
+    push_field(&mut hasher, fingerprint.effective_config.as_bytes());
+    push_field(&mut hasher, fingerprint.extractor.as_bytes());
+    push_field(&mut hasher, fingerprint.resolver.as_bytes());
+    for file in files {
+        push_field(&mut hasher, file.path.as_bytes());
+        push_field(
+            &mut hasher,
+            file.language.as_deref().unwrap_or("").as_bytes(),
+        );
+        push_field(
+            &mut hasher,
+            file.content_hash.as_deref().unwrap_or("").as_bytes(),
+        );
+        push_field(&mut hasher, file.parse_status.as_str().as_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+/// Feeds one length-prefixed field into `hasher`.
+fn push_field(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
 /// Why a store operation failed.
 #[derive(Debug)]
 pub enum Error {
@@ -266,6 +354,99 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Atomically replaces the complete `files` inventory and writes the four
+    /// fingerprint values plus the snapshot digest into `meta`.
+    ///
+    /// The whole publication runs in one `BEGIN IMMEDIATE` transaction: rows
+    /// absent from `input.files` are deleted, present rows are inserted or
+    /// updated, and the `meta` values are written before commit. Any failure
+    /// rolls the transaction back so the previous complete inventory and meta
+    /// stay untouched (spec §12.3; ARCHITECTURE "Refresh and invalidation" and
+    /// "Concurrency and source consistency"). A duplicate new path aborts the
+    /// transaction rather than collapsing two logically distinct inputs.
+    pub fn publish_inventory(&mut self, input: InventoryInput) -> Result<PublishReport, Error> {
+        let InventoryInput { fingerprint, files } = input;
+
+        // Sort by path bytes so writes and the digest are deterministic and
+        // independent of the caller's input order.
+        let mut sorted = files;
+        sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        let digest = snapshot_digest(&fingerprint, &sorted);
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let previous = load_previous_inventory(&tx)?;
+        let incoming: HashSet<&str> = sorted.iter().map(|file| file.path.as_str()).collect();
+        let deleted = previous
+            .keys()
+            .filter(|path| !incoming.contains(path.as_str()))
+            .count() as u64;
+
+        // Delete rows that left the eligible set before writing the new ones.
+        {
+            let mut delete = tx.prepare("DELETE FROM files WHERE path = ?1")?;
+            for path in previous.keys() {
+                if !incoming.contains(path.as_str()) {
+                    delete.execute(params![path])?;
+                }
+            }
+        }
+
+        let mut updated = 0_u64;
+        let mut unchanged = 0_u64;
+        {
+            // A plain INSERT, not an upsert: a duplicate path in the input must
+            // abort the whole transaction rather than silently collapse.
+            let mut insert = tx.prepare(
+                "INSERT INTO files
+                     (path, language, mtime_ns, size, content_hash, source, parse_status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            let mut update = tx.prepare(
+                "UPDATE files SET
+                     language = ?2,
+                     mtime_ns = ?3,
+                     size = ?4,
+                     content_hash = ?5,
+                     source = ?6,
+                     parse_status = ?7
+                 WHERE path = ?1",
+            )?;
+            for file in &sorted {
+                match previous.get(&file.path) {
+                    Some((content_hash, parse_status, language))
+                        if *content_hash == file.content_hash
+                            && *parse_status == file.parse_status
+                            && *language == file.language =>
+                    {
+                        unchanged += 1;
+                        write_file_row(&mut update, file)?;
+                    }
+                    Some(_) => {
+                        updated += 1;
+                        write_file_row(&mut update, file)?;
+                    }
+                    None => {
+                        updated += 1;
+                        write_file_row(&mut insert, file)?;
+                    }
+                }
+            }
+        }
+
+        write_fingerprint(&tx, &fingerprint, &digest)?;
+        tx.commit()?;
+
+        Ok(PublishReport {
+            updated,
+            unchanged,
+            deleted,
+            digest,
+        })
     }
 
     /// Returns the `files` row for `path`, if any.
@@ -463,9 +644,89 @@ fn file_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     })
 }
 
+/// Executes one parameterized `files` write (INSERT or UPDATE) for `file`.
+///
+/// Both statements use the same `?1..?7` column order, so one binding list
+/// serves each.
+fn write_file_row(stmt: &mut rusqlite::Statement<'_>, file: &FileRow) -> Result<(), Error> {
+    stmt.execute(params![
+        file.path,
+        file.language,
+        file.mtime_ns,
+        file.size as i64,
+        file.content_hash,
+        file.source,
+        file.parse_status.as_str(),
+    ])?;
+    Ok(())
+}
+
+/// Comparison fields of a previously published `files` row: content hash,
+/// parse status, and language. Used to classify updated vs unchanged.
+type PreviousFile = (Option<String>, ParseStatus, Option<String>);
+
+/// Loads the current inventory keyed by path, with the comparison fields only.
+fn load_previous_inventory(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<HashMap<String, PreviousFile>, Error> {
+    let raw: Vec<(String, Option<String>, String, Option<String>)> = {
+        let mut stmt =
+            tx.prepare("SELECT path, content_hash, parse_status, language FROM files")?;
+        let rows = stmt.query_map(
+            [],
+            |row| -> rusqlite::Result<(String, Option<String>, String, Option<String>)> {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut previous = HashMap::with_capacity(raw.len());
+    for (path, content_hash, status, language) in raw {
+        let parse_status = status.parse::<ParseStatus>().map_err(|error| {
+            // `parse_status` is the third selected column (index 2).
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        })?;
+        previous.insert(path, (content_hash, parse_status, language));
+    }
+    Ok(previous)
+}
+
+/// Writes the four fingerprints and the snapshot digest into `meta`.
+fn write_fingerprint(
+    tx: &rusqlite::Transaction<'_>,
+    fingerprint: &Fingerprint,
+    digest: &str,
+) -> Result<(), Error> {
+    let entries = [
+        (
+            "index_format_version",
+            fingerprint.index_format_version.as_str(),
+        ),
+        (
+            "effective_config_fingerprint",
+            fingerprint.effective_config.as_str(),
+        ),
+        ("extractor_fingerprint", fingerprint.extractor.as_str()),
+        ("resolver_fingerprint", fingerprint.resolver.as_str()),
+        ("snapshot_digest", digest),
+    ];
+    let mut upsert = tx.prepare(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )?;
+    for (key, value) in entries {
+        upsert.execute(params![key, value])?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Error, FileRow, INDEX_FORMAT_VERSION, Store, clamp_mtime_ns};
+    use super::{
+        Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, PublishReport, Store,
+        clamp_mtime_ns, snapshot_digest,
+    };
     use rivet_core::{ParseStatus, content_hash};
     use rusqlite::params;
     use std::fs;
@@ -515,6 +776,196 @@ mod tests {
             source: Some(b"<?php".to_vec()),
             parse_status: ParseStatus::Ok,
         }
+    }
+
+    fn file_with(path: &str, content: &[u8]) -> FileRow {
+        FileRow {
+            path: path.to_string(),
+            language: Some("php".to_string()),
+            mtime_ns: 1_700_000_000_000_000_000,
+            size: content.len() as u64,
+            content_hash: Some(content_hash(content)),
+            source: Some(content.to_vec()),
+            parse_status: ParseStatus::Ok,
+        }
+    }
+
+    fn sample_fingerprint() -> Fingerprint {
+        Fingerprint {
+            index_format_version: INDEX_FORMAT_VERSION.to_string(),
+            effective_config: "cfg-v1".to_string(),
+            extractor: "extractor-v1".to_string(),
+            resolver: "resolver-v1".to_string(),
+        }
+    }
+
+    fn inventory(fingerprint: Fingerprint, files: Vec<FileRow>) -> InventoryInput {
+        InventoryInput { fingerprint, files }
+    }
+
+    fn publish(store: &mut Store, files: Vec<FileRow>) -> PublishReport {
+        store
+            .publish_inventory(inventory(sample_fingerprint(), files))
+            .expect("publish succeeds")
+    }
+
+    #[test]
+    fn snapshot_digest_is_order_independent_and_excludes_metadata() {
+        let fingerprint = sample_fingerprint();
+        let forward = vec![sample_file("a.php"), sample_file("b.php")];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        assert_eq!(
+            snapshot_digest(&fingerprint, &forward),
+            snapshot_digest(&fingerprint, &reversed)
+        );
+
+        // mtime and size are not part of the digest.
+        let mut touched = forward.clone();
+        touched[0].mtime_ns += 99;
+        touched[0].size = 12345;
+        assert_eq!(
+            snapshot_digest(&fingerprint, &forward),
+            snapshot_digest(&fingerprint, &touched)
+        );
+    }
+
+    #[test]
+    fn republish_same_inventory_is_stable() {
+        let mut store = Store::open_in_memory().unwrap();
+        let files = vec![sample_file("a.php"), sample_file("b.php")];
+        let first = publish(&mut store, files.clone());
+        assert_eq!((first.updated, first.unchanged, first.deleted), (2, 0, 0));
+
+        let second = publish(&mut store, files);
+        assert_eq!(
+            (second.updated, second.unchanged, second.deleted),
+            (0, 2, 0)
+        );
+        assert_eq!(second.digest, first.digest);
+    }
+
+    #[test]
+    fn publish_is_order_independent() {
+        let mut store = Store::open_in_memory().unwrap();
+        let first = publish(
+            &mut store,
+            vec![
+                sample_file("a.php"),
+                sample_file("b.php"),
+                sample_file("c.php"),
+            ],
+        );
+        let second = publish(
+            &mut store,
+            vec![
+                sample_file("c.php"),
+                sample_file("b.php"),
+                sample_file("a.php"),
+            ],
+        );
+        assert_eq!(second.digest, first.digest);
+        assert_eq!(
+            (second.updated, second.unchanged, second.deleted),
+            (0, 3, 0)
+        );
+    }
+
+    #[test]
+    fn changed_content_hash_updates_one_and_changes_digest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let base = vec![sample_file("a.php"), sample_file("b.php")];
+        let before = publish(&mut store, base.clone());
+
+        let mut changed = base;
+        changed[0] = file_with("a.php", b"<?php changed");
+        let after = publish(&mut store, changed);
+        assert_eq!((after.updated, after.unchanged, after.deleted), (1, 1, 0));
+        assert_ne!(after.digest, before.digest);
+    }
+
+    #[test]
+    fn mtime_only_change_is_unchanged_and_same_digest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let base = vec![sample_file("a.php"), sample_file("b.php")];
+        let before = publish(&mut store, base.clone());
+
+        let mut touched = base.clone();
+        touched[0].mtime_ns += 12_345;
+        let after = publish(&mut store, touched);
+        assert_eq!((after.updated, after.unchanged, after.deleted), (0, 2, 0));
+        assert_eq!(after.digest, before.digest);
+
+        // Metadata-only updates are still persisted.
+        assert_eq!(
+            store.get_file("a.php").unwrap().unwrap().mtime_ns,
+            base[0].mtime_ns + 12_345
+        );
+    }
+
+    #[test]
+    fn removed_file_counts_deleted_and_changes_digest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let before = publish(&mut store, vec![sample_file("a.php"), sample_file("b.php")]);
+
+        let after = publish(&mut store, vec![sample_file("a.php")]);
+        assert_eq!((after.updated, after.unchanged, after.deleted), (0, 1, 1));
+        assert_ne!(after.digest, before.digest);
+        assert!(store.get_file("b.php").unwrap().is_none());
+    }
+
+    #[test]
+    fn effective_config_change_changes_digest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let files = vec![sample_file("a.php"), sample_file("b.php")];
+        let before = publish(&mut store, files.clone());
+
+        let mut fingerprint = sample_fingerprint();
+        fingerprint.effective_config = "cfg-v2".to_string();
+        let after = store
+            .publish_inventory(inventory(fingerprint, files))
+            .unwrap();
+        assert_eq!((after.updated, after.unchanged, after.deleted), (0, 2, 0));
+        assert_ne!(after.digest, before.digest);
+    }
+
+    #[test]
+    fn failed_publish_rolls_back_inventory_and_digest() {
+        let mut store = Store::open_in_memory().unwrap();
+        let before = publish(&mut store, vec![sample_file("a.php")]);
+        let digest_before = store.get_meta("snapshot_digest").unwrap();
+        assert_eq!(digest_before.as_deref(), Some(before.digest.as_str()));
+
+        // Two rows share "b.php"; the second plain INSERT hits the PRIMARY KEY
+        // partway through, so the whole transaction must roll back.
+        let duplicate = vec![
+            sample_file("b.php"),
+            sample_file("c.php"),
+            sample_file("b.php"),
+        ];
+        let error = store
+            .publish_inventory(inventory(sample_fingerprint(), duplicate))
+            .unwrap_err();
+        assert!(matches!(error, Error::Sqlite(_)), "{error:?}");
+
+        assert_eq!(store.get_meta("snapshot_digest").unwrap(), digest_before);
+        assert_eq!(store.list_files().unwrap(), vec![sample_file("a.php")]);
+    }
+
+    #[test]
+    fn list_files_after_publish_is_path_sorted() {
+        let mut store = Store::open_in_memory().unwrap();
+        let input = vec![
+            sample_file("z.php"),
+            sample_file("B.php"),
+            sample_file("aa.php"),
+            sample_file("a.php"),
+        ];
+        publish(&mut store, input.clone());
+
+        let mut expected = input;
+        expected.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        assert_eq!(store.list_files().unwrap(), expected);
     }
 
     #[test]
