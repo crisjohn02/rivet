@@ -5,7 +5,10 @@
 //! chain binds to the imported declaration; the same holds for the alias token
 //! of the `use` itself and for a function call that names a `use function`
 //! alias. A fully qualified spelling (`\App\Services\SurveyService`) binds
-//! directly when exactly one symbol has that qualified name.
+//! directly when exactly one declaration of the kind its use requires has that
+//! qualified name (AF2): a type use only a class-like, a call only a function,
+//! and a bare constant read only a constant. `class Maker {} \Maker();` records
+//! nothing.
 //!
 //! When no import matches, an unqualified class spelling binds to the class of
 //! that name in the use's namespace (`N\Foo`), because PHP resolves that
@@ -58,12 +61,22 @@ pub(crate) fn resolve(
             .map(|row| (row.id.clone(), Resolution::Exact));
     }
 
-    // A fully qualified spelling is a direct lexical binding, whatever kind it
-    // names (function or constant).
+    // A fully qualified spelling is a direct lexical binding, but only to a
+    // declaration of the kind the use requires (AF2): a call names a function,
+    // a bare constant read (`Unknown`) a constant. A class of the same name is
+    // never a call target.
+    //
+    // An `Unknown` use is also what the extractor records for a class name in
+    // an unclassified position such as `instanceof \App\I`, so it cannot tell
+    // a constant from a class-like of the same name; with both declared it
+    // records nothing rather than guessing.
     if let Some(qname) = fully_qualified(&use_row.spelling) {
-        return ctx
-            .unique_resolved(qname)
-            .map(|row| (row.id.clone(), Resolution::Exact));
+        let target = match use_row.ref_kind {
+            RefKind::Call if use_row.receiver.is_none() => ctx.unique_function(qname),
+            RefKind::Unknown if !ctx.any_class_like(qname) => ctx.unique_const(qname),
+            _ => None,
+        };
+        return target.map(|row| (row.id.clone(), Resolution::Exact));
     }
 
     match use_row.ref_kind {
@@ -198,11 +211,11 @@ pub(crate) fn function_via_imports<'a>(
 }
 
 /// PHP's alias comparison: constants are case-sensitive, classes and functions
-/// are not.
+/// are not, and PHP folds ASCII letters only (AF2).
 fn alias_matches(alias: &str, spelling: &str, kind: ImportKind) -> bool {
     match kind {
         ImportKind::Const => alias == spelling,
-        ImportKind::Class | ImportKind::Function => alias.to_lowercase() == spelling.to_lowercase(),
+        ImportKind::Class | ImportKind::Function => alias.eq_ignore_ascii_case(spelling),
     }
 }
 

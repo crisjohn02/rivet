@@ -16,11 +16,11 @@
 
 mod rules;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rivet_core::extract::{CallArg, NewBinding, ScopeImport};
-use rivet_core::{Resolution, SymbolKind};
-use rivet_store::{BindingRow, Error, ScopeRow, Store, SymbolRow, UseRow};
+use rivet_core::{ParseStatus, RefKind, Resolution, Span, SymbolKind};
+use rivet_store::{BindingRow, Error, FileRow, ScopeRow, Store, SymbolRow, UseRow};
 use serde::Deserialize;
 
 /// The canonical ID of the one declaration a rule selected.
@@ -65,6 +65,64 @@ pub(crate) struct ScopeFacts {
     /// one namespace block (AF1). Every rule depends on the namespace, so the
     /// driver records no binding for such a use.
     pub(crate) namespace_unattributed: bool,
+    /// Whether the use's own scope records it as a class-constant access
+    /// (`Foo::NAME`, `$x::NAME`) rather than an instance property access
+    /// (AF2). See [`MemberUse::of`].
+    pub(crate) class_constant_access: bool,
+}
+
+/// The member kind a receiver use can name (AF2).
+///
+/// PHP keeps methods, properties, and class constants in separate namespaces,
+/// so `$this->items()` never names the property `$items`, and `$this->items`
+/// never names a method `items()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberUse {
+    /// A method call: `$x->name()`, `Foo::name()`.
+    Method,
+    /// An instance or static property access: `$x->name`, `Foo::$name`.
+    Property,
+    /// A class-constant access: `Foo::NAME`, `$x::NAME`.
+    Constant,
+}
+
+impl MemberUse {
+    /// The member kind `use_row` names, from what the extractor recorded.
+    ///
+    /// - A `call` names a method.
+    /// - A `read`/`write` whose span the use's scope lists in
+    ///   `class_constant_accesses` names a class constant; a constant name never
+    ///   starts with `$`, so a `$` spelling there is contradictory and yields
+    ///   `None`.
+    /// - Any other `read`/`write` names a property: a `$`-prefixed spelling is a
+    ///   static property access (`Foo::$name`), and an unprefixed one an
+    ///   instance property access (`$x->name`).
+    ///
+    /// Every other use kind names no member.
+    pub(crate) fn of(use_row: &UseRow, facts: &ScopeFacts) -> Option<MemberUse> {
+        match use_row.ref_kind {
+            RefKind::Call => Some(MemberUse::Method),
+            RefKind::Read | RefKind::Write => {
+                let dollar = use_row.spelling.starts_with('$');
+                match (facts.class_constant_access, dollar) {
+                    (true, false) => Some(MemberUse::Constant),
+                    (true, true) => None,
+                    (false, _) => Some(MemberUse::Property),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a declaration of `kind` can be the member this use names.
+    fn accepts(self, kind: SymbolKind) -> bool {
+        matches!(
+            (self, kind),
+            (MemberUse::Method, SymbolKind::Method)
+                | (MemberUse::Property, SymbolKind::Property)
+                | (MemberUse::Constant, SymbolKind::Const)
+        )
+    }
 }
 
 /// One parsed `scopes` row's facts that resolution needs.
@@ -76,13 +134,14 @@ struct ScopeData<'a> {
     call_args: Vec<CallArg>,
     unanalysable: bool,
     namespace_unattributed: bool,
+    class_constant_accesses: HashSet<(u32, u32)>,
 }
 
 /// The persisted `scopes.facts_json` shape, read back without reparsing.
 ///
 /// `typed_bindings` is ignored in T19; T20/T21 extend this struct when their
 /// rules need more facts. T21b adds `call_args` and `unanalysable`; AF1 adds
-/// `namespace_unattributed`.
+/// `namespace_unattributed`; AF2 adds `class_constant_accesses`.
 #[derive(Deserialize, Default)]
 struct PersistedScopeFacts {
     #[serde(default)]
@@ -97,17 +156,26 @@ struct PersistedScopeFacts {
     unanalysable: bool,
     #[serde(default)]
     namespace_unattributed: bool,
+    #[serde(default)]
+    class_constant_accesses: Vec<Span>,
 }
 
 /// Symbol lookups shared by every rule.
 ///
 /// Qualified names are indexed both exactly and case-folded so a rule can ask
 /// for PHP's case-insensitive class/function comparison without re-scanning.
+/// Folding is ASCII-only, as PHP folds identifiers (AF2): `Ä` and `ä` are
+/// different names.
 pub(crate) struct RuleCtx<'a> {
     symbols: &'a [SymbolRow],
     by_id: HashMap<&'a str, usize>,
     by_qname_exact: HashMap<&'a str, Vec<usize>>,
     by_qname_folded: HashMap<String, Vec<usize>>,
+    /// Whether some PHP file of the snapshot should have been indexed but was
+    /// not (AF2). An unindexed file may declare a namespaced function, so the
+    /// global function fallback is not trustworthy. See
+    /// [`unindexed_php_files`].
+    pub(crate) php_files_unindexed: bool,
 }
 
 impl<'a> RuleCtx<'a> {
@@ -123,7 +191,7 @@ impl<'a> RuleCtx<'a> {
                 .or_default()
                 .push(index);
             by_qname_folded
-                .entry(symbol.qualified_name.to_lowercase())
+                .entry(symbol.qualified_name.to_ascii_lowercase())
                 .or_default()
                 .push(index);
         }
@@ -132,6 +200,7 @@ impl<'a> RuleCtx<'a> {
             by_id,
             by_qname_exact,
             by_qname_folded,
+            php_files_unindexed: false,
         }
     }
 
@@ -142,7 +211,7 @@ impl<'a> RuleCtx<'a> {
 
     /// Returns the sole symbol matching `qname` under `kinds`.
     ///
-    /// `case_insensitive` lowercases both sides. Multiple matches return `None`
+    /// `case_insensitive` ASCII-lowercases both sides. Multiple matches return `None`
     /// rather than guessing, so only unique candidates can bind.
     fn unique_by_qname(
         &self,
@@ -151,7 +220,7 @@ impl<'a> RuleCtx<'a> {
         kinds: &[SymbolKind],
     ) -> Option<&'a SymbolRow> {
         let indices = if case_insensitive {
-            self.by_qname_folded.get(&qname.to_lowercase())
+            self.by_qname_folded.get(&qname.to_ascii_lowercase())
         } else {
             self.by_qname_exact.get(qname)
         }?;
@@ -184,45 +253,45 @@ impl<'a> RuleCtx<'a> {
         )
     }
 
+    /// Whether any class-like declaration has the qualified name `qname`
+    /// under PHP's (ASCII) case-insensitive class comparison.
+    pub(crate) fn any_class_like(&self, qname: &str) -> bool {
+        self.by_qname_folded
+            .get(&qname.to_ascii_lowercase())
+            .is_some_and(|indices| {
+                indices.iter().any(|&index| {
+                    matches!(
+                        self.symbols[index].kind,
+                        SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum
+                    )
+                })
+            })
+    }
+
     /// The sole constant declaration whose exact qualified name is `qname`.
     pub(crate) fn unique_const(&self, qname: &str) -> Option<&'a SymbolRow> {
         self.unique_by_qname(qname, false, &[SymbolKind::Const])
     }
 
-    /// The sole symbol matching a fully qualified name.
+    /// The sole member of kind `member` declared directly in `class_id` whose
+    /// name matches `spelling` under PHP's kind-dependent case rules (T20;
+    /// AF2).
     ///
-    /// Exact matches of any kind are candidates; case-folded matches are
-    /// allowed only for PHP's case-insensitive kinds, so a wrong-case constant
-    /// never binds.
-    pub(crate) fn unique_resolved(&self, qname: &str) -> Option<&'a SymbolRow> {
-        let folded = qname.to_lowercase();
-        let mut found: Option<&SymbolRow> = None;
-        let exact = self.by_qname_exact.get(qname).into_iter().flatten();
-        let folded_matches = self.by_qname_folded.get(&folded).into_iter().flatten();
-        for &index in exact.chain(folded_matches) {
-            let row = &self.symbols[index];
-            if !case_insensitive_kind(row.kind) && row.qualified_name != qname {
-                continue;
-            }
-            match found {
-                None => found = Some(row),
-                Some(existing) if existing.id == row.id => {}
-                Some(_) => return None,
-            }
-        }
-        found
-    }
-
-    /// The sole member declared directly in `class_id` whose name matches
-    /// `spelling` under PHP's kind-dependent case rules (T20).
-    ///
-    /// Only methods, properties, and constants can be members. A missing member
-    /// returns `None`: v0.1 never traverses inheritance (docs/ADDING-A-LANGUAGE
-    /// "Not resolved in v0.1").
-    pub(crate) fn unique_member(&self, class_id: &str, spelling: &str) -> Option<&'a SymbolRow> {
+    /// Only methods, properties, and constants can be members, and a use
+    /// matches only its own member kind: a method call never binds a
+    /// same-name property, and a property access never binds a method. A
+    /// missing member returns `None`: v0.1 never traverses inheritance
+    /// (docs/ADDING-A-LANGUAGE "Not resolved in v0.1").
+    pub(crate) fn unique_member(
+        &self,
+        class_id: &str,
+        spelling: &str,
+        member: MemberUse,
+    ) -> Option<&'a SymbolRow> {
         let mut found: Option<&SymbolRow> = None;
         for row in self.symbols {
             if row.parent_id.as_deref() != Some(class_id)
+                || !member.accepts(row.kind)
                 || !member_name_matches(row.kind, &row.name, spelling)
             {
                 continue;
@@ -237,14 +306,10 @@ impl<'a> RuleCtx<'a> {
     }
 }
 
-/// Whether PHP treats `kind` case-insensitively for lookup.
-fn case_insensitive_kind(kind: SymbolKind) -> bool {
-    !matches!(kind, SymbolKind::Property | SymbolKind::Const)
-}
-
 /// PHP's member-name comparison.
 ///
-/// Methods are case-insensitive. Properties and constants are case-sensitive;
+/// Methods are case-insensitive by ASCII folding, as PHP compares them.
+/// Properties and constants are case-sensitive;
 /// a property declaration keeps its `$`, while a `$this->name` spelling omits
 /// it, so both sides are compared without the leading `$`.
 fn member_name_matches(kind: SymbolKind, name: &str, spelling: &str) -> bool {
@@ -287,6 +352,11 @@ impl<'a> Resolver<'a> {
                     call_args: parsed.call_args,
                     unanalysable: parsed.unanalysable,
                     namespace_unattributed: parsed.namespace_unattributed,
+                    class_constant_accesses: parsed
+                        .class_constant_accesses
+                        .iter()
+                        .map(|span| (span.start_byte(), span.end_byte()))
+                        .collect(),
                 },
             );
         }
@@ -295,6 +365,17 @@ impl<'a> Resolver<'a> {
             uses,
             scopes: scope_map,
         }
+    }
+
+    /// Records whether some PHP file of the snapshot should have been indexed
+    /// but was not (AF2), computed by [`unindexed_php_files`].
+    ///
+    /// When set, an unqualified function call in a namespace whose namespaced
+    /// function is not indexed records no binding instead of falling back to
+    /// the global function: the unindexed file may declare the namespaced one.
+    pub fn with_unindexed_php_files(mut self, unindexed: bool) -> Resolver<'a> {
+        self.ctx.php_files_unindexed = unindexed;
+        self
     }
 
     /// Applies the ordered rules to every use and returns the bindings.
@@ -349,6 +430,7 @@ impl<'a> Resolver<'a> {
             call_args: Vec::new(),
             unanalysable: false,
             namespace_unattributed: false,
+            class_constant_access: false,
         };
         let mut key = Some(use_row.scope_key.as_str());
         let mut own_scope = true;
@@ -365,6 +447,9 @@ impl<'a> Resolver<'a> {
                 facts.new_bindings = scope.new_bindings.clone();
                 facts.call_args = scope.call_args.clone();
                 facts.unanalysable = scope.unanalysable;
+                facts.class_constant_access = scope
+                    .class_constant_accesses
+                    .contains(&(use_row.start_byte, use_row.end_byte));
                 own_scope = false;
             }
             if facts.namespace.is_none() {
@@ -383,6 +468,21 @@ impl<'a> Resolver<'a> {
     }
 }
 
+/// Whether any file assigned the PHP language has no published facts (AF2).
+///
+/// Such a file was walked and recognized as PHP but skipped: for a parse
+/// error, a parser resource limit, the size limit, invalid UTF-8, or a NUL byte
+/// (`binary`). PHP itself would still load every one of those, so each may
+/// declare a namespaced function the index cannot see. Every status other than
+/// `ok` therefore counts. A file with no language or another language (a
+/// README, a `.ts` file) never counts, so this is not the snapshot's overall
+/// `coverage.complete` flag.
+pub fn unindexed_php_files(files: &[FileRow]) -> bool {
+    files
+        .iter()
+        .any(|file| file.language.as_deref() == Some("php") && file.parse_status != ParseStatus::Ok)
+}
+
 /// Loads one committed snapshot and resolves every persisted use.
 pub fn resolve_all(store: &Store) -> Result<Vec<BindingRow>, Error> {
     let symbols = store.list_symbols()?;
@@ -393,13 +493,14 @@ pub fn resolve_all(store: &Store) -> Result<Vec<BindingRow>, Error> {
         uses.extend(store.list_uses_for_file(&file.path)?);
         scopes.extend(store.list_scopes_for_file(&file.path)?);
     }
-    let resolver = Resolver::new(&symbols, &uses, &scopes);
+    let resolver = Resolver::new(&symbols, &uses, &scopes)
+        .with_unindexed_php_files(unindexed_php_files(&files));
     Ok(resolver.resolve())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_all;
+    use super::{Resolver, resolve_all, unindexed_php_files};
     use rivet_core::{ParseStatus, RefKind, Resolution, SymbolKind};
     use rivet_store::{
         BindingRow, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, Store,
@@ -819,6 +920,264 @@ mod tests {
                 &[],
             )],
         );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn fully_qualified_call_to_a_class_name_records_nothing() {
+        // `class Maker {} \Maker();` (audit finding 4).
+        let store = seed(
+            vec![symbol("a.php", "Maker", SymbolKind::Class)],
+            vec![use_row(
+                "a.php",
+                "\\Maker",
+                RefKind::Call,
+                None,
+                "top:file",
+                20,
+            )],
+            vec![scope("a.php", "top:file", &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn fully_qualified_call_binds_the_function_beside_a_same_name_class() {
+        let store = seed(
+            vec![
+                symbol("a.php", "App\\Maker", SymbolKind::Class),
+                symbol("b.php", "App\\maker", SymbolKind::Function),
+            ],
+            vec![use_row(
+                "c.php",
+                "\\App\\MAKER",
+                RefKind::Call,
+                None,
+                "top:file",
+                20,
+            )],
+            vec![scope("c.php", "top:file", &[], &[])],
+        );
+        let binding = only_binding(&store);
+        assert_eq!(binding.target_id, "b.php#App\\maker");
+        assert_eq!(binding.resolution, Resolution::Exact);
+    }
+
+    #[test]
+    fn fully_qualified_constant_read_binds_only_a_constant() {
+        let only_class = seed(
+            vec![symbol("a.php", "App\\LIMIT", SymbolKind::Class)],
+            vec![use_row(
+                "c.php",
+                "\\App\\LIMIT",
+                RefKind::Unknown,
+                None,
+                "top:file",
+                20,
+            )],
+            vec![scope("c.php", "top:file", &[], &[])],
+        );
+        assert!(resolve_all(&only_class).expect("resolve").is_empty());
+
+        let with_const = seed(
+            vec![
+                symbol("a.php", "App\\Limits", SymbolKind::Class),
+                symbol("b.php", "App\\LIMIT", SymbolKind::Const),
+            ],
+            vec![use_row(
+                "c.php",
+                "\\App\\LIMIT",
+                RefKind::Unknown,
+                None,
+                "top:file",
+                20,
+            )],
+            vec![scope("c.php", "top:file", &[], &[])],
+        );
+        assert_eq!(only_binding(&with_const).target_id, "b.php#App\\LIMIT");
+
+        // An `Unknown` use may be a class name (`instanceof \App\LIMIT`), so a
+        // constant and a class-like of one name leave it unresolved.
+        let both = seed(
+            vec![
+                symbol("a.php", "App\\Limit", SymbolKind::Class),
+                symbol("b.php", "App\\LIMIT", SymbolKind::Const),
+            ],
+            vec![use_row(
+                "c.php",
+                "\\App\\LIMIT",
+                RefKind::Unknown,
+                None,
+                "top:file",
+                20,
+            )],
+            vec![scope("c.php", "top:file", &[], &[])],
+        );
+        assert!(resolve_all(&both).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn non_ascii_class_names_do_not_fold() {
+        // PHP folds ASCII only: `class Ä {}` is not `new ä()` (finding 10).
+        let store = seed(
+            vec![symbol("a.php", "App\\Ä", SymbolKind::Class)],
+            vec![use_row(
+                "c.php",
+                "\\App\\ä",
+                RefKind::Type,
+                None,
+                "top:file",
+                20,
+            )],
+            vec![scope("c.php", "top:file", &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+
+        let ascii = seed(
+            vec![symbol("a.php", "App\\Foo", SymbolKind::Class)],
+            vec![use_row(
+                "c.php",
+                "\\app\\FOO",
+                RefKind::Type,
+                None,
+                "top:file",
+                20,
+            )],
+            vec![scope("c.php", "top:file", &[], &[])],
+        );
+        assert_eq!(only_binding(&ascii).target_id, "a.php#App\\Foo");
+    }
+
+    #[test]
+    fn non_ascii_import_alias_does_not_fold() {
+        let store = seed(
+            vec![symbol("a.php", "App\\Ärger", SymbolKind::Class)],
+            vec![use_row(
+                "c.php",
+                "ärger",
+                RefKind::Type,
+                None,
+                "top:file",
+                40,
+            )],
+            vec![scope(
+                "c.php",
+                "top:file",
+                &[("Ärger", "App\\Ärger", "class")],
+                &[],
+            )],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    /// The rows of a namespaced `launch()` call in `App` with a global
+    /// `launch` indexed and, optionally, `App\launch` indexed too.
+    fn fallback_rows(with_namespaced: bool) -> (Vec<SymbolRow>, Vec<UseRow>, Vec<ScopeRow>) {
+        let module = symbol("c.php", "App", SymbolKind::Module);
+        let mut symbols = vec![
+            module.clone(),
+            symbol("util.php", "launch", SymbolKind::Function),
+        ];
+        if with_namespaced {
+            symbols.push(symbol("fns.php", "App\\launch", SymbolKind::Function));
+        }
+        let mut call = use_row("c.php", "launch", RefKind::Call, None, "top:file", 40);
+        call.use_id = Some(1);
+        let scopes = vec![scope("c.php", "top:file", &[], &[&module.id])];
+        (symbols, vec![call], scopes)
+    }
+
+    #[test]
+    fn global_fallback_is_suppressed_when_a_php_file_is_unindexed() {
+        let (symbols, uses, scopes) = fallback_rows(false);
+        let complete = Resolver::new(&symbols, &uses, &scopes).resolve();
+        assert_eq!(complete.len(), 1);
+        assert_eq!(complete[0].target_id, "util.php#launch");
+
+        let partial = Resolver::new(&symbols, &uses, &scopes)
+            .with_unindexed_php_files(true)
+            .resolve();
+        assert!(partial.is_empty(), "{partial:?}");
+    }
+
+    #[test]
+    fn indexed_namespaced_function_still_wins_when_a_php_file_is_unindexed() {
+        let (symbols, uses, scopes) = fallback_rows(true);
+        let partial = Resolver::new(&symbols, &uses, &scopes)
+            .with_unindexed_php_files(true)
+            .resolve();
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].target_id, "fns.php#App\\launch");
+        assert_eq!(partial[0].resolution, Resolution::Exact);
+    }
+
+    #[test]
+    fn global_call_outside_a_namespace_is_not_a_fallback() {
+        let mut call = use_row("c.php", "launch", RefKind::Call, None, "top:file", 40);
+        call.use_id = Some(1);
+        let symbols = vec![symbol("util.php", "launch", SymbolKind::Function)];
+        let uses = vec![call];
+        let scopes = vec![scope("c.php", "top:file", &[], &[])];
+        let bindings = Resolver::new(&symbols, &uses, &scopes)
+            .with_unindexed_php_files(true)
+            .resolve();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].target_id, "util.php#launch");
+    }
+
+    #[test]
+    fn only_skipped_php_files_count_as_unindexed() {
+        let mut readme = file("README.md");
+        readme.language = None;
+        readme.parse_status = ParseStatus::Unsupported;
+        let mut ts = file("a.ts");
+        ts.language = Some("typescript".to_string());
+        ts.parse_status = ParseStatus::ParseError;
+        let ok = file("a.php");
+        assert!(!unindexed_php_files(&[
+            readme.clone(),
+            ts.clone(),
+            ok.clone()
+        ]));
+        for status in [
+            ParseStatus::ParseError,
+            ParseStatus::ResourceLimit,
+            ParseStatus::Size,
+            ParseStatus::Encoding,
+            ParseStatus::Binary,
+        ] {
+            let mut broken = file("b.php");
+            broken.parse_status = status;
+            assert!(
+                unindexed_php_files(&[readme.clone(), ok.clone(), broken]),
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_all_reads_unindexed_php_files_from_the_snapshot() {
+        let (symbols, mut uses, scopes) = fallback_rows(false);
+        uses[0].use_id = None;
+        let mut store = Store::open_in_memory().expect("open in-memory store");
+        let mut broken = file("fns.php");
+        broken.parse_status = ParseStatus::ParseError;
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: Fingerprint {
+                    index_format_version: INDEX_FORMAT_VERSION.to_string(),
+                    effective_config: "test".to_string(),
+                    extractor: "test".to_string(),
+                    resolver: "php-rules-v1".to_string(),
+                },
+                files: vec![file("c.php"), broken, file("util.php")],
+                symbols,
+                uses,
+                scopes,
+                bindings: Vec::new(),
+                force: false,
+            })
+            .expect("publish");
         assert!(resolve_all(&store).expect("resolve").is_empty());
     }
 }

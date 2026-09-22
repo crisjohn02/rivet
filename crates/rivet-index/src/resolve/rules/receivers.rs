@@ -20,7 +20,7 @@ use rivet_core::{Resolution, SymbolKind};
 use rivet_store::{SymbolRow, UseRow};
 
 use crate::resolve::rules::resolve_class_spelling;
-use crate::resolve::{RuleCtx, ScopeFacts, SymbolId};
+use crate::resolve::{MemberUse, RuleCtx, ScopeFacts, SymbolId};
 
 /// Resolves a `$this`/`self`/`static` member or an explicitly typed receiver.
 pub(crate) fn resolve(
@@ -29,6 +29,9 @@ pub(crate) fn resolve(
     facts: &ScopeFacts,
 ) -> Option<(SymbolId, Resolution)> {
     let hint: UseHint = serde_json::from_str(&use_row.hint_json).ok()?;
+    // A method call binds only a method, a property access only a property,
+    // and a class-constant read only a constant (AF2).
+    let member = MemberUse::of(use_row, facts)?;
     let class = match hint {
         UseHint::This | UseHint::SelfOrStatic => {
             if !names_enclosing_class(use_row, &hint) {
@@ -39,7 +42,7 @@ pub(crate) fn resolve(
         UseHint::Typed { type_spelling } => resolve_class_spelling(ctx, &type_spelling, facts)?,
         _ => return None,
     };
-    ctx.unique_member(&class.id, &use_row.spelling)
+    ctx.unique_member(&class.id, &use_row.spelling, member)
         .map(|member| (member.id.clone(), Resolution::Scoped))
 }
 
@@ -187,6 +190,25 @@ mod tests {
         }
     }
 
+    /// A scope row whose facts also list `constants` as class-constant access
+    /// spans (AF2).
+    fn scope_with_constants(file: &str, scope_key: &str, constants: &[(u32, u32)]) -> ScopeRow {
+        let spans: Vec<String> = constants
+            .iter()
+            .map(|(start, end)| format!("{{\"start_byte\":{start},\"end_byte\":{end}}}"))
+            .collect();
+        ScopeRow {
+            file: file.to_string(),
+            scope_key: scope_key.to_string(),
+            parent_scope_key: None,
+            facts_json: format!(
+                "{{\"imports\":[],\"typed_bindings\":[],\"new_bindings\":[],\"declares\":[],\
+                 \"class_constant_accesses\":[{}]}}",
+                spans.join(",")
+            ),
+        }
+    }
+
     /// Publishes the rows into an in-memory store and returns it.
     fn seed(symbols: Vec<SymbolRow>, uses: Vec<UseRow>, scopes: Vec<ScopeRow>) -> Store {
         let mut paths: Vec<String> = symbols
@@ -287,7 +309,7 @@ mod tests {
                 "2:0",
                 "{\"kind\":\"self_or_static\"}",
             )],
-            vec![scope("Widget.php", "2:0", None, &[], &[])],
+            vec![scope_with_constants("Widget.php", "2:0", &[(0, 13)])],
         );
         let binding = only_binding(&store);
         assert_eq!(binding.target_id, "Widget.php#App\\Widget::DEFAULT_LABEL");
@@ -433,5 +455,156 @@ mod tests {
             vec![scope("Child.php", "2:0", None, &[], &[])],
         );
         assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    /// A class `App\C` with a method `run` whose body holds the use, plus the
+    /// given members as `(qualified suffix, kind)`.
+    fn class_with(members: &[(&str, SymbolKind)]) -> Vec<SymbolRow> {
+        let mut rows = vec![
+            symbol("C.php", "App\\C", SymbolKind::Class, None),
+            symbol(
+                "C.php",
+                "App\\C::run",
+                SymbolKind::Method,
+                Some("C.php#App\\C"),
+            ),
+        ];
+        for (suffix, kind) in members {
+            rows.push(symbol(
+                "C.php",
+                &format!("App\\C::{suffix}"),
+                *kind,
+                Some("C.php#App\\C"),
+            ));
+        }
+        rows
+    }
+
+    /// A `$this`/`self` member use of `spelling` inside `App\C::run`.
+    fn member_use(spelling: &str, ref_kind: RefKind, receiver: &str) -> UseRow {
+        let hint = if receiver == "$this" {
+            "{\"kind\":\"this\"}"
+        } else {
+            "{\"kind\":\"self_or_static\"}"
+        };
+        use_row(
+            "C.php",
+            spelling,
+            ref_kind,
+            Some(receiver),
+            Some("C.php#App\\C::run"),
+            "1:0",
+            hint,
+        )
+    }
+
+    #[test]
+    fn method_call_with_only_a_same_name_property_records_nothing() {
+        // `class C { public $items; function run(){ $this->items(); } }`
+        let store = seed(
+            class_with(&[("$items", SymbolKind::Property)]),
+            vec![member_use("items", RefKind::Call, "$this")],
+            vec![scope("C.php", "1:0", None, &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn property_read_with_only_a_same_name_method_records_nothing() {
+        // `class C { function items(){} function run(){ $this->items; } }`
+        let store = seed(
+            class_with(&[("items", SymbolKind::Method)]),
+            vec![member_use("items", RefKind::Read, "$this")],
+            vec![scope("C.php", "1:0", None, &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn static_property_read_with_only_a_same_name_method_records_nothing() {
+        // `self::$items` names a property, never the method `items()`.
+        let store = seed(
+            class_with(&[("items", SymbolKind::Method)]),
+            vec![member_use("$items", RefKind::Read, "self")],
+            vec![scope("C.php", "1:0", None, &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn property_write_with_only_a_same_name_method_records_nothing() {
+        let store = seed(
+            class_with(&[("items", SymbolKind::Method)]),
+            vec![member_use("items", RefKind::Write, "$this")],
+            vec![scope("C.php", "1:0", None, &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn class_constant_read_binds_only_a_constant() {
+        // `self::MAX` with a property `$MAX` and a constant `MAX`: the read
+        // recorded as a class-constant access binds the constant.
+        let store = seed(
+            class_with(&[("$MAX", SymbolKind::Property), ("MAX", SymbolKind::Const)]),
+            vec![member_use("MAX", RefKind::Read, "self")],
+            vec![scope_with_constants("C.php", "1:0", &[(0, 3)])],
+        );
+        let binding = only_binding(&store);
+        assert_eq!(binding.target_id, "C.php#App\\C::MAX");
+        assert_eq!(binding.resolution, Resolution::Scoped);
+    }
+
+    #[test]
+    fn class_constant_read_with_only_a_same_name_property_records_nothing() {
+        // `$this::items` is a constant access; the property `$items` is not it.
+        let store = seed(
+            class_with(&[("$items", SymbolKind::Property)]),
+            vec![member_use("items", RefKind::Read, "$this")],
+            vec![scope_with_constants("C.php", "1:0", &[(0, 5)])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn instance_property_read_does_not_bind_a_same_name_constant() {
+        // `$this->MAX` (not a recorded constant access) names the property.
+        let store = seed(
+            class_with(&[("MAX", SymbolKind::Const)]),
+            vec![member_use("MAX", RefKind::Read, "$this")],
+            vec![scope("C.php", "1:0", None, &[], &[])],
+        );
+        assert!(resolve_all(&store).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn method_and_property_of_one_name_each_bind_their_own_kind() {
+        let mut call = member_use("items", RefKind::Call, "$this");
+        call.start_byte = 10;
+        call.end_byte = 15;
+        let mut read = member_use("items", RefKind::Read, "$this");
+        read.start_byte = 30;
+        read.end_byte = 35;
+        let mut static_read = member_use("$items", RefKind::Read, "self");
+        static_read.start_byte = 50;
+        static_read.end_byte = 56;
+        let store = seed(
+            class_with(&[
+                ("$items", SymbolKind::Property),
+                ("items", SymbolKind::Method),
+            ]),
+            vec![call, read, static_read],
+            vec![scope("C.php", "1:0", None, &[], &[])],
+        );
+        let bindings = resolve_all(&store).expect("resolve");
+        let targets: Vec<&str> = bindings.iter().map(|b| b.target_id.as_str()).collect();
+        assert_eq!(
+            targets,
+            vec![
+                "C.php#App\\C::items",
+                "C.php#App\\C::$items",
+                "C.php#App\\C::$items"
+            ]
+        );
     }
 }

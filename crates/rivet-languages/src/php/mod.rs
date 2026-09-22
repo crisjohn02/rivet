@@ -507,10 +507,14 @@ fn in_anonymous_container(node: Node<'_>) -> bool {
 /// constant names are case-sensitive and keep their exact spelling (a PHP
 /// property keeps its leading `$`). Enum cases are recorded as constants and
 /// are case-sensitive too, matching PHP.
+///
+/// PHP folds identifier case for ASCII letters only, so `Ä` and `ä` name
+/// different classes; the lowercasing here is ASCII-only to match (AF2). The
+/// query side (`rivet_index::query`) and the resolver fold the same way.
 pub fn lookup_name(name: &str, kind: SymbolKind) -> String {
     match kind {
         SymbolKind::Property | SymbolKind::Const => name.to_string(),
-        _ => name.to_lowercase(),
+        _ => name.to_ascii_lowercase(),
     }
 }
 
@@ -524,4 +528,23 @@ fn qualified(namespace: Option<&str>, local: &str) -> String {
 
 fn node_text(node: Node<'_>, source: &[u8]) -> String {
     String::from_utf8_lossy(&source[node.start_byte()..node.end_byte()]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lookup_name;
+    use rivet_core::SymbolKind;
+
+    #[test]
+    fn lookup_name_folds_ascii_only_and_only_for_case_insensitive_kinds() {
+        assert_eq!(
+            lookup_name("SurveyService", SymbolKind::Class),
+            "surveyservice"
+        );
+        assert_eq!(lookup_name("Launch", SymbolKind::Method), "launch");
+        assert_eq!(lookup_name("ÄrgerNis", SymbolKind::Class), "Ärgernis");
+        assert_eq!(lookup_name("Ä", SymbolKind::Function), "Ä");
+        assert_eq!(lookup_name("$Items", SymbolKind::Property), "$Items");
+        assert_eq!(lookup_name("MAX", SymbolKind::Const), "MAX");
+    }
 }

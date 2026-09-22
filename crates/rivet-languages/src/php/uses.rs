@@ -664,7 +664,21 @@ impl Walker<'_> {
         if name.kind() == "name" || name.kind() == "variable_name" {
             let receiver = Some(self.text(scope));
             let hint = self.receiver_hint(scope);
+            let before = self.uses.len();
             self.push_use(name, RefKind::Read, receiver, hint);
+            // A class-constant read and an instance property read are otherwise
+            // recorded identically, so the use's scope records which uses name
+            // a constant (AF2).
+            if self.uses.len() > before
+                && let Some(recorded) = self.uses.last()
+            {
+                let (scope_key, span) = (recorded.scope_key.clone(), recorded.span);
+                self.scope_facts
+                    .entry(scope_key)
+                    .or_default()
+                    .class_constant_accesses
+                    .push(span);
+            }
         }
     }
 
@@ -909,6 +923,8 @@ impl Walker<'_> {
             if key_prefix(scope_key) == ORPHAN_PREFIX {
                 facts.namespace_unattributed = true;
             }
+            facts.class_constant_accesses.sort();
+            facts.class_constant_accesses.dedup();
         }
         scope_facts
             .into_iter()
@@ -1746,5 +1762,36 @@ mod tests {
         assert!(one.iter().any(|b| b.variable == "$t" && !b.direct_new));
         assert!(two.iter().any(|b| b.variable == "$t" && b.direct_new));
         assert!(two.iter().any(|b| b.variable == "$s" && !b.direct_new));
+    }
+
+    #[test]
+    fn class_constant_accesses_are_recorded_and_property_reads_are_not() {
+        // AF2: `$x::NAME` and `$x->NAME` are both `read` uses with receiver
+        // `$x`; only the constant access is listed in its scope.
+        let source = "<?php\n$x = 1;\necho Foo::A, self::B, $x::C, $x->D, Foo::$e, $x->f();\n";
+        let file = extract(source);
+        let facts = file_scope(&file);
+        let listed: Vec<&str> = facts
+            .class_constant_accesses
+            .iter()
+            .map(|span| &source[span.start_byte() as usize..span.end_byte() as usize])
+            .collect();
+        assert_eq!(listed, vec!["A", "B", "C"]);
+        let reads: Vec<(&str, Option<&str>)> = file
+            .uses
+            .iter()
+            .filter(|use_| use_.ref_kind == rivet_core::RefKind::Read)
+            .map(|use_| (use_.spelling.as_str(), use_.receiver.as_deref()))
+            .collect();
+        assert_eq!(
+            reads,
+            vec![
+                ("A", Some("Foo")),
+                ("B", Some("self")),
+                ("C", Some("$x")),
+                ("D", Some("$x")),
+                ("$e", Some("Foo")),
+            ]
+        );
     }
 }

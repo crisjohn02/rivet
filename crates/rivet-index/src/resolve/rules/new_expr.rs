@@ -36,7 +36,7 @@ use crate::resolve::rules::imports::{self, ImportOutcome};
 use crate::resolve::rules::php_builtins;
 use crate::resolve::rules::receivers::enclosing_class;
 use crate::resolve::rules::resolve_class_spelling;
-use crate::resolve::{RuleCtx, ScopeFacts, SymbolId};
+use crate::resolve::{MemberUse, RuleCtx, ScopeFacts, SymbolId};
 
 /// Resolves a `new`-receiver member use conservatively.
 pub(crate) fn resolve(
@@ -78,7 +78,9 @@ pub(crate) fn resolve(
         return None;
     }
     let class = resolve_class_spelling(ctx, &class_spelling, facts)?;
-    ctx.unique_member(&class.id, &use_row.spelling)
+    // The member must be of the kind the use names (AF2).
+    let member = MemberUse::of(use_row, facts)?;
+    ctx.unique_member(&class.id, &use_row.spelling, member)
         .map(|member| (member.id.clone(), Resolution::Scoped))
 }
 
@@ -151,7 +153,9 @@ fn call_arg_is_rebinding(
             let Some(class) = class else {
                 return true;
             };
-            match ctx.unique_member(&class.id, &arg.callee) {
+            // The callee of a method-call argument is a method, never a
+            // same-name property or constant (AF2).
+            match ctx.unique_member(&class.id, &arg.callee, MemberUse::Method) {
                 Some(method) => parameter_rebinds(method, arg.position),
                 None => true,
             }
@@ -202,7 +206,7 @@ fn resolve_callee_function<'a>(
         let Some(row) = ctx.symbol_by_id(id) else {
             continue;
         };
-        if row.kind != SymbolKind::Function || row.lookup_name != spelling.to_lowercase() {
+        if row.kind != SymbolKind::Function || row.lookup_name != spelling.to_ascii_lowercase() {
             continue;
         }
         match declared {
@@ -214,10 +218,16 @@ fn resolve_callee_function<'a>(
     if let Some(row) = declared {
         return CalleeResolution::Indexed(row);
     }
-    if let Some(namespace) = facts.namespace.as_deref().filter(|ns| !ns.is_empty())
-        && let Some(row) = ctx.unique_function(&format!("{namespace}\\{spelling}"))
-    {
-        return CalleeResolution::Indexed(row);
+    if let Some(namespace) = facts.namespace.as_deref().filter(|ns| !ns.is_empty()) {
+        if let Some(row) = ctx.unique_function(&format!("{namespace}\\{spelling}")) {
+            return CalleeResolution::Indexed(row);
+        }
+        // As in `functions.rs`: an unindexed PHP file may declare the
+        // namespaced callee, so neither the global function nor a builtin can
+        // stand in for it (AF2).
+        if ctx.php_files_unindexed {
+            return CalleeResolution::Unknown;
+        }
     }
     match ctx.unique_function(spelling) {
         Some(row) => CalleeResolution::Indexed(row),

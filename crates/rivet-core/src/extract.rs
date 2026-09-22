@@ -282,8 +282,8 @@ pub struct CallArg {
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
-/// `new_bindings`, `call_args`, `unanalysable`, `namespace_unattributed`, and
-/// `declares`.
+/// `new_bindings`, `call_args`, `unanalysable`, `namespace_unattributed`,
+/// `class_constant_accesses`, and `declares`.
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -314,6 +314,16 @@ pub struct ScopeFacts {
     /// scope, because every lexical lookup depends on the namespace.
     #[serde(default)]
     pub namespace_unattributed: bool,
+    /// The name span of every class-constant access (`Foo::NAME`,
+    /// `self::NAME`, `$x::NAME`) whose use is recorded in this scope, in
+    /// source order (AF2).
+    ///
+    /// A class-constant read and an instance property read (`$x->name`) are
+    /// both a `read` use with the same receiver text and hint, so the resolver
+    /// needs this fact to match a member of the right kind. A static property
+    /// read is distinguished by its `$`-prefixed spelling instead.
+    #[serde(default)]
+    pub class_constant_accesses: Vec<Span>,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,
 }
