@@ -24,7 +24,10 @@ command -v cargo >/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
 cd "$ROOT" || exit 1
 
 say() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$STATUS"; }
-size_of() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
+# Model events only. `--print-logs` mixes plain-text server logs into the same
+# stream, and those keep flowing even when the model is wedged, so byte growth
+# is not evidence of progress.
+events_of() { grep -c '"type":"tool_use"\|"type":"text"\|"type":"step_start"' "$1" 2>/dev/null || echo 0; }
 
 : > "$STATUS"
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
@@ -39,21 +42,21 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   while :; do
     sleep "$CHECK_SECS" &
     wait $!
-    now_size="$(size_of "$OUT")"
+    now_size="$(events_of "$OUT")"
     if kill -0 "$PID" 2>/dev/null; then alive=1; else alive=0; fi
     if [ "$now_size" -gt "$last_size" ]; then
       quiet_for=0
-      say "alive=$alive bytes=$now_size (growing)"
+      say "alive=$alive events=$now_size (growing)"
     else
       quiet_for=$(( quiet_for + CHECK_SECS ))
-      say "alive=$alive bytes=$now_size (no growth for ${quiet_for}s)"
+      say "alive=$alive events=$now_size (no growth for ${quiet_for}s)"
     fi
     last_size="$now_size"
 
     if [ "$alive" = 0 ]; then
       wait "$PID"; rc=$?
       # A real finish writes a final assistant message; anything else is a death.
-      if grep -q '"type":"text"' "$OUT" 2>/dev/null && [ "$now_size" -gt 2000 ]; then
+      if grep -q '"type":"text"' "$OUT" 2>/dev/null && [ "$now_size" -gt 5 ]; then
         verdict="done"; say "opencode exited rc=$rc with a transcript; treating as finished"
       else
         verdict="dead"; say "opencode exited rc=$rc with no usable transcript"
