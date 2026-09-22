@@ -811,6 +811,14 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
     use rivet_core::Span;
     use rivet_core::extract::{CallArg, NewBinding, ScopeImport, TypedBinding};
 
+    /// One declaration's by-reference parameter flags, keyed by canonical ID
+    /// (AF3).
+    #[derive(serde::Serialize)]
+    struct PersistedParameterList<'a> {
+        symbol: &'a str,
+        by_ref: &'a [bool],
+    }
+
     /// The exact persisted `scopes.facts_json` shape.
     #[derive(serde::Serialize)]
     struct PersistedScopeFacts<'a> {
@@ -821,6 +829,12 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         unanalysable: bool,
         namespace_unattributed: bool,
         class_constant_accesses: &'a [Span],
+        global_scope: bool,
+        call_sites: &'a [Span],
+        goto_present: bool,
+        global_names: &'a [String],
+        dynamic_global_write: bool,
+        parameter_lists: Vec<PersistedParameterList<'a>>,
         declares: Vec<&'a str>,
     }
 
@@ -834,6 +848,17 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                 .iter()
                 .filter_map(|index| ids.get(*index).map(String::as_str))
                 .collect();
+            let parameter_lists: Vec<PersistedParameterList> = scope
+                .facts
+                .parameter_lists
+                .iter()
+                .filter_map(|list| {
+                    ids.get(list.symbol).map(|id| PersistedParameterList {
+                        symbol: id.as_str(),
+                        by_ref: &list.by_ref,
+                    })
+                })
+                .collect();
             let facts = PersistedScopeFacts {
                 imports: &scope.facts.imports,
                 typed_bindings: &scope.facts.typed_bindings,
@@ -842,6 +867,12 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                 unanalysable: scope.facts.unanalysable,
                 namespace_unattributed: scope.facts.namespace_unattributed,
                 class_constant_accesses: &scope.facts.class_constant_accesses,
+                global_scope: scope.facts.global_scope,
+                call_sites: &scope.facts.call_sites,
+                goto_present: scope.facts.goto_present,
+                global_names: &scope.facts.global_names,
+                dynamic_global_write: scope.facts.dynamic_global_write,
+                parameter_lists,
                 declares,
             };
             ScopeRow {

@@ -95,6 +95,12 @@ pub enum UseHint {
     Typed {
         /// The type name exactly as written at the declaration.
         type_spelling: String,
+        /// Whether the type was declared on a parameter or on a property
+        /// (AF3). The two differ in what PHP enforces, so the resolver trusts
+        /// them under different conditions. An absent value means
+        /// [`TypedOrigin::Parameter`], the stricter of the two.
+        #[serde(default)]
+        origin: TypedOrigin,
     },
     /// The use names an imported binding.
     Imported {
@@ -103,6 +109,24 @@ pub enum UseHint {
     },
     /// No supported lexical evidence was found.
     Unresolved,
+}
+
+/// Where the declared type of a [`UseHint::Typed`] receiver was written (AF3).
+///
+/// PHP checks a parameter's declared type only when the function is called, so
+/// the body may rebind the variable to anything; a parameter type is evidence
+/// only while the variable is never rebound. PHP checks a typed property on
+/// every assignment, so a property type holds however often it is reassigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedOrigin {
+    /// A parameter, including a promoted constructor parameter used as the
+    /// local variable inside the constructor. The default, because it is the
+    /// origin the resolver trusts least.
+    #[default]
+    Parameter,
+    /// A typed property (declared or promoted), read through `$this->name`.
+    Property,
 }
 
 /// One extracted identifier use.
@@ -217,6 +241,14 @@ pub struct NewBinding {
     /// not confused with an unconditional one.
     #[serde(default)]
     pub block: Option<u32>,
+    /// For a direct `new` assignment, the end byte of the `new` expression on
+    /// the right-hand side (AF3). A call inside that expression (the
+    /// constructor itself or one of its arguments) runs before the assignment
+    /// completes, so it cannot rebind the variable afterwards. `None` for any
+    /// other binding, and for facts written before AF3; the resolver then
+    /// measures from the variable's own span, which only over-suppresses.
+    #[serde(default)]
+    pub value_end: Option<u32>,
 }
 
 /// How a call argument's callee must be looked up (T21b).
@@ -229,6 +261,9 @@ pub enum CallArgKind {
     Method,
     /// A static call `Class::f(...)`.
     StaticMethod,
+    /// An object creation `new Class(...)` (AF3). The callee is always
+    /// `__construct`, looked up on the receiver class like a method.
+    Constructor,
 }
 
 /// The receiver information a resolver needs to find a method declaration for
@@ -244,8 +279,38 @@ pub enum CallReceiver {
     /// `$this`, `self`, or `static`: the method is declared on the class that
     /// encloses the call.
     SelfClass,
+    /// A local variable whose class comes from a receiver hint (AF3). The
+    /// hint is only as trustworthy as the variable, so the resolver re-checks
+    /// the variable under the same conditions as the matching receiver rule
+    /// before it reads the method's parameter list.
+    Variable {
+        /// The receiver variable exactly as written, including its `$`.
+        variable: String,
+        /// The hint the class came from.
+        evidence: ReceiverEvidence,
+    },
     /// No usable receiver (an unknown variable, `parent`, or a dynamic name).
     Unknown,
+}
+
+/// The local hint behind a [`CallReceiver::Variable`] (AF3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ReceiverEvidence {
+    /// The variable's most recent assignment was `new <class_spelling>(...)`.
+    New {
+        /// The class name exactly as written at the `new` site.
+        class_spelling: String,
+        /// The start byte of the nearest enclosing control-flow block at the
+        /// call, as in [`UseHint::NewExpr`].
+        #[serde(default)]
+        use_block: Option<u32>,
+    },
+    /// The variable is a parameter declared with this single class type.
+    TypedParameter {
+        /// The type name exactly as written at the declaration.
+        type_spelling: String,
+    },
 }
 
 /// One positional call argument that passes a bare variable and can therefore
@@ -279,11 +344,28 @@ pub struct CallArg {
     pub span: Span,
 }
 
+/// Which parameters of one indexed function or method are declared by
+/// reference, read from the parse tree at extraction time (AF3).
+///
+/// `by_ref[i]` is true when the parameter at 0-based position `i` is declared
+/// by reference (`&$x`, `&...$xs`, or a promoted `&$x`). The resolver treats a
+/// position past the end of the list as unknown, never as by-value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParameterList {
+    /// Index of the declaring symbol in the owning [`ExtractedFile::symbols`];
+    /// persistence rewrites it to the canonical symbol ID, as for
+    /// [`ScopeFacts::declares`].
+    pub symbol: usize,
+    /// Per-position by-reference flags, in declaration order.
+    pub by_ref: Vec<bool>,
+}
+
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
 /// `new_bindings`, `call_args`, `unanalysable`, `namespace_unattributed`,
-/// `class_constant_accesses`, and `declares`.
+/// `class_constant_accesses`, `global_scope`, `call_sites`, `goto_present`,
+/// `global_names`, `dynamic_global_write`, `parameter_lists`, and `declares`.
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -324,6 +406,39 @@ pub struct ScopeFacts {
     /// read is distinguished by its `$`-prefixed spelling instead.
     #[serde(default)]
     pub class_constant_accesses: Vec<Span>,
+    /// True when this scope's variables are the program's global variables
+    /// (AF3): for PHP, the top level of a file or of one namespace block. Such
+    /// a variable can be rebound by any function that declares it `global` or
+    /// writes it through `$GLOBALS`, so a call can rebind it.
+    #[serde(default)]
+    pub global_scope: bool,
+    /// The span of every explicit call in this scope, in source order (AF3):
+    /// function, method, nullsafe, and static calls, `new`, and `clone`.
+    /// Recorded only in a [`global_scope`](Self::global_scope) scope, where a
+    /// call can rebind a variable through `global`.
+    #[serde(default)]
+    pub call_sites: Vec<Span>,
+    /// True when this scope contains a `goto` (AF3). A backward jump can run a
+    /// call written after a use before that use, so source order alone no
+    /// longer bounds which calls intervene. Recorded only in a global scope.
+    #[serde(default)]
+    pub goto_present: bool,
+    /// Variables this scope can rebind in the global scope, sorted and
+    /// deduplicated (AF3): each name in a `global` statement and each literal
+    /// `$GLOBALS['name']` key written, referenced, or passed as an argument,
+    /// with a leading `$`.
+    #[serde(default)]
+    pub global_names: Vec<String>,
+    /// True when this scope may rebind a global variable it does not name
+    /// (AF3): `global $$name`, a `$GLOBALS` write or reference with a
+    /// non-literal key, `$GLOBALS` passed whole, or `eval` or an include
+    /// inside a function body, whose code may declare anything `global`.
+    #[serde(default)]
+    pub dynamic_global_write: bool,
+    /// By-reference parameter positions of each function and method declared
+    /// directly in this scope (AF3), in symbol order.
+    #[serde(default)]
+    pub parameter_lists: Vec<ParameterList>,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,
 }
