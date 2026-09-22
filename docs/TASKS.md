@@ -8,9 +8,9 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T12 |
-| Next task | T13 |
-| Active task / partial progress | T13 and T14 merged into main; T17 (PHP use extraction) in progress on branch `task/T17`. |
+| Last completed task | T17 (T13, T14, and T17 ran in parallel worktrees and are merged; T15 and T16 remain) |
+| Next task | T15 |
+| Active task / partial progress | None |
 | Blocker | None known |
 | Last checks | T14 (branch `task/T14`): rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 4 + 7 index_json + 7 symbol_json + 5 symbol_source, rivet-core 60, rivet-index 3, rivet-languages 4 unit + 6 php_extract, rivet-parser 0+4, rivet-store 22; 0 failed); `python3 tests/gold/check_gold.py` verified 25 entries; `cargo build -p rivet-cli --no-default-features` and `--features lang-php` compile. Prior T12 timing kept: 16 ms release / 32 ms debug per `rivet symbol`. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
@@ -89,7 +89,7 @@ Read: spec §11; ARCHITECTURE uses/scopes/bindings; OUTPUT-CONTRACT refs and cal
 
 | Done | ID | Small task | Done when |
 |---|---|---|---|
-| [ ] | T17 | Extract PHP call/use spans and containing symbols for the small fixture, including top-level uses and interpolated expressions. | Gold use spans match; literal text/declarations are excluded; call sites are not duplicated as unknown references. |
+| [x] | T17 | Extract PHP call/use spans and containing symbols for the small fixture, including top-level uses and interpolated expressions. | Gold use spans match; literal text/declarations are excluded; call sites are not duplicated as unknown references. |
 | [ ] | T18 | Persist lexical scopes, imports/aliases, and unresolved use facts. | Facts survive a store round-trip with nullable containers and sufficient scope data to resolve without reparsing. No guessed target foreign keys. |
 | [ ] | T19 | Resolve direct PHP import/namespace bindings and supported lexical function references. | Alias uses link to the correct declarations; shadowing and conflicting candidates remain unresolved. Exact tiers require lexical evidence. |
 | [ ] | T20 | Resolve `$this`/`self` member uses and explicit native receiver types. | Correct declaration links are scoped; same-name classes remain distinct; dynamic/late-static behavior does not become exact. |
