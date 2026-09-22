@@ -165,7 +165,7 @@ fn index_json_reports_inventory_and_is_stable() {
 
 #[test]
 fn unimplemented_command_emits_json_error() {
-    // `context` is implemented as of T30; `snippet` (T33) is still
+    // `init` is implemented as of T33a; `snippet` (T33b) is still
     // unimplemented.
     let temp = git_repo("unimplemented");
     let output = run(temp.path(), &["snippet", "--json"]);
@@ -184,7 +184,7 @@ fn unimplemented_command_emits_json_error() {
     );
     assert_eq!(
         value["hint"],
-        "Only `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build."
+        "Only `rivet init`, `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build."
     );
 }
 
