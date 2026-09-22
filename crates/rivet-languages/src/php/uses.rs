@@ -83,6 +83,10 @@ enum Binding {
 
 /// The per-file use walker.
 struct Walker<'a> {
+    /// The most uses this file may record (spec §27).
+    max_uses: u64,
+    /// Set once one more use than `max_uses` was seen; the walk then stops.
+    use_limit_exceeded: bool,
     source: &'a [u8],
     symbols: &'a [ExtractedSymbol],
     /// Which namespace block owns each byte (AF1).
@@ -111,13 +115,20 @@ struct Walker<'a> {
 /// `symbols` must be the already-built symbol list, because uses record the
 /// index of their innermost named container and scope facts record
 /// declarations by symbol index.
+///
+/// Returns `None` when the file yields more than `max_uses` uses (spec §27).
+/// The walker stops recording and descending at the first use over the bound,
+/// so an oversized file costs no more work than the bound allows.
 pub fn extract_uses(
     source: &[u8],
     root: Node<'_>,
     symbols: &[ExtractedSymbol],
     layout: &NamespaceLayout,
-) -> (Vec<ExtractedUse>, Vec<ExtractedImport>, Vec<ExtractedScope>) {
+    max_uses: u64,
+) -> Option<(Vec<ExtractedUse>, Vec<ExtractedImport>, Vec<ExtractedScope>)> {
     let mut walker = Walker {
+        max_uses,
+        use_limit_exceeded: false,
         source,
         symbols,
         layout,
@@ -132,6 +143,9 @@ pub fn extract_uses(
         parameter_lists: BTreeMap::new(),
     };
     walker.visit(root, false);
+    if walker.use_limit_exceeded {
+        return None;
+    }
     walker.uses.sort_by(|a, b| {
         a.span
             .start_byte()
@@ -139,7 +153,7 @@ pub fn extract_uses(
             .then(a.span.end_byte().cmp(&b.span.end_byte()))
     });
     let scopes = walker.finish_scopes();
-    (walker.uses, walker.imports, scopes)
+    Some((walker.uses, walker.imports, scopes))
 }
 
 impl Walker<'_> {
@@ -150,6 +164,11 @@ impl Walker<'_> {
     /// property access there becomes [`RefKind::Write`], and a bare variable
     /// mention there is recorded as a rebinding (T21a).
     fn visit(&mut self, node: Node<'_>, write: bool) {
+        // Cooperative resource bound: once the use limit is exceeded the
+        // result is discarded, so nothing below needs to run.
+        if self.use_limit_exceeded {
+            return;
+        }
         match node.kind() {
             // Literal text and comments are never uses.
             "comment" | "string" | "nowdoc" | "string_content" | "escape_sequence" => {}
@@ -1052,9 +1071,16 @@ impl Walker<'_> {
         receiver: Option<String>,
         hint: UseHint,
     ) {
+        if self.use_limit_exceeded {
+            return;
+        }
         let Ok(span) = Span::new(node.start_byte() as u32, node.end_byte() as u32) else {
             return;
         };
+        if self.uses.len() as u64 >= self.max_uses {
+            self.use_limit_exceeded = true;
+            return;
+        }
         let containing = containing_symbol(self.symbols, span.start_byte(), span.end_byte());
         let scope_key = self.scope_key(containing, span.start_byte());
         self.ensure_scope(&scope_key);

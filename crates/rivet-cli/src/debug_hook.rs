@@ -14,11 +14,18 @@
 //!   cannot hang forever.
 //! - `RIVET_DEBUG_BUSY_TIMEOUT_MS=<ms>` replaces the 5 second writer-lock busy
 //!   timeout, so a lock-timeout test does not have to wait five seconds.
+//! - `RIVET_DEBUG_MAX_NODES=<n>` and `RIVET_DEBUG_MAX_USES=<n>` lower the spec
+//!   §27 parser resource bounds (T32), so a resource-limit test does not need a
+//!   million-node file. They apply only to files this refresh actually parses:
+//!   an unchanged `ok` file is reused without reparsing (even by `index
+//!   --force`, which re-inserts reused facts), so a test lowers them on a fresh
+//!   repository. A failed file is reparsed on every refresh.
 //!
 //! Call sites use [`debug_point!`], which expands to nothing in a release
-//! build, and [`busy_timeout`] has a `cfg(not(debug_assertions))` twin that
-//! reads no environment variable, so a release binary contains neither the
-//! variable names, the point names, nor any wait.
+//! build, and [`busy_timeout`] and [`resource_limits`] have
+//! `cfg(not(debug_assertions))` twins that read no environment variable, so a
+//! release binary contains neither the variable names, the point names, nor any
+//! wait, and always uses the documented bounds.
 //!
 //! Points used by the refresh and query paths, where `N` is the refresh
 //! attempt (1, or 2 after a detected race):
@@ -91,4 +98,26 @@ pub(crate) fn busy_timeout() -> Duration {
 #[cfg(not(debug_assertions))]
 pub(crate) fn busy_timeout() -> Duration {
     rivet_store::WRITER_BUSY_TIMEOUT
+}
+
+/// The parser resource bounds: [`rivet_parser::ResourceLimits::DEFAULT`], with
+/// either count lowered (or raised) by its test override.
+#[cfg(debug_assertions)]
+pub(crate) fn resource_limits() -> rivet_parser::ResourceLimits {
+    let read = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let defaults = rivet_parser::ResourceLimits::DEFAULT;
+    rivet_parser::ResourceLimits {
+        max_visited_nodes: read("RIVET_DEBUG_MAX_NODES").unwrap_or(defaults.max_visited_nodes),
+        max_extracted_uses: read("RIVET_DEBUG_MAX_USES").unwrap_or(defaults.max_extracted_uses),
+    }
+}
+
+/// Release builds always use the spec §27 bounds.
+#[cfg(not(debug_assertions))]
+pub(crate) fn resource_limits() -> rivet_parser::ResourceLimits {
+    rivet_parser::ResourceLimits::DEFAULT
 }

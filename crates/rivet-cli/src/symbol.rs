@@ -6,14 +6,17 @@
 //! deterministic ambiguity pagination; T14 adds `--source` from the stored
 //! `files.source` bytes plus persisted `signature`/`doc_comment`. T24 fills the
 //! `calls` and `called_by` lists from the shared reference pipeline, each
-//! paginated independently.
+//! paginated independently. T32 rejects a syntactically invalid `file:line`
+//! before any filesystem work and maps a directly addressed non-indexed file
+//! to the contract's code ([`outcome_error`]), shared with `refs` and
+//! `context`.
 
 use std::collections::HashSet;
 
-use rivet_core::{RefKind, Resolution};
+use rivet_core::{ParseStatus, RefKind, Resolution};
 use serde_json::{Map, Value, json};
 
-use rivet_index::{QueryOutcome, resolve_query, suggestions};
+use rivet_index::{QueryOutcome, check_query_syntax, resolve_query, suggestions};
 use rivet_store::{Store, SymbolRow};
 
 use crate::index;
@@ -74,6 +77,9 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     }
     let limit = parse_limit(limit)?;
     let offset = offset.unwrap_or(0);
+    // A syntactically invalid `file:line` is an argument error, decided before
+    // any filesystem work (OUTPUT-CONTRACT "Errors").
+    check_query(query)?;
     // `--min-resolution` filters both call lists (OUTPUT-CONTRACT "Pagination
     // and resolution").
     let minimum = references::parse_min_resolution(min_resolution.as_deref())?;
@@ -114,28 +120,7 @@ fn answer(
 ) -> Result<Value, CliError> {
     let matches = match resolve_query(store, query).map_err(index::store_error)? {
         QueryOutcome::Symbols(matches) => matches,
-        QueryOutcome::PathNotIndexed { path } => {
-            return Err(CliError::symbol_not_found(
-                format!("query '{query}' matched no symbols"),
-                format!(
-                    "{path} is not indexed or is excluded; run `rivet index` and check exclusions."
-                ),
-                Vec::new(),
-            ));
-        }
-        QueryOutcome::NoEnclosingSymbol { suggestions } => {
-            return Err(CliError::symbol_not_found(
-                format!("no symbol encloses {query}"),
-                "Pick the nearest symbol, or query it by name.",
-                suggestions,
-            ));
-        }
-        QueryOutcome::InvalidFileLine { path, reason } => {
-            return Err(CliError::invalid_arguments(
-                format!("invalid file:line query for '{path}': {reason}"),
-                "Use a repository-relative path with `/` separators and no `..`.",
-            ));
-        }
+        other => return Err(outcome_error(other, query, report)),
     };
 
     match matches.len() {
@@ -149,6 +134,151 @@ fn answer(
         }
         1 => single(store, report, &matches[0], options),
         total => ambiguous(store, &matches, query, total, options.limit, options.offset),
+    }
+}
+
+/// Rejects a syntactically invalid `file:line` query as `invalid_arguments`.
+///
+/// Shared by `symbol`, `refs`, and `context`, each of which calls it before
+/// discovering the root, so the check reads nothing (OUTPUT-CONTRACT "Errors":
+/// "Invalid arguments take precedence over filesystem work").
+pub(crate) fn check_query(query: &str) -> Result<(), CliError> {
+    check_query_syntax(query).map_err(|invalid| invalid_file_line(&invalid.path, &invalid.reason))
+}
+
+/// The `invalid_arguments` error for a rejected `file:line` query.
+fn invalid_file_line(path: &str, reason: &str) -> CliError {
+    CliError::invalid_arguments(
+        format!("invalid file:line query for '{path}': {reason}"),
+        "Use a repository-relative path with `/` separators, no `..`, and a line from 1.",
+    )
+}
+
+/// The failure for every [`QueryOutcome`] other than `Symbols`.
+///
+/// Shared by `symbol`, `refs`, and `context` so a directly addressed file gets
+/// the same code in all three (OUTPUT-CONTRACT "Errors"): an unsupported file
+/// is `unsupported_language` (exit 7); a parse-error or resource-limit file is
+/// `parse_failure` (exit 6); a binary, oversize, or non-UTF-8 file is
+/// `repository_unavailable` (exit 3) with the reason and a corrective hint. A
+/// path the snapshot does not hold, or a line no symbol encloses, is
+/// `symbol_not_found` (exit 4).
+pub(crate) fn outcome_error(
+    outcome: QueryOutcome,
+    query: &str,
+    report: &index::Report,
+) -> CliError {
+    match outcome {
+        QueryOutcome::Symbols(_) => unreachable!("a symbol match is not a failure"),
+        QueryOutcome::PathNotIndexed { path } => CliError::symbol_not_found(
+            format!("query '{query}' matched no symbols"),
+            format!(
+                "{path} is not indexed or is excluded; run `rivet index` and check exclusions."
+            ),
+            Vec::new(),
+        ),
+        QueryOutcome::NoEnclosingSymbol { suggestions } => CliError::symbol_not_found(
+            format!("no symbol encloses {query}"),
+            "Pick the nearest symbol, or query it by name.",
+            suggestions,
+        ),
+        QueryOutcome::InvalidFileLine { path, reason } => invalid_file_line(&path, &reason),
+        QueryOutcome::FileNotIndexed {
+            path,
+            status,
+            language,
+        } => file_not_indexed(&path, status, language, report),
+    }
+}
+
+/// The direct-target failure for a stored file with no facts.
+fn file_not_indexed(
+    path: &str,
+    status: ParseStatus,
+    language: Option<String>,
+    report: &index::Report,
+) -> CliError {
+    match status {
+        ParseStatus::Ok => unreachable!("an indexed file is not a direct-target failure"),
+        ParseStatus::Unsupported => {
+            // The stored language is set only for an enabled language; a file
+            // whose extension names a compiled language that the configuration
+            // does not enable still reports that language.
+            let language = language.or_else(|| {
+                rivet_languages::language_for_path(path).map(|id| id.name().to_string())
+            });
+            let message = match &language {
+                Some(name) => format!("{path} is {name}, which is not indexed"),
+                None => format!("{path} is not in a supported language"),
+            };
+            CliError::unsupported_language(
+                message,
+                "Query a symbol declared in an indexed PHP file.",
+                path,
+                language,
+            )
+        }
+        ParseStatus::ParseError | ParseStatus::ResourceLimit => {
+            let (code, fallback, hint) = if status == ParseStatus::ParseError {
+                (
+                    "parse_error",
+                    "stored parse error",
+                    format!(
+                        "Fix the syntax error in {path} and retry; other files remain queryable."
+                    ),
+                )
+            } else {
+                (
+                    "resource_limit",
+                    "stored as a parser resource limit",
+                    format!(
+                        "{path} exceeds a per-file parser resource limit; split it, or query a \
+                         symbol in another file."
+                    ),
+                )
+            };
+            // The refresh that produced the snapshot reported the parser's own
+            // detail; a cached or truncated report falls back to the stable
+            // stored-status detail.
+            let detail = report
+                .diagnostics
+                .iter()
+                .find(|item| item.file == path && item.code == code)
+                .map_or_else(|| fallback.to_string(), |item| item.detail.clone());
+            let reason = if status == ParseStatus::ParseError {
+                "it has a syntax error"
+            } else {
+                "it exceeds a parser resource limit"
+            };
+            CliError::parse_failure(
+                format!("{path} is not indexed: {reason}"),
+                hint,
+                path,
+                detail,
+            )
+        }
+        ParseStatus::Binary | ParseStatus::Size | ParseStatus::Encoding => {
+            let (reason, hint) = match status {
+                ParseStatus::Binary => (
+                    "it is binary (a NUL byte within the inspected prefix)",
+                    "Binary files are never indexed; query a symbol in a text source file."
+                        .to_string(),
+                ),
+                ParseStatus::Size => (
+                    "it exceeds max_file_size_kb",
+                    format!(
+                        "Raise `index.max_file_size_kb` in .rivet/config.toml above {path}'s \
+                         size, or query a symbol in another file."
+                    ),
+                ),
+                _ => (
+                    "its content is not valid UTF-8",
+                    format!("Re-encode {path} as UTF-8 and retry."),
+                ),
+            };
+            CliError::repository_unavailable(format!("{path} is not indexed: {reason}"), hint)
+                .about_snapshot()
+        }
     }
 }
 

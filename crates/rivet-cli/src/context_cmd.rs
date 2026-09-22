@@ -84,6 +84,7 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     // OUTPUT-CONTRACT "Flag applicability").
     let validated = validate(&options)?;
     let requested_freshness = index::parse_freshness(options.freshness.as_deref())?;
+    symbol::check_query(query)?;
 
     let context = open_context()?;
     index::validate_configured_languages(&context.config)?;
@@ -161,7 +162,8 @@ fn answer(
 ) -> Result<Value, CliError> {
     // Context rejects `--offset`, so an ambiguity page always starts at zero
     // and uses the supplied `--limit` as its page size.
-    let target = resolve_target(store, query, validated.limit, 0).map_err(point_to_symbol)?;
+    let target =
+        resolve_target(store, report, query, validated.limit, 0).map_err(point_to_symbol)?;
 
     let defaults = ContextOptions::from_config(&config.context);
     let traversal = ContextOptions {

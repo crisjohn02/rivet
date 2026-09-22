@@ -19,10 +19,19 @@
 //! Canonical IDs and native qualified names are tried before `file:line` so a
 //! native `Foo::bar` is never misread as a path. Everything here works from
 //! persisted rows, so resolution never reparses a file.
+//!
+//! A `file:line` query's *syntax* (a positive in-range line, a non-empty
+//! repository-relative path with no `..` component) is checked by
+//! [`check_query_syntax`], which reads nothing, so a command can reject it
+//! before any filesystem work (OUTPUT-CONTRACT "Errors": "Invalid arguments
+//! take precedence over filesystem work"). Only what needs the snapshot stays
+//! here: whether the path is a stored file, how that file was classified, and
+//! which symbol encloses the line (a line past the end of the file encloses
+//! nothing).
 
 use std::collections::BTreeSet;
 
-use rivet_core::{SymbolId, SymbolKind};
+use rivet_core::{ParseStatus, SymbolId, SymbolKind};
 use rivet_store::{Error, Store, SymbolRow};
 
 /// The outcome of resolving one query against the persisted symbols.
@@ -35,18 +44,62 @@ pub enum QueryOutcome {
         /// The repository-relative path named before the final colon.
         path: String,
     },
+    /// A `file:line` query, or a canonical ID matching no symbol, whose path
+    /// is a stored file that was not indexed (T32; OUTPUT-CONTRACT "Errors").
+    FileNotIndexed {
+        /// The repository-relative path.
+        path: String,
+        /// Why the file carries no facts: never [`ParseStatus::Ok`].
+        status: ParseStatus,
+        /// The stored `files.language`, `None` for a file of no enabled
+        /// language.
+        language: Option<String>,
+    },
     /// A `file:line` query on an indexed file whose line lies in no symbol.
     NoEnclosingSymbol {
         /// Up to five distinct qualified names nearest to the line.
         suggestions: Vec<String>,
     },
-    /// A `file:line`-shaped query whose path is not repository-relative.
+    /// A `file:line`-shaped query that is syntactically invalid. A command
+    /// rejects it before any filesystem work with [`check_query_syntax`];
+    /// [`resolve_query`] reports the same outcome for a direct caller.
     InvalidFileLine {
         /// The rejected path.
         path: String,
-        /// Why the path was rejected.
+        /// Why the query was rejected.
         reason: String,
     },
+}
+
+/// A syntactically invalid `file:line` query (see [`check_query_syntax`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidFileLine {
+    /// The path before the final colon.
+    pub path: String,
+    /// Why the query was rejected.
+    pub reason: String,
+}
+
+/// Checks the syntax of `query` without reading anything.
+///
+/// A query is `file:line`-shaped when the text after its final colon is an
+/// optional `+` followed by one or more ASCII digits, exactly the spellings the
+/// `file:line` form has always accepted. No other form can end that way: a PHP
+/// name cannot start with a digit, and a canonical ID ends in a qualified name
+/// or a `#` ordinal. A shaped query is invalid when its line is zero or does
+/// not fit a `u32`, or its path is empty, absolute, or has a `..` component.
+/// Any other query is left to [`resolve_query`].
+///
+/// Every check here is decidable from the text alone, so a command runs it
+/// before discovering the root or refreshing. What remains for
+/// [`resolve_query`] needs the snapshot: whether the path is a stored file,
+/// that file's parse status, and whether any symbol encloses the line, which
+/// is also how a line past the end of the file is detected.
+pub fn check_query_syntax(query: &str) -> Result<(), InvalidFileLine> {
+    match classify_file_line(query) {
+        Some(Err(invalid)) => Err(invalid),
+        _ => Ok(()),
+    }
 }
 
 /// Resolves `query` against the persisted symbols of `store`.
@@ -54,9 +107,18 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
     // (1) Canonical ID: only a query with `#` can be one.
     if query.contains('#')
         && let Ok(id) = SymbolId::parse(query)
-        && let Some(row) = store.get_symbol(&id.as_canonical())?
     {
-        return Ok(QueryOutcome::Symbols(vec![row]));
+        if let Some(row) = store.get_symbol(&id.as_canonical())? {
+            return Ok(QueryOutcome::Symbols(vec![row]));
+        }
+        // An ID whose file part names a stored file that carries no facts
+        // addresses that file directly (spec §27: "Targeting that file by
+        // path/ID returns exit 6"). An ID into an indexed file, or into a path
+        // the snapshot does not hold, falls through to the other forms, so a
+        // missing name there is still `symbol_not_found`.
+        if let Some(outcome) = not_indexed(store, id.path())? {
+            return Ok(outcome);
+        }
     }
 
     // (2) Native qualified name.
@@ -81,8 +143,12 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
     // (3) `file:line`, tried before the dotted form. Native `Foo::bar` is
     // already handled above; here the text after the final colon must be a
     // positive integer.
-    if let Some((path, line)) = parse_file_line(query) {
-        return resolve_file_line(store, path, line);
+    match classify_file_line(query) {
+        Some(Ok((path, line))) => return resolve_file_line(store, path, line),
+        Some(Err(InvalidFileLine { path, reason })) => {
+            return Ok(QueryOutcome::InvalidFileLine { path, reason });
+        }
+        None => {}
     }
 
     // (4) Dotted path: normalize every separator to `.` on both sides and match
@@ -170,37 +236,65 @@ pub fn lookup_name_matches(name: &str, kind: SymbolKind, lookup_name: &str) -> b
     }
 }
 
-/// Parses the `file:line` form: a path, a colon, and a positive integer.
+/// Classifies the `file:line` form: `None` when `query` is not
+/// `file:line`-shaped (see [`check_query_syntax`]), else the path and line or
+/// why the shaped query is invalid.
 ///
-/// Returns `None` when the text after the final colon is not a positive
-/// integer, so native names such as `Foo::bar` are not mistaken for paths.
-fn parse_file_line(query: &str) -> Option<(&str, u32)> {
+/// Native names such as `Foo::bar` are not shaped, so they are never mistaken
+/// for paths.
+fn classify_file_line(query: &str) -> Option<Result<(&str, u32), InvalidFileLine>> {
     let (path, line) = query.rsplit_once(':')?;
-    let line: u32 = line.parse().ok()?;
-    if line == 0 {
+    let digits = line.strip_prefix('+').unwrap_or(line);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    Some((path, line))
-}
-
-/// Resolves a `file:line` query to the innermost enclosing symbol(s).
-fn resolve_file_line(store: &Store, path: &str, line: u32) -> Result<QueryOutcome, Error> {
-    if path.starts_with('/') {
-        return Ok(QueryOutcome::InvalidFileLine {
+    let invalid = |reason: &str| {
+        Some(Err(InvalidFileLine {
             path: path.to_string(),
-            reason: "absolute paths are not repository-relative".to_string(),
-        });
+            reason: reason.to_string(),
+        }))
+    };
+    let Ok(line) = digits.parse::<u32>() else {
+        return invalid("the line number is out of range");
+    };
+    if line == 0 {
+        return invalid("lines are numbered from 1");
+    }
+    if path.is_empty() {
+        return invalid("the path is empty");
+    }
+    if path.starts_with('/') {
+        return invalid("absolute paths are not repository-relative");
     }
     if path.split('/').any(|component| component == "..") {
-        return Ok(QueryOutcome::InvalidFileLine {
-            path: path.to_string(),
-            reason: "`..` path components are not allowed".to_string(),
-        });
+        return invalid("`..` path components are not allowed");
     }
+    Some(Ok((path, line)))
+}
+
+/// The outcome for a directly addressed `path` the snapshot stores but did not
+/// index, or `None` when it is indexed or not stored at all.
+fn not_indexed(store: &Store, path: &str) -> Result<Option<QueryOutcome>, Error> {
+    Ok(store
+        .get_file(path)?
+        .filter(|file| file.parse_status != ParseStatus::Ok)
+        .map(|file| QueryOutcome::FileNotIndexed {
+            path: file.path,
+            status: file.parse_status,
+            language: file.language,
+        }))
+}
+
+/// Resolves a syntactically valid `file:line` query to the innermost
+/// enclosing symbol(s).
+fn resolve_file_line(store: &Store, path: &str, line: u32) -> Result<QueryOutcome, Error> {
     if store.get_file(path)?.is_none() {
         return Ok(QueryOutcome::PathNotIndexed {
             path: path.to_string(),
         });
+    }
+    if let Some(outcome) = not_indexed(store, path)? {
+        return Ok(outcome);
     }
 
     let symbols: Vec<SymbolRow> = store
@@ -379,8 +473,8 @@ fn sort_rows(mut rows: Vec<SymbolRow>) -> Vec<SymbolRow> {
 #[cfg(test)]
 mod tests {
     use super::{
-        QueryOutcome, ends_with_component, last_component, levenshtein, normalize_separators,
-        parse_file_line, resolve_query,
+        InvalidFileLine, QueryOutcome, check_query_syntax, classify_file_line, ends_with_component,
+        last_component, levenshtein, normalize_separators, resolve_query,
     };
     use rivet_core::{ParseStatus, SymbolKind};
     use rivet_store::{FileRow, Store, SymbolRow};
@@ -424,11 +518,57 @@ mod tests {
 
     #[test]
     fn parses_only_positive_line_numbers() {
-        assert_eq!(parse_file_line("a/b.php:82"), Some(("a/b.php", 82)));
-        assert_eq!(parse_file_line("Foo::bar"), None);
-        assert_eq!(parse_file_line("a.php:0"), None);
-        assert_eq!(parse_file_line("a.php:-3"), None);
-        assert_eq!(parse_file_line("launch"), None);
+        assert_eq!(classify_file_line("a/b.php:82"), Some(Ok(("a/b.php", 82))));
+        assert_eq!(classify_file_line("a.php:+7"), Some(Ok(("a.php", 7))));
+        assert_eq!(classify_file_line("Foo::bar"), None);
+        assert_eq!(classify_file_line("a.php:-3"), None);
+        assert_eq!(classify_file_line("a.php:"), None);
+        assert_eq!(classify_file_line("a.php:+"), None);
+        assert_eq!(classify_file_line("launch"), None);
+        assert_eq!(classify_file_line("a.php#App\\Foo::bar"), None);
+    }
+
+    /// Every syntactic rejection is decided from the text alone.
+    #[test]
+    fn query_syntax_rejects_each_invalid_file_line_form() {
+        let reason = |query: &str| check_query_syntax(query).unwrap_err();
+        assert_eq!(
+            reason("a.php:0"),
+            InvalidFileLine {
+                path: "a.php".to_string(),
+                reason: "lines are numbered from 1".to_string()
+            }
+        );
+        assert_eq!(reason("a.php:+0").reason, "lines are numbered from 1");
+        assert_eq!(reason("a.php:00").reason, "lines are numbered from 1");
+        assert_eq!(
+            reason("a.php:4294967296").reason,
+            "the line number is out of range"
+        );
+        assert_eq!(reason(":3").reason, "the path is empty");
+        assert_eq!(
+            reason("/etc/passwd:1").reason,
+            "absolute paths are not repository-relative"
+        );
+        assert_eq!(
+            reason("../a.php:1").reason,
+            "`..` path components are not allowed"
+        );
+        assert_eq!(
+            reason("src/../a.php:1").reason,
+            "`..` path components are not allowed"
+        );
+        for valid in [
+            "a.php:4294967295",
+            "a..b.php:1",
+            "launch",
+            "Foo::bar",
+            "App\\Foo",
+            "a.php#App\\f",
+            "a.php:-1",
+        ] {
+            assert_eq!(check_query_syntax(valid), Ok(()), "{valid}");
+        }
     }
 
     #[test]
@@ -588,6 +728,58 @@ mod tests {
             }
             other => panic!("expected NoEnclosingSymbol, got {other:?}"),
         }
+    }
+
+    /// A stored file that carries no facts is reported with its status, for
+    /// both `file:line` and a canonical ID naming it; an indexed file and an
+    /// unknown path are not.
+    #[test]
+    fn file_line_and_id_report_a_stored_unindexed_file() {
+        let store = store_with(vec![symbol(
+            "a.php",
+            "launch",
+            "App\\launch",
+            SymbolKind::Function,
+            10,
+            20,
+            5,
+            6,
+        )]);
+        let mut broken = file("broken.php");
+        broken.parse_status = ParseStatus::ParseError;
+        store.upsert_file(&broken).unwrap();
+        let mut readme = file("README.md");
+        readme.language = None;
+        readme.parse_status = ParseStatus::Unsupported;
+        store.upsert_file(&readme).unwrap();
+
+        for query in ["broken.php:1", "broken.php#App\\Broken"] {
+            match resolve_query(&store, query).unwrap() {
+                QueryOutcome::FileNotIndexed {
+                    path,
+                    status,
+                    language,
+                } => {
+                    assert_eq!(path, "broken.php");
+                    assert_eq!(status, ParseStatus::ParseError);
+                    assert_eq!(language.as_deref(), Some("php"));
+                }
+                other => panic!("{query}: expected FileNotIndexed, got {other:?}"),
+            }
+        }
+        match resolve_query(&store, "README.md:1").unwrap() {
+            QueryOutcome::FileNotIndexed {
+                status, language, ..
+            } => {
+                assert_eq!(status, ParseStatus::Unsupported);
+                assert_eq!(language, None);
+            }
+            other => panic!("expected FileNotIndexed, got {other:?}"),
+        }
+        // A missing name in an indexed file, and an ID into an unknown path,
+        // fall through to an empty match rather than a file error.
+        assert!(symbols(resolve_query(&store, "a.php#App\\missing").unwrap()).is_empty());
+        assert!(symbols(resolve_query(&store, "nope.php#App\\launch").unwrap()).is_empty());
     }
 
     #[test]

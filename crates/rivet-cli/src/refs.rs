@@ -80,6 +80,7 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     let limit = symbol::parse_limit(limit)?;
     let offset = offset.unwrap_or(0);
     let requested_freshness = index::parse_freshness(freshness.as_deref())?;
+    symbol::check_query(query)?;
 
     // Refresh first so references describe the current working tree, then read
     // from the same committed snapshot. With `--no-refresh`, open the committed
@@ -130,7 +131,7 @@ fn answer(
         offset,
     } = options;
 
-    let target = resolve_target(store, query, limit, offset)?;
+    let target = resolve_target(store, report, query, limit, offset)?;
 
     // A stored `name_match` does not exist, so the relationship between each
     // use's binding and the target is computed here. `bindings` is hashed by
@@ -193,9 +194,12 @@ fn answer(
 ///
 /// Shared by `refs` and `context`. No match is `symbol_not_found` with
 /// suggestions; several are `ambiguous_symbol` with the candidate page at
-/// `limit`/`offset`.
+/// `limit`/`offset`; every other outcome maps through
+/// [`symbol::outcome_error`], which reads the parser detail of a directly
+/// addressed failed file from `report`.
 pub(crate) fn resolve_target(
     store: &Store,
+    report: &index::Report,
     query: &str,
     limit: u64,
     offset: u64,
@@ -214,22 +218,7 @@ pub(crate) fn resolve_target(
             total => symbol::ambiguous(store, &matches, query, total, limit, offset)
                 .map(|_| unreachable!("`ambiguous` always returns the failure")),
         },
-        QueryOutcome::PathNotIndexed { path } => Err(CliError::symbol_not_found(
-            format!("query '{query}' matched no symbols"),
-            format!(
-                "{path} is not indexed or is excluded; run `rivet index` and check exclusions."
-            ),
-            Vec::new(),
-        )),
-        QueryOutcome::NoEnclosingSymbol { suggestions } => Err(CliError::symbol_not_found(
-            format!("no symbol encloses {query}"),
-            "Pick the nearest symbol, or query it by name.",
-            suggestions,
-        )),
-        QueryOutcome::InvalidFileLine { path, reason } => Err(CliError::invalid_arguments(
-            format!("invalid file:line query for '{path}': {reason}"),
-            "Use a repository-relative path with `/` separators and no `..`.",
-        )),
+        other => Err(symbol::outcome_error(other, query, report)),
     }
 }
 
