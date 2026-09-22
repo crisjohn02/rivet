@@ -7,6 +7,9 @@
 
 use std::path::Path;
 
+#[cfg(feature = "lang-php")]
+pub mod php;
+
 /// A source language supported by the enabled crate features.
 ///
 /// A variant exists only when its feature is enabled, so a build with
@@ -105,5 +108,61 @@ pub fn grammar(id: LanguageId) -> tree_sitter::Language {
         LanguageId::Typescript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         #[cfg(feature = "lang-typescript")]
         LanguageId::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EXTRACTOR_FINGERPRINT;
+
+    /// The locked `version` of `package`, read from the workspace `Cargo.lock`.
+    fn locked_version(lock: &str, package: &str) -> Option<String> {
+        let needle = format!("name = \"{package}\"");
+        let mut lines = lock.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != needle {
+                continue;
+            }
+            for next in lines.by_ref() {
+                let trimmed = next.trim();
+                if let Some(version) = trimmed.strip_prefix("version = \"") {
+                    return Some(version.trim_end_matches('"').to_string());
+                }
+                if trimmed.starts_with("[[package]]") {
+                    break;
+                }
+            }
+        }
+        None
+    }
+
+    /// The hand-maintained fingerprint must name the grammar versions that are
+    /// actually locked, or stored facts silently outlive a grammar bump.
+    #[test]
+    fn fingerprint_tracks_locked_grammar_versions() {
+        let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
+        let lock = std::fs::read_to_string(&lock_path).expect("read workspace Cargo.lock");
+
+        #[cfg(feature = "lang-php")]
+        {
+            let version = locked_version(&lock, "tree-sitter-php")
+                .expect("tree-sitter-php must be pinned in Cargo.lock");
+            assert!(
+                EXTRACTOR_FINGERPRINT.contains(&version),
+                "EXTRACTOR_FINGERPRINT {EXTRACTOR_FINGERPRINT:?} does not name locked \
+                 tree-sitter-php {version}"
+            );
+        }
+
+        #[cfg(feature = "lang-typescript")]
+        {
+            let version = locked_version(&lock, "tree-sitter-typescript")
+                .expect("tree-sitter-typescript must be pinned in Cargo.lock");
+            assert!(
+                EXTRACTOR_FINGERPRINT.contains(&version),
+                "EXTRACTOR_FINGERPRINT {EXTRACTOR_FINGERPRINT:?} does not name locked \
+                 tree-sitter-typescript {version}"
+            );
+        }
     }
 }

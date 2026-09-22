@@ -7,6 +7,7 @@
 //! repository [`Config`].
 
 pub mod config;
+pub mod extract;
 pub mod id;
 pub mod kinds;
 pub mod root;
@@ -20,6 +21,7 @@ pub use config::{
     Collapse, Config, ConfigError, ContextConfig, Freshness, IndexConfig, LanguagesConfig,
     OutputConfig,
 };
+pub use extract::{Diagnostic, ExtractedFile, ExtractedSymbol};
 pub use id::{SymbolId, SymbolIdError, assign_ordinals};
 pub use kinds::{KindParseError, ParseStatus, RefKind, Resolution, SymbolKind};
 pub use root::{RootError, RootInfo, discover_root};

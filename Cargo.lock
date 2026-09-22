@@ -453,6 +453,9 @@ version = "0.1.0"
 name = "rivet-languages"
 version = "0.1.0"
 dependencies = [
+ "rivet-core",
+ "serde",
+ "toml",
  "tree-sitter",
  "tree-sitter-php",
  "tree-sitter-typescript",

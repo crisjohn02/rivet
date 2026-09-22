@@ -12,6 +12,12 @@ lang-php = ["dep:tree-sitter-php"]
 lang-typescript = ["dep:tree-sitter-typescript"]
 
 [dependencies]
+rivet-core = { path = "../rivet-core" }
 tree-sitter = { workspace = true }
 tree-sitter-php = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Gold-TOML parsing in the T11 extraction tests only.
+serde = { workspace = true }
+toml = { workspace = true }
