@@ -5,3 +5,13 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 description = "Language extraction and receiver hints"
+
+[features]
+default = ["lang-php", "lang-typescript"]
+lang-php = ["dep:tree-sitter-php"]
+lang-typescript = ["dep:tree-sitter-typescript"]
+
+[dependencies]
+tree-sitter = { workspace = true }
+tree-sitter-php = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }

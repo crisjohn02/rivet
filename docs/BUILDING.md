@@ -1,12 +1,12 @@
 # Building rivet
 
-> **Status:** pre-implementation. The workspace described here does not exist yet. This document fixes the intended build workflow so the first commits follow it.
+> **Status:** the workspace exists and builds; MVP commands are still being implemented one task at a time (see docs/TASKS.md).
 
 ## Prerequisites
 
 | Requirement | Version | Why |
 |---|---|---|
-| Rust toolchain | pin after the grammar/dependency spike; MSRV not yet established | CI must verify the selected toolchain and declared MSRV |
+| Rust toolchain | stable; `rust-version = "1.90"` (highest declared by the pinned dependency set) | CI must verify the selected toolchain and declared MSRV |
 | C compiler | any recent `cc`, `clang`, or MSVC | Tree-sitter grammars are C and compile at build time |
 | Git | any | fixture repositories are Git submodules |
 

@@ -5,3 +5,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 description = "Tree-sitter driver, grammar dispatch, source validation"
+
+[features]
+default = ["lang-php", "lang-typescript"]
+lang-php = ["rivet-languages/lang-php"]
+lang-typescript = ["rivet-languages/lang-typescript"]
+
+[dependencies]
+rivet-languages = { path = "../rivet-languages", default-features = false }
+
+[dev-dependencies]
+tree-sitter = { workspace = true }

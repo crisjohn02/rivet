@@ -10,5 +10,11 @@ description = "rivet command-line interface and output formatting"
 name = "rivet"
 path = "src/main.rs"
 
+[features]
+default = ["lang-php", "lang-typescript"]
+lang-php = ["rivet-parser/lang-php"]
+lang-typescript = ["rivet-parser/lang-typescript"]
+
 [dependencies]
 clap = { workspace = true }
+rivet-parser = { path = "../rivet-parser", default-features = false }

@@ -10,8 +10,16 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# Highest rust-version declared by any resolved dependency (currently tree-sitter
+# 0.27.0); never higher than the installed toolchain. See docs/TASKS.md checkpoint.
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
+# Grammars and the core parser are pinned to an exact compatible set: the grammar
+# crates expose `tree-sitter-language` 0.1, which tree-sitter 0.27.0 expects.
+tree-sitter = "=0.27.0"
+tree-sitter-php = "=0.24.2"
+tree-sitter-typescript = "=0.23.2"
