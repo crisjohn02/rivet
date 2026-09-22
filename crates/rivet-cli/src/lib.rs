@@ -16,6 +16,7 @@ pub mod budget;
 pub mod context;
 pub mod context_cmd;
 pub mod index;
+pub mod init;
 pub mod references;
 pub mod refresh;
 pub mod refs;

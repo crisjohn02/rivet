@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T32 |
-| Next task | T33 |
+| Last completed task | T33a |
+| Next task | T33b |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | AF6: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 31 unit + 16 bindings + 12 concurrency + 11 context_fit + 19 context_json + 14 context_overlap + 9 context_rank + 19 context_traversal + 12 coverage_honesty + 10 failure_boundaries + 7 force_rebuild + 7 freshness_modes + 7 index_json + 1 index_uses + 15 kind_aware_lookup + 11 namespace_scopes + 10 receiver_conservatism + 7 refresh + 10 refs_json + 4 reresolve + 7 silent_misses + 9 symbol_calls_json + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 61, rivet-index 92, rivet-languages 57 unit + 12 php_extract + 2 php_uses, rivet-parser 7 unit + 4 grammar_smoke, rivet-store 32; 0 failed); `python3 tests/gold/check_gold.py` verified 51 entries. |
+| Last checks | T33a: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 34 unit + 16 bindings + 12 concurrency + 11 context_fit + 19 context_json + 14 context_overlap + 9 context_rank + 19 context_traversal + 12 coverage_honesty + 10 failure_boundaries + 7 force_rebuild + 7 freshness_modes + 7 index_json + 1 index_uses + 22 init_json + 15 kind_aware_lookup + 11 namespace_scopes + 10 receiver_conservatism + 7 refresh + 10 refs_json + 4 reresolve + 7 silent_misses + 9 symbol_calls_json + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 61, rivet-index 92, rivet-languages 57 unit + 12 php_extract + 2 php_uses, rivet-parser 7 unit + 4 grammar_smoke, rivet-store 32; 0 failed); `python3 tests/gold/check_gold.py` verified 51 entries. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -150,7 +150,7 @@ T33 is split into the following smaller integration subtasks. Complete T33a/T33b
 
 | Done | ID | Small task | Done when |
 |---|---|---|---|
-| [ ] | T33a | Implement core init/config/.gitignore behavior and guarded writes. | Repeat init preserves existing content/config and rejects unsafe destinations. |
+| [x] | T33a | Implement core init/config/.gitignore behavior and guarded writes. | Repeat init preserves existing content/config and rejects unsafe destinations. |
 | [ ] | T33b | Implement snippet output and explicit/default instruction-file installation. | AGENTS.md and CLAUDE.md creation/update, both-file ambiguity, JSON, and repeat setup pass local fixtures. Shipped text matches AGENT-SNIPPET. |
 | [ ] | T33c | Smoke-test normal setup in Codex and Claude Code using the same PHP fixture. | Record host versions, instruction loading, one ordinary task and one explicit request per available host, recovery/fallback behavior, and command traces. Missing access/budget is an explicit blocker; untested hosts stay planned. |
 

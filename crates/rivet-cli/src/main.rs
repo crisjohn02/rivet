@@ -9,7 +9,7 @@ use clap::error::ErrorKind;
 use serde_json::Map;
 
 use rivet_cli::transport::{CliError, emit_error, emit_success};
-use rivet_cli::{context_cmd, index, refs, symbol};
+use rivet_cli::{context_cmd, index, init, refs, symbol};
 
 /// Agent-native codebase CLI: structural code navigation and token-budgeted context for coding agents.
 #[derive(Debug, Parser)]
@@ -26,7 +26,14 @@ struct Cli {
 #[derive(Debug, clap::Subcommand)]
 enum Command {
     /// Set up rivet configuration and instructions in a repository.
-    Init,
+    Init {
+        /// Install the managed instruction block (T33b; not implemented yet).
+        #[arg(long = "write-snippet")]
+        write_snippet: bool,
+        /// Snippet destination, AGENTS.md or CLAUDE.md (T33b; requires `--write-snippet`).
+        #[arg(long = "snippet-file", value_name = "AGENTS.md|CLAUDE.md")]
+        snippet_file: Option<String>,
+    },
     /// Build or refresh the local index.
     Index {
         /// Rebuild all facts even when content is unchanged.
@@ -280,12 +287,30 @@ fn main() {
                 Err(error) => fail(json, &error, "context"),
             }
         }
-        Command::Init => not_implemented(json, "init", "T33"),
-        Command::Snippet => not_implemented(json, "snippet", "T33"),
+        Command::Init {
+            write_snippet,
+            snippet_file,
+        } => {
+            let options = init::Options {
+                write_snippet,
+                snippet_file,
+            };
+            match init::run(options) {
+                Ok(report) => {
+                    if json {
+                        emit_success(init::success_json(&report));
+                    } else {
+                        print!("{}", init::human(&report));
+                    }
+                }
+                Err(error) => fail(json, &error, "init"),
+            }
+        }
+        Command::Snippet => not_implemented(json, "snippet", "T33b"),
     }
 }
 
-/// Reports a failed `index` run: a JSON error object in `--json` mode, human
+/// Reports a failed command: a JSON error object in `--json` mode, human
 /// text otherwise, always with the documented exit code.
 fn fail(json: bool, error: &CliError, command: &str) -> ! {
     if json {
@@ -307,7 +332,7 @@ fn not_implemented(json: bool, name: &str, task: &str) -> ! {
         format!("rivet {name} is not implemented yet (expected in {task}; see docs/TASKS.md)");
     let error = CliError::general(
         message,
-        "Only `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build.",
+        "Only `rivet init`, `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build.",
     );
     if json {
         emit_error(
