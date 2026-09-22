@@ -5,7 +5,9 @@
 //! the mandatory exclusions, the configured `index.exclude` globs, optional
 //! repository-local Git ignore rules, and nested-repository boundaries. The
 //! returned inventory is deterministic (byte-sorted) and separates non-UTF-8
-//! paths into a diagnostic list rather than lossy-converting them.
+//! paths into a diagnostic list rather than lossy-converting them. A skipped
+//! path is identified by its repository-relative form with the invalid bytes
+//! escaped ([`escaped_relative_path`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -48,8 +50,11 @@ pub struct FileEntry {
 /// A path that could not be represented in the eligible inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedPath {
-    /// A lossy rendering for diagnostics only; never used as an identity.
-    pub lossy: String,
+    /// The repository-relative, `/`-separated path with every byte that is not
+    /// part of valid UTF-8 written as `\xNN` and a literal backslash as `\\`
+    /// (see [`escaped_relative_path`]). For diagnostics only; never used as an
+    /// identity.
+    pub rel_escaped: String,
     /// A stable reason code describing why the path was skipped.
     pub reason: String,
 }
@@ -59,7 +64,7 @@ pub struct SkippedPath {
 pub struct WalkResult {
     /// Eligible regular files, sorted by `rel_path` bytes.
     pub files: Vec<FileEntry>,
-    /// Non-UTF-8 paths that were skipped, sorted by lossy bytes.
+    /// Non-UTF-8 paths that were skipped, sorted by escaped bytes.
     pub skipped: Vec<SkippedPath>,
 }
 
@@ -172,7 +177,7 @@ pub fn walk_eligible(root: &Path, config: &Config) -> Result<WalkResult, WalkErr
         let path = entry.path();
         let Some(rel_path) = relative_utf8(root, path) else {
             skipped.push(SkippedPath {
-                lossy: path.to_string_lossy().into_owned(),
+                rel_escaped: escaped_relative_path(root, path),
                 reason: "non-utf8-path".to_string(),
             });
             continue;
@@ -190,7 +195,7 @@ pub fn walk_eligible(root: &Path, config: &Config) -> Result<WalkResult, WalkErr
     }
 
     files.sort_by(|a, b| a.rel_path.as_bytes().cmp(b.rel_path.as_bytes()));
-    skipped.sort_by(|a, b| a.lossy.as_bytes().cmp(b.lossy.as_bytes()));
+    skipped.sort_by(|a, b| a.rel_escaped.as_bytes().cmp(b.rel_escaped.as_bytes()));
     Ok(WalkResult { files, skipped })
 }
 
@@ -237,6 +242,54 @@ fn relative_utf8(root: &Path, path: &Path) -> Option<String> {
     Some(out)
 }
 
+/// Renders `path` relative to `root` for a diagnostic, escaping invalid bytes.
+///
+/// OUTPUT-CONTRACT "Common index metadata": "Non-UTF-8 paths are excluded with
+/// a diagnostic using escaped bytes". Like every other diagnostic `file`, the
+/// result is repository-relative with `/` separators, never the absolute
+/// path (AF5, audit finding 17). Valid UTF-8 runs are kept as they are; each
+/// byte outside one is written as `\xNN` in lowercase hex, and a literal `\` is
+/// doubled, so an escape cannot be confused with a name that spells one.
+///
+/// `path` always lies under `root` for walker output; if it does not, the
+/// whole path is escaped rather than silently dropped.
+pub fn escaped_relative_path(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let mut out = String::new();
+    for component in rel.components() {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        push_escaped(&mut out, component.as_os_str());
+    }
+    out
+}
+
+/// Appends one path component to `out`, escaping as [`escaped_relative_path`].
+fn push_escaped(out: &mut String, component: &std::ffi::OsStr) {
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        component.as_bytes().to_vec()
+    };
+    // Non-Unix paths have no raw byte view; their lossy form is the best
+    // available rendering.
+    #[cfg(not(unix))]
+    let bytes = component.to_string_lossy().into_owned().into_bytes();
+    for chunk in bytes.utf8_chunks() {
+        for ch in chunk.valid().chars() {
+            if ch == '\\' {
+                out.push_str("\\\\");
+            } else {
+                out.push(ch);
+            }
+        }
+        for byte in chunk.invalid() {
+            out.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+}
+
 /// Returns the modification time of `metadata` as nanoseconds since the epoch.
 fn mtime_ns(metadata: &std::fs::Metadata, path: &Path) -> Result<i128, WalkError> {
     let modified = metadata.modified().map_err(|source| WalkError::Io {
@@ -251,7 +304,7 @@ fn mtime_ns(metadata: &std::fs::Metadata, path: &Path) -> Result<i128, WalkError
 
 #[cfg(test)]
 mod tests {
-    use super::{WalkResult, walk_eligible};
+    use super::{WalkResult, escaped_relative_path, walk_eligible};
     use crate::Config;
     use crate::test_support::TempDir;
     use std::fs;
@@ -476,10 +529,39 @@ mod tests {
         assert_eq!(paths(&result), vec!["normal.txt"]);
         assert_eq!(result.skipped.len(), 1, "{:?}", result.skipped);
         assert_eq!(result.skipped[0].reason, "non-utf8-path");
-        assert!(
-            result.skipped[0].lossy.contains("bad-"),
-            "{:?}",
-            result.skipped
+        // Repository-relative with the invalid byte escaped, never absolute.
+        assert_eq!(result.skipped[0].rel_escaped, "bad-\\xff.txt");
+    }
+
+    /// The diagnostic form is relative to the root, escapes each invalid byte
+    /// as `\xNN`, keeps valid UTF-8 (including non-ASCII) as it is, and doubles
+    /// a literal backslash. This runs everywhere because it builds the path in
+    /// memory; the walk above needs a filesystem that accepts the name.
+    #[cfg(unix)]
+    #[test]
+    fn escaped_relative_path_is_relative_and_escaped() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::PathBuf;
+
+        let root = Path::new("/repo/root");
+        let path = root
+            .join("src")
+            .join(OsStr::from_bytes(b"caf\xc3\xa9-\xff\xfe.php"));
+        assert_eq!(
+            escaped_relative_path(root, &path),
+            "src/café-\\xff\\xfe.php"
         );
+
+        let slash = root.join(OsStr::from_bytes(b"a\\b-\x80"));
+        assert_eq!(escaped_relative_path(root, &slash), "a\\\\b-\\x80");
+
+        // A truncated multi-byte sequence escapes only its bytes.
+        let truncated = root.join("d").join(OsStr::from_bytes(b"x\xe2\x82.ts"));
+        assert_eq!(escaped_relative_path(root, &truncated), "d/x\\xe2\\x82.ts");
+
+        // A plain UTF-8 path is unchanged apart from being relative.
+        let plain: PathBuf = root.join("a/b.php");
+        assert_eq!(escaped_relative_path(root, &plain), "a/b.php");
     }
 }

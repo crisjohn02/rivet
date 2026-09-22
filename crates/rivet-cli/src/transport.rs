@@ -116,6 +116,33 @@ impl CliError {
             extra: Box::new(extra),
         }
     }
+
+    /// Whether this error's meaning depends on the snapshot it was computed
+    /// against.
+    ///
+    /// `symbol_not_found` and `ambiguous_symbol` are answers about the indexed
+    /// declarations: "no match" or "these matches" is true only of that
+    /// snapshot and its coverage. Argument errors, lock/I/O/cache failures,
+    /// and `general` failures are not, even when raised after a refresh.
+    pub fn is_index_dependent(&self) -> bool {
+        matches!(self.code, "symbol_not_found" | "ambiguous_symbol")
+    }
+
+    /// Attaches the acquired snapshot's `index` metadata to an index-dependent
+    /// error, and returns every other error unchanged.
+    ///
+    /// OUTPUT-CONTRACT "Errors": "Index-dependent errors also include `index`
+    /// if a compatible snapshot was successfully acquired." A caller invokes
+    /// this only after acquiring a snapshot, so an error raised before (an
+    /// argument error, a failed refresh) never carries `index`. The key is
+    /// appended after the error's required fields, leaving their documented
+    /// order unchanged (AF5, audit finding 15).
+    pub fn with_snapshot_index(mut self, index: Value) -> CliError {
+        if self.is_index_dependent() {
+            self.extra.insert("index".to_string(), index);
+        }
+        self
+    }
 }
 
 /// Writes `value` as the single stdout object, prepending `schema_version` as
@@ -220,5 +247,32 @@ mod tests {
             vec!["total", "truncated", "next_offset", "candidates"]
         );
         assert_eq!(ambiguous.extra.get("next_offset"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn only_index_dependent_errors_take_the_snapshot_index() {
+        let index = json!({"snapshot": "blake3:x"});
+        let not_found =
+            CliError::symbol_not_found("m", "h", Vec::new()).with_snapshot_index(index.clone());
+        let keys: Vec<&str> = not_found.extra.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["suggestions", "index"]);
+        assert_eq!(not_found.extra.get("index"), Some(&index));
+
+        let ambiguous = CliError::ambiguous_symbol("m", "h", 2, false, None, Vec::new())
+            .with_snapshot_index(index.clone());
+        let keys: Vec<&str> = ambiguous.extra.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec!["total", "truncated", "next_offset", "candidates", "index"]
+        );
+
+        for error in [
+            CliError::invalid_arguments("m", "h"),
+            CliError::repository_unavailable("m", "h"),
+            CliError::general("m", "h"),
+        ] {
+            let error = error.with_snapshot_index(index.clone());
+            assert!(error.extra.get("index").is_none(), "{error:?}");
+        }
     }
 }

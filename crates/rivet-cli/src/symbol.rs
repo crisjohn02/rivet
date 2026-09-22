@@ -96,7 +96,33 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
         let report = refresh(&context.root.root, &context.config, &mut store, mode, false)?.report;
         (store, report)
     };
-    let matches = match resolve_query(&store, query).map_err(index::store_error)? {
+
+    // A snapshot is acquired from here on, so an index-dependent failure
+    // carries its `index` (OUTPUT-CONTRACT "Errors").
+    answer(
+        &store,
+        &report,
+        query,
+        SuccessOptions {
+            source,
+            signature_only,
+            limit,
+            offset,
+            minimum,
+        },
+    )
+    .map_err(|error| error.with_snapshot_index(index::index_metadata(&report)))
+}
+
+/// Resolves `query` against the acquired snapshot and builds the success
+/// object or the documented failure.
+fn answer(
+    store: &Store,
+    report: &index::Report,
+    query: &str,
+    options: SuccessOptions,
+) -> Result<Value, CliError> {
+    let matches = match resolve_query(store, query).map_err(index::store_error)? {
         QueryOutcome::Symbols(matches) => matches,
         QueryOutcome::PathNotIndexed { path } => {
             return Err(CliError::symbol_not_found(
@@ -124,26 +150,15 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
 
     match matches.len() {
         0 => {
-            let suggestions = suggestions(&store, query).map_err(index::store_error)?;
+            let suggestions = suggestions(store, query).map_err(index::store_error)?;
             Err(CliError::symbol_not_found(
                 format!("query '{query}' matched no symbols"),
                 "Check the spelling, or use a qualified name or canonical ID.",
                 suggestions,
             ))
         }
-        1 => single(
-            &store,
-            &report,
-            &matches[0],
-            SuccessOptions {
-                source,
-                signature_only,
-                limit,
-                offset,
-                minimum,
-            },
-        ),
-        total => ambiguous(&store, &matches, query, total, limit, offset),
+        1 => single(store, report, &matches[0], options),
+        total => ambiguous(store, &matches, query, total, options.limit, options.offset),
     }
 }
 

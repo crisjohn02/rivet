@@ -25,6 +25,7 @@ use std::collections::HashSet;
 
 use rivet_core::{RefKind, Resolution};
 use rivet_index::{QueryOutcome, resolve_query, suggestions};
+use rivet_store::Store;
 use serde_json::{Map, Value, json};
 
 use crate::index;
@@ -97,10 +98,52 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
         (store, report)
     };
 
-    let target = match resolve_query(&store, query).map_err(index::store_error)? {
+    // A snapshot is acquired from here on, so an index-dependent failure
+    // carries its `index` (OUTPUT-CONTRACT "Errors").
+    answer(
+        &store,
+        &report,
+        query,
+        Query {
+            mode,
+            kinds,
+            minimum,
+            limit,
+            offset,
+        },
+    )
+    .map_err(|error| error.with_snapshot_index(index::index_metadata(&report)))
+}
+
+/// The validated query options applied to an acquired snapshot.
+struct Query {
+    mode: Mode,
+    kinds: Option<HashSet<RefKind>>,
+    minimum: Resolution,
+    limit: u64,
+    offset: u64,
+}
+
+/// Resolves `query` against the acquired snapshot and builds the success
+/// object or the documented failure.
+fn answer(
+    store: &Store,
+    report: &index::Report,
+    query: &str,
+    options: Query,
+) -> Result<Value, CliError> {
+    let Query {
+        mode,
+        kinds,
+        minimum,
+        limit,
+        offset,
+    } = options;
+
+    let target = match resolve_query(store, query).map_err(index::store_error)? {
         QueryOutcome::Symbols(matches) => match matches.len() {
             0 => {
-                let suggestions = suggestions(&store, query).map_err(index::store_error)?;
+                let suggestions = suggestions(store, query).map_err(index::store_error)?;
                 return Err(CliError::symbol_not_found(
                     format!("query '{query}' matched no symbols"),
                     "Check the spelling, or use a qualified name or canonical ID.",
@@ -108,7 +151,7 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
                 ));
             }
             1 => matches.into_iter().next().expect("exactly one match"),
-            total => return symbol::ambiguous(&store, &matches, query, total, limit, offset),
+            total => return symbol::ambiguous(store, &matches, query, total, limit, offset),
         },
         QueryOutcome::PathNotIndexed { path } => {
             return Err(CliError::symbol_not_found(
@@ -138,8 +181,8 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     // use's binding and the target is computed here. `bindings` is hashed by
     // use_id for lookup; its iteration order never reaches output because the
     // reference list is explicitly sorted.
-    let bindings = references::bindings_by_use_id(&store)?;
-    let all = references::all_uses(&store)?;
+    let bindings = references::bindings_by_use_id(store)?;
+    let all = references::all_uses(store)?;
     let matches = references::collect_matches(
         &all,
         &bindings,
@@ -168,15 +211,15 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     let references: Vec<Value> = page
         .items
         .iter()
-        .map(|reference| references::reference_object(&store, reference))
+        .map(|reference| references::reference_object(store, reference))
         .collect::<Result<_, _>>()?;
 
     // Keys are inserted in contract order.
     let mut object = Map::new();
-    object.insert("index".to_string(), index::index_metadata(&report));
+    object.insert("index".to_string(), index::index_metadata(report));
     object.insert(
         "symbol".to_string(),
-        symbol_object(&store, &target).map_err(index::store_error)?,
+        symbol_object(store, &target).map_err(index::store_error)?,
     );
     object.insert("mode".to_string(), json!(mode.as_str()));
     object.insert("total".to_string(), json!(page.total));

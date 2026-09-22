@@ -315,6 +315,7 @@ mod tests {
                 scopes,
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .expect("publish new_expr fixture");
         store

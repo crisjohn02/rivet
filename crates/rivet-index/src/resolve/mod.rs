@@ -698,6 +698,7 @@ mod tests {
                 scopes,
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .expect("publish resolver fixture");
         store
@@ -1249,6 +1250,7 @@ mod tests {
                 scopes,
                 bindings: Vec::new(),
                 force: false,
+                regenerated: Vec::new(),
             })
             .expect("publish");
         assert!(resolve_all(&store).expect("resolve").is_empty());
