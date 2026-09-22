@@ -1,11 +1,17 @@
 //! Owned, database-free extraction records.
 //!
 //! A language adapter returns an [`ExtractedFile`] with owned symbols,
-//! identifier uses, import bindings, and diagnostics: byte [`Span`]s and plain
-//! strings only, never borrowed Tree-sitter `Node` handles or database
-//! identifiers. T11 added named definitions and parse diagnostics; T17 adds
-//! lexical uses, imports, and receiver hints. Resolution and persistence are
-//! later tasks.
+//! identifier uses, import bindings, lexical scopes, and diagnostics: byte
+//! [`Span`]s and plain strings only, never borrowed Tree-sitter `Node` handles
+//! or database identifiers. T11 added named definitions and parse diagnostics;
+//! T17 adds lexical uses, imports, and receiver hints; T18 adds owned lexical
+//! scope facts. Resolution and persistence are later tasks.
+//!
+//! The T17 records derive `serde` so the store can persist a use's
+//! [`UseHint`] as JSON and a scope's [`ScopeFacts`] as JSON without the
+//! language adapter knowing about SQLite or a file path.
+
+use serde::{Deserialize, Serialize};
 
 use crate::kinds::{RefKind, SymbolKind};
 use crate::span::Span;
@@ -39,7 +45,8 @@ pub struct ExtractedSymbol {
 }
 
 /// The kind of a lexical import binding created by a `use` declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImportKind {
     /// A class, interface, trait, or enum binding.
     Class,
@@ -65,7 +72,8 @@ impl ImportKind {
 /// These hints are not final cross-file resolution tiers (see
 /// docs/ADDING-A-LANGUAGE.md "Adapter contract"); the generic resolver turns
 /// them into at most one `exact`/`scoped` binding or leaves the use unresolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UseHint {
     /// The receiver is `$this` inside a class body.
     This,
@@ -98,7 +106,7 @@ pub enum UseHint {
 /// written spelling, its syntactic kind, the nearest named container, the
 /// receiver expression text when one exists, a deterministic lexical scope key,
 /// and the adapter's receiver hint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedUse {
     /// The identifier exactly as written in source.
     pub spelling: String,
@@ -120,7 +128,7 @@ pub struct ExtractedUse {
 }
 
 /// One lexical import binding created by a `use` declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractedImport {
     /// The local binding name: the explicit alias, or the last segment of the
     /// imported qualified name.
@@ -133,6 +141,83 @@ pub struct ExtractedImport {
     pub span: Span,
 }
 
+/// One import binding visible in a lexical scope (T18).
+///
+/// This is the persisted shape of [`ExtractedImport`]'s data: the store's
+/// `scopes.facts_json` records `imports: [{alias, target_qualified, kind,
+/// span}]` so a later resolver can re-resolve a use without reparsing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeImport {
+    /// The local binding name: the explicit alias, or the last segment of the
+    /// imported qualified name.
+    pub alias: String,
+    /// The imported qualified name exactly as written (group prefix applied).
+    pub target_qualified: String,
+    /// Whether the binding names a class, function, or constant.
+    pub kind: ImportKind,
+    /// The binding identifier's byte range.
+    pub span: Span,
+}
+
+/// One typed variable binding introduced in a lexical scope (T18).
+///
+/// Parameters, promoted properties, and any other typed local the adapter
+/// recognizes. The span is the variable name's byte range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedBinding {
+    /// The variable exactly as written, including a leading `$` for PHP.
+    pub variable: String,
+    /// The explicit type name exactly as written at the declaration.
+    pub type_spelling: String,
+    /// The variable name's byte range.
+    pub span: Span,
+}
+
+/// One `new` assignment binding introduced in a lexical scope (T18).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewBinding {
+    /// The assigned variable exactly as written, including a leading `$`.
+    pub variable: String,
+    /// The class name exactly as written at the `new` site.
+    pub class_spelling: String,
+    /// The assigned variable name's byte range.
+    pub span: Span,
+}
+
+/// Owned lexical facts recorded for one scope (T18).
+///
+/// The persisted `scopes.facts_json` holds exactly `imports`,
+/// `typed_bindings`, `new_bindings`, and `declares`. [`declares`](Self::declares)
+/// holds indices into the owning [`ExtractedFile::symbols`] because a language
+/// adapter has no file path; the persistence layer rewrites each index to its
+/// canonical symbol ID.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScopeFacts {
+    /// Imports visible in this scope, in source order.
+    pub imports: Vec<ScopeImport>,
+    /// Typed variable bindings introduced directly in this scope.
+    pub typed_bindings: Vec<TypedBinding>,
+    /// `new` variable bindings introduced directly in this scope.
+    pub new_bindings: Vec<NewBinding>,
+    /// Indices of declarations introduced directly in this scope.
+    pub declares: Vec<usize>,
+}
+
+/// One lexical scope's owned facts (T18).
+///
+/// `scope_key` is the same deterministic key recorded on every
+/// [`ExtractedUse`]; `parent_scope_key` is the enclosing scope, or `None` for
+/// the file scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractedScope {
+    /// Deterministic key identifying the scope within the file.
+    pub scope_key: String,
+    /// The enclosing scope's key, or `None` for the file scope.
+    pub parent_scope_key: Option<String>,
+    /// Lexical facts introduced directly in this scope.
+    pub facts: ScopeFacts,
+}
+
 /// The owned result of extracting one file.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExtractedFile {
@@ -142,6 +227,8 @@ pub struct ExtractedFile {
     pub uses: Vec<ExtractedUse>,
     /// Import bindings created by `use` declarations, in source order.
     pub imports: Vec<ExtractedImport>,
+    /// Lexical scopes with owned facts, sorted by `scope_key`.
+    pub scopes: Vec<ExtractedScope>,
     /// File-level diagnostics. A parse or resource failure yields no facts and
     /// one diagnostic.
     pub diagnostics: Vec<Diagnostic>,

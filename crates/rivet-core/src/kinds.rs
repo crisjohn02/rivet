@@ -6,6 +6,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// The kind of a named declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SymbolKind {
@@ -125,7 +127,8 @@ impl fmt::Display for Resolution {
 }
 
 /// The syntactic form of a reference use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RefKind {
     /// A call expression.
     Call,

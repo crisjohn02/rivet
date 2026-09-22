@@ -21,7 +21,10 @@ pub use config::{
     Collapse, Config, ConfigError, ContextConfig, Freshness, IndexConfig, LanguagesConfig,
     OutputConfig,
 };
-pub use extract::{Diagnostic, ExtractedFile, ExtractedSymbol};
+pub use extract::{
+    Diagnostic, ExtractedFile, ExtractedImport, ExtractedScope, ExtractedSymbol, ExtractedUse,
+    ImportKind, NewBinding, ScopeFacts, ScopeImport, TypedBinding, UseHint,
+};
 pub use id::{SymbolId, SymbolIdError, assign_ordinals};
 pub use kinds::{KindParseError, ParseStatus, RefKind, Resolution, SymbolKind};
 pub use root::{RootError, RootInfo, discover_root};

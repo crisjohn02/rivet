@@ -24,3 +24,7 @@ rivet-index = { path = "../rivet-index" }
 rivet-languages = { path = "../rivet-languages", default-features = false }
 rivet-parser = { path = "../rivet-parser", default-features = false }
 rivet-store = { path = "../rivet-store" }
+
+[dev-dependencies]
+# Gold-TOML parsing in the T18 index-uses integration test only.
+toml = { workspace = true }

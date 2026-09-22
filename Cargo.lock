@@ -434,6 +434,7 @@ dependencies = [
  "rivet-store",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

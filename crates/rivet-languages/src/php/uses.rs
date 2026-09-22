@@ -16,11 +16,17 @@
 //! strings are skipped; expressions interpolated inside `"{...}"` are walked.
 //! Declaration names and bare variable names are never uses.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use rivet_core::extract::{ExtractedImport, ExtractedUse, ImportKind, UseHint};
+use rivet_core::extract::{
+    ExtractedImport, ExtractedScope, ExtractedUse, ImportKind, NewBinding, ScopeFacts, ScopeImport,
+    TypedBinding, UseHint,
+};
 use rivet_core::{ExtractedSymbol, RefKind, Span, SymbolKind};
 use tree_sitter::Node;
+
+/// The deterministic key of a file's top-level scope.
+pub const FILE_SCOPE_KEY: &str = "top:file";
 
 /// The most recent binding of one variable within a function body.
 enum Binding {
@@ -40,6 +46,8 @@ struct Walker<'a> {
     property_types: HashMap<usize, HashMap<String, String>>,
     uses: Vec<ExtractedUse>,
     imports: Vec<ExtractedImport>,
+    /// Owned lexical facts per scope key, filled while walking.
+    scope_facts: BTreeMap<String, ScopeFacts>,
     /// Stack of lexical function-body variable scopes; the last is current.
     scopes: Vec<HashMap<String, Binding>>,
     /// Stack of enclosing class-like node ids.
@@ -49,21 +57,24 @@ struct Walker<'a> {
     next_body_ordinal: u32,
 }
 
-/// Extract uses and imports from a parsed, error-free PHP file.
+/// Extract uses, imports, and lexical scope facts from a parsed, error-free
+/// PHP file.
 ///
 /// `symbols` must be the already-built symbol list, because uses record the
-/// index of their innermost named container.
+/// index of their innermost named container and scope facts record
+/// declarations by symbol index.
 pub fn extract_uses(
     source: &[u8],
     root: Node<'_>,
     symbols: &[ExtractedSymbol],
-) -> (Vec<ExtractedUse>, Vec<ExtractedImport>) {
+) -> (Vec<ExtractedUse>, Vec<ExtractedImport>, Vec<ExtractedScope>) {
     let mut walker = Walker {
         source,
         symbols,
         property_types: collect_property_types(root, source),
         uses: Vec::new(),
         imports: Vec::new(),
+        scope_facts: BTreeMap::new(),
         scopes: vec![HashMap::new()],
         class_stack: Vec::new(),
         body_stack: vec![None],
@@ -76,7 +87,8 @@ pub fn extract_uses(
             .cmp(&b.span.start_byte())
             .then(a.span.end_byte().cmp(&b.span.end_byte()))
     });
-    (walker.uses, walker.imports)
+    let scopes = walker.finish_scopes();
+    (walker.uses, walker.imports, scopes)
 }
 
 impl Walker<'_> {
@@ -400,6 +412,7 @@ impl Walker<'_> {
         };
         let containing = containing_symbol(self.symbols, span.start_byte(), span.end_byte());
         let scope_key = self.scope_key(containing);
+        self.ensure_scope(&scope_key);
         self.uses.push(ExtractedUse {
             spelling: self.text(node),
             ref_kind,
@@ -478,9 +491,91 @@ impl Walker<'_> {
             return;
         }
         let text = self.text(name);
+        let scope_key = self.scope_key_for_node(name);
+        if let Ok(span) = Span::new(name.start_byte() as u32, name.end_byte() as u32) {
+            match &binding {
+                Binding::Typed(type_spelling) => {
+                    self.scope_facts
+                        .entry(scope_key)
+                        .or_default()
+                        .typed_bindings
+                        .push(TypedBinding {
+                            variable: text.clone(),
+                            type_spelling: type_spelling.clone(),
+                            span,
+                        });
+                }
+                Binding::New(class_spelling) => {
+                    self.scope_facts
+                        .entry(scope_key)
+                        .or_default()
+                        .new_bindings
+                        .push(NewBinding {
+                            variable: text.clone(),
+                            class_spelling: class_spelling.clone(),
+                            span,
+                        });
+                }
+                Binding::Other => {}
+            }
+        }
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(text, binding);
         }
+    }
+
+    /// The current lexical scope key for a use or declaration node.
+    fn scope_key_for_node(&self, node: Node<'_>) -> String {
+        let containing = containing_symbol(
+            self.symbols,
+            node.start_byte() as u32,
+            node.end_byte() as u32,
+        );
+        self.scope_key(containing)
+    }
+
+    /// Ensures a scope entry exists so every scope that owns a use is persisted.
+    fn ensure_scope(&mut self, scope_key: &str) {
+        self.scope_facts.entry(scope_key.to_string()).or_default();
+    }
+
+    /// Adds one import fact to the scope that owns the `use` binding.
+    fn add_import_fact(&mut self, scope_key: &str, import: ScopeImport) {
+        self.scope_facts
+            .entry(scope_key.to_string())
+            .or_default()
+            .imports
+            .push(import);
+    }
+
+    /// Freezes the walker's scope map into owned, parent-linked scopes.
+    fn finish_scopes(&mut self) -> Vec<ExtractedScope> {
+        let mut scope_facts = std::mem::take(&mut self.scope_facts);
+        // The file scope always exists so imports and top-level declarations
+        // have a home even in a file with no uses.
+        scope_facts.entry(FILE_SCOPE_KEY.to_string()).or_default();
+        for (index, symbol) in self.symbols.iter().enumerate() {
+            let scope_key = match symbol.parent_index {
+                Some(parent) => format!("{parent}:file"),
+                None => FILE_SCOPE_KEY.to_string(),
+            };
+            scope_facts
+                .entry(scope_key)
+                .or_default()
+                .declares
+                .push(index);
+        }
+        scope_facts
+            .into_iter()
+            .map(|(scope_key, facts)| {
+                let parent_scope_key = parent_scope_key(&scope_key, self.symbols);
+                ExtractedScope {
+                    scope_key,
+                    parent_scope_key,
+                    facts,
+                }
+            })
+            .collect()
     }
 
     /// Record the import bindings of one `use` declaration.
@@ -541,10 +636,20 @@ impl Walker<'_> {
         };
         self.imports.push(ExtractedImport {
             spelling_alias: spelling_alias.clone(),
-            target_qualified,
+            target_qualified: target_qualified.clone(),
             kind,
             span,
         });
+        let scope_key = self.scope_key_for_node(binding);
+        self.add_import_fact(
+            &scope_key,
+            ScopeImport {
+                alias: spelling_alias.clone(),
+                target_qualified,
+                kind,
+                span,
+            },
+        );
         self.push_use(binding, RefKind::Import, None, UseHint::Unresolved);
     }
 
@@ -585,6 +690,29 @@ fn is_named_container(kind: SymbolKind) -> bool {
             | SymbolKind::Interface
             | SymbolKind::Enum
     )
+}
+
+/// The enclosing scope key of `scope_key`.
+///
+/// A scope key is `top:file`, `{symbol_index}:file` (a class-like body or an
+/// otherwise unscoped position), or `{symbol_index}:{body_ordinal}` (a function
+/// body). The parent of a symbol-owned scope is the scope that declares that
+/// symbol: the file scope for a top-level symbol, or the parent's `:file` scope
+/// for a member. The file scope has no parent.
+fn parent_scope_key(scope_key: &str, symbols: &[ExtractedSymbol]) -> Option<String> {
+    if scope_key == FILE_SCOPE_KEY {
+        return None;
+    }
+    let container = scope_key.split(':').next()?;
+    if container == "top" {
+        return None;
+    }
+    let index: usize = container.parse().ok()?;
+    let symbol = symbols.get(index)?;
+    Some(match symbol.parent_index {
+        Some(parent) => format!("{parent}:file"),
+        None => FILE_SCOPE_KEY.to_string(),
+    })
 }
 
 /// The class-like node named by an `object_creation_expression`.

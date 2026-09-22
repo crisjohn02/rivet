@@ -6,8 +6,10 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// A zero-based, half-open byte range `[start_byte, end_byte)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Span {
     start_byte: u32,
     end_byte: u32,

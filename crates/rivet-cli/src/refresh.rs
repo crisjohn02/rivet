@@ -26,7 +26,8 @@ use rivet_core::{
 use rivet_languages::{EXTRACTOR_FINGERPRINT, language_for_path};
 use rivet_parser::parse_file;
 use rivet_store::{
-    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, Store, SymbolRow, clamp_mtime_ns,
+    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, Store, SymbolRow, UseRow,
+    clamp_mtime_ns,
 };
 
 use crate::index::{
@@ -232,8 +233,8 @@ fn refresh_inventory(
         .map_err(store_error)?;
     let _resolver_changed = stored_resolver.as_deref() != Some(RESOLVER_FINGERPRINT);
 
-    // Load the current inventory and symbols once. Reused files keep their
-    // stored source bytes and symbol rows.
+    // Load the current inventory and facts once. Reused files keep their
+    // stored source bytes and symbol/use/scope rows.
     let mut stored_by_path: HashMap<String, FileRow> = store
         .list_files()
         .map_err(store_error)?
@@ -241,9 +242,13 @@ fn refresh_inventory(
         .map(|file| (file.path.clone(), file))
         .collect();
     let mut stored_symbols = symbols_by_file(store)?;
+    let mut stored_uses = uses_by_file(store)?;
+    let mut stored_scopes = scopes_by_file(store)?;
 
     let mut files = Vec::with_capacity(walk.files.len());
     let mut symbols: Vec<SymbolRow> = Vec::new();
+    let mut uses: Vec<UseRow> = Vec::new();
+    let mut scopes: Vec<ScopeRow> = Vec::new();
     let mut skipped = Skipped::default();
     let mut diagnostics = Vec::new();
     let mut files_indexed = 0_u64;
@@ -291,17 +296,25 @@ fn refresh_inventory(
             });
         if metadata_reuse {
             let file = stored.expect("metadata reuse requires a stored row");
-            let file_symbols = if file.parse_status == ParseStatus::Ok {
-                stored_symbols.remove(&entry.rel_path).unwrap_or_default()
+            let facts = if file.parse_status == ParseStatus::Ok {
+                FileFacts {
+                    symbols: stored_symbols.remove(&entry.rel_path).unwrap_or_default(),
+                    uses: stored_uses.remove(&entry.rel_path).unwrap_or_default(),
+                    scopes: stored_scopes.remove(&entry.rel_path).unwrap_or_default(),
+                }
             } else {
                 stored_symbols.remove(&entry.rel_path);
-                Vec::new()
+                stored_uses.remove(&entry.rel_path);
+                stored_scopes.remove(&entry.rel_path);
+                FileFacts::default()
             };
             count_status(file.parse_status, &mut files_indexed, &mut skipped);
             if let Some(item) = reused_status_diagnostic(&entry.rel_path, file.parse_status) {
                 diagnostics.push(item);
             }
-            symbols.extend(file_symbols);
+            symbols.extend(facts.symbols);
+            uses.extend(facts.uses);
+            scopes.extend(facts.scopes);
             files.push(FileRow {
                 path: entry.rel_path.clone(),
                 language: Some(language_name),
@@ -324,13 +337,21 @@ fn refresh_inventory(
                             && file.parse_status == ParseStatus::Ok
                     });
 
-                let (parse_status, source, file_symbols, file_diagnostic) = if reuse {
+                let facts = if reuse {
                     let source = stored
                         .as_ref()
                         .and_then(|file| file.source.clone())
                         .or(Some(bytes));
-                    let file_symbols = stored_symbols.remove(&entry.rel_path).unwrap_or_default();
-                    (ParseStatus::Ok, source, file_symbols, None)
+                    ParsedFileFacts {
+                        parse_status: ParseStatus::Ok,
+                        source,
+                        facts: FileFacts {
+                            symbols: stored_symbols.remove(&entry.rel_path).unwrap_or_default(),
+                            uses: stored_uses.remove(&entry.rel_path).unwrap_or_default(),
+                            scopes: stored_scopes.remove(&entry.rel_path).unwrap_or_default(),
+                        },
+                        diagnostic: None,
+                    }
                 } else {
                     reparsed.push(entry.rel_path.clone());
                     let extracted = parse_file(id, &bytes);
@@ -340,37 +361,44 @@ fn refresh_inventory(
                                 "resource_limit" => ParseStatus::ResourceLimit,
                                 _ => ParseStatus::ParseError,
                             };
-                            (
-                                status,
-                                None,
-                                Vec::new(),
-                                Some(DiagnosticItem {
+                            ParsedFileFacts {
+                                parse_status: status,
+                                source: None,
+                                facts: FileFacts::default(),
+                                diagnostic: Some(DiagnosticItem {
                                     file: entry.rel_path.clone(),
                                     code: static_diagnostic_code(&diagnostic.code),
                                     detail: diagnostic.detail.clone(),
                                 }),
-                            )
+                            }
                         }
                         None => {
-                            let rows = symbol_rows(&entry.rel_path, &bytes, &extracted);
-                            (ParseStatus::Ok, Some(bytes), rows, None)
+                            let file_facts = build_facts(&entry.rel_path, &bytes, &extracted);
+                            ParsedFileFacts {
+                                parse_status: ParseStatus::Ok,
+                                source: Some(bytes),
+                                facts: file_facts,
+                                diagnostic: None,
+                            }
                         }
                     }
                 };
 
-                count_status(parse_status, &mut files_indexed, &mut skipped);
-                if let Some(item) = file_diagnostic {
+                count_status(facts.parse_status, &mut files_indexed, &mut skipped);
+                if let Some(item) = facts.diagnostic {
                     diagnostics.push(item);
                 }
-                symbols.extend(file_symbols);
+                symbols.extend(facts.facts.symbols);
+                uses.extend(facts.facts.uses);
+                scopes.extend(facts.facts.scopes);
                 files.push(FileRow {
                     path: entry.rel_path.clone(),
                     language: Some(language_name),
                     mtime_ns: clamp_mtime_ns(entry.mtime_ns),
                     size: entry.size,
                     content_hash: Some(hash),
-                    source,
-                    parse_status,
+                    source: facts.source,
+                    parse_status: facts.parse_status,
                 });
             }
             SourceRead::Skipped { reason } => {
@@ -435,11 +463,14 @@ fn refresh_inventory(
         resolver: RESOLVER_FINGERPRINT.to_string(),
     };
     let symbol_count = symbols.len() as u64;
+    let use_count = uses.len() as u64;
     let published = store
         .publish_inventory(InventoryInput {
             fingerprint,
             files,
             symbols,
+            uses,
+            scopes,
             force,
         })
         .map_err(store_error)?;
@@ -458,7 +489,7 @@ fn refresh_inventory(
             diagnostics_truncated,
             diagnostics,
             symbols: symbol_count,
-            uses: 0,
+            uses: use_count,
             bindings: 0,
             updated: published.updated,
             unchanged: published.unchanged,
@@ -474,6 +505,32 @@ fn symbols_by_file(store: &Store) -> Result<HashMap<String, Vec<SymbolRow>>, Cli
     let mut by_file: HashMap<String, Vec<SymbolRow>> = HashMap::new();
     for symbol in store.list_symbols().map_err(store_error)? {
         by_file.entry(symbol.file.clone()).or_default().push(symbol);
+    }
+    Ok(by_file)
+}
+
+/// Groups every persisted use row by owning file.
+fn uses_by_file(store: &Store) -> Result<HashMap<String, Vec<UseRow>>, CliError> {
+    let mut by_file: HashMap<String, Vec<UseRow>> = HashMap::new();
+    for file in store.list_files().map_err(store_error)? {
+        let rows = store.list_uses_for_file(&file.path).map_err(store_error)?;
+        if !rows.is_empty() {
+            by_file.insert(file.path, rows);
+        }
+    }
+    Ok(by_file)
+}
+
+/// Groups every persisted scope row by owning file.
+fn scopes_by_file(store: &Store) -> Result<HashMap<String, Vec<ScopeRow>>, CliError> {
+    let mut by_file: HashMap<String, Vec<ScopeRow>> = HashMap::new();
+    for file in store.list_files().map_err(store_error)? {
+        let rows = store
+            .list_scopes_for_file(&file.path)
+            .map_err(store_error)?;
+        if !rows.is_empty() {
+            by_file.insert(file.path, rows);
+        }
     }
     Ok(by_file)
 }
@@ -501,9 +558,14 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
 
     let mut skipped = Skipped::default();
     let mut files_indexed = 0_u64;
+    let mut uses = 0_u64;
     let mut diagnostics = Vec::new();
     for file in store.list_files().map_err(store_error)? {
         count_status(file.parse_status, &mut files_indexed, &mut skipped);
+        uses += store
+            .list_uses_for_file(&file.path)
+            .map_err(store_error)?
+            .len() as u64;
         if let Some(item) = reused_status_diagnostic(&file.path, file.parse_status) {
             diagnostics.push(item);
         }
@@ -533,7 +595,7 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
         diagnostics_truncated,
         diagnostics,
         symbols,
-        uses: 0,
+        uses,
         bindings: 0,
         updated: 0,
         unchanged: 0,
@@ -559,44 +621,59 @@ fn cached_diagnostic(file: &str, code: &'static str) -> DiagnosticItem {
     }
 }
 
-/// Builds a `symbols` row list from one file's extracted declarations.
+/// The persisted facts for one file, built together so symbols, uses, and
+/// scopes are replaced atomically by one publication.
+#[derive(Default)]
+struct FileFacts {
+    symbols: Vec<SymbolRow>,
+    uses: Vec<UseRow>,
+    scopes: Vec<ScopeRow>,
+}
+
+/// One parsed file's status, stored source, facts, and optional diagnostic,
+/// collected before the file row is pushed.
+struct ParsedFileFacts {
+    parse_status: ParseStatus,
+    source: Option<Vec<u8>>,
+    facts: FileFacts,
+    diagnostic: Option<DiagnosticItem>,
+}
+
+/// Builds a file's persisted symbols, uses, and scopes from its extraction.
 ///
 /// Only PHP has an adapter in this milestone; the TypeScript adapter will fill
 /// this in later without changing the refresh path.
 #[cfg(feature = "lang-php")]
-fn symbol_rows(path: &str, source: &[u8], extracted: &rivet_core::ExtractedFile) -> Vec<SymbolRow> {
-    build_symbol_rows(path, source, &extracted.symbols)
+fn build_facts(path: &str, source: &[u8], extracted: &rivet_core::ExtractedFile) -> FileFacts {
+    let ids = symbol_ids(path, &extracted.symbols);
+    FileFacts {
+        symbols: build_symbol_rows(path, source, &extracted.symbols, &ids),
+        uses: use_rows(path, source, extracted, &ids),
+        scopes: scope_rows(path, extracted, &ids),
+    }
 }
 
-/// No compiled language adapter yet: a parsed tree yields no persisted rows.
+/// No compiled language adapter yet: a parsed tree yields no persisted facts.
 #[cfg(not(feature = "lang-php"))]
-fn symbol_rows(
-    _path: &str,
-    _source: &[u8],
-    _extracted: &rivet_core::ExtractedFile,
-) -> Vec<SymbolRow> {
-    Vec::new()
+fn build_facts(_path: &str, _source: &[u8], _extracted: &rivet_core::ExtractedFile) -> FileFacts {
+    FileFacts::default()
 }
 
-/// Turns extracted symbols into persisted rows for one file.
+/// The canonical IDs of one file's extracted symbols.
 ///
 /// Duplicate qualified names within the file receive one-based ordinals in
-/// `(start_byte, end_byte, kind)` order (T03), the canonical ID escapes `%`
-/// and `#`, and line numbers come from the T07 bytes via [`LineIndex`].
+/// `(start_byte, end_byte, kind)` order (T03), and the canonical ID escapes `%`
+/// and `#`.
 #[cfg(feature = "lang-php")]
-fn build_symbol_rows(
-    path: &str,
-    source: &[u8],
-    extracted: &[rivet_core::ExtractedSymbol],
-) -> Vec<SymbolRow> {
-    use rivet_core::{LineIndex, Span, SymbolId, SymbolKind, assign_ordinals};
+fn symbol_ids(path: &str, extracted: &[rivet_core::ExtractedSymbol]) -> Vec<String> {
+    use rivet_core::{Span, SymbolId, SymbolKind, assign_ordinals};
 
     let items: Vec<(&str, Span, SymbolKind)> = extracted
         .iter()
         .map(|symbol| (symbol.qualified_name.as_str(), symbol.span, symbol.kind))
         .collect();
     let ordinals = assign_ordinals(&items);
-    let ids: Vec<String> = extracted
+    extracted
         .iter()
         .zip(&ordinals)
         .map(|(symbol, ordinal)| {
@@ -604,9 +681,20 @@ fn build_symbol_rows(
                 .expect("a non-empty path and qualified name")
                 .as_canonical()
         })
-        .collect();
-    let lines = LineIndex::new(source);
+        .collect()
+}
 
+/// Turns extracted symbols into persisted rows for one file.
+#[cfg(feature = "lang-php")]
+fn build_symbol_rows(
+    path: &str,
+    source: &[u8],
+    extracted: &[rivet_core::ExtractedSymbol],
+    ids: &[String],
+) -> Vec<SymbolRow> {
+    use rivet_core::LineIndex;
+
+    let lines = LineIndex::new(source);
     extracted
         .iter()
         .enumerate()
@@ -626,6 +714,107 @@ fn build_symbol_rows(
             doc_comment: symbol.doc_comment.clone(),
         })
         .collect()
+}
+
+/// Turns extracted uses into persisted rows for one file.
+#[cfg(feature = "lang-php")]
+fn use_rows(
+    path: &str,
+    source: &[u8],
+    extracted: &rivet_core::ExtractedFile,
+    ids: &[String],
+) -> Vec<UseRow> {
+    use rivet_core::{LineCol, LineIndex};
+
+    let lines = LineIndex::new(source);
+    extracted
+        .uses
+        .iter()
+        .map(|use_| {
+            let position = lines
+                .line_col(use_.span.start_byte())
+                .unwrap_or(LineCol { line: 1, column: 1 });
+            UseRow {
+                use_id: None,
+                file: path.to_string(),
+                containing_symbol: use_
+                    .containing_symbol_index
+                    .and_then(|index| ids.get(index).cloned()),
+                scope_key: use_.scope_key.clone(),
+                spelling: use_.spelling.clone(),
+                lookup_name: use_lookup_name(&use_.spelling, use_.ref_kind),
+                ref_kind: use_.ref_kind,
+                start_byte: use_.span.start_byte(),
+                end_byte: use_.span.end_byte(),
+                line: position.line,
+                col: position.column,
+                receiver: use_.receiver.clone(),
+                hint_json: serde_json::to_string(&use_.hint).expect("a use hint serializes"),
+            }
+        })
+        .collect()
+}
+
+/// Turns extracted scopes into persisted rows for one file.
+///
+/// The adapter records declarations by symbol index; persistence rewrites each
+/// to its canonical ID, the only form usable after a reparse.
+#[cfg(feature = "lang-php")]
+fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String]) -> Vec<ScopeRow> {
+    use rivet_core::extract::{NewBinding, ScopeImport, TypedBinding};
+
+    /// The exact persisted `scopes.facts_json` shape.
+    #[derive(serde::Serialize)]
+    struct PersistedScopeFacts<'a> {
+        imports: &'a [ScopeImport],
+        typed_bindings: &'a [TypedBinding],
+        new_bindings: &'a [NewBinding],
+        declares: Vec<&'a str>,
+    }
+
+    extracted
+        .scopes
+        .iter()
+        .map(|scope| {
+            let declares: Vec<&str> = scope
+                .facts
+                .declares
+                .iter()
+                .filter_map(|index| ids.get(*index).map(String::as_str))
+                .collect();
+            let facts = PersistedScopeFacts {
+                imports: &scope.facts.imports,
+                typed_bindings: &scope.facts.typed_bindings,
+                new_bindings: &scope.facts.new_bindings,
+                declares,
+            };
+            ScopeRow {
+                file: path.to_string(),
+                scope_key: scope.scope_key.clone(),
+                parent_scope_key: scope.parent_scope_key.clone(),
+                facts_json: serde_json::to_string(&facts).expect("scope facts serialize"),
+            }
+        })
+        .collect()
+}
+
+/// The persisted `lookup_name` for one use.
+///
+/// PHP call, type, and import names are case-insensitive, so those fold to
+/// lowercase; property and constant reads/writes keep their exact spelling.
+/// An `Unknown` use has no known referenced kind, so it is stored lowercase.
+#[cfg(feature = "lang-php")]
+fn use_lookup_name(spelling: &str, ref_kind: rivet_core::RefKind) -> String {
+    use rivet_core::{RefKind, SymbolKind};
+
+    match ref_kind {
+        RefKind::Read | RefKind::Write | RefKind::Assignment => {
+            rivet_languages::php::lookup_name(spelling, SymbolKind::Property)
+        }
+        RefKind::Call | RefKind::Type | RefKind::Import | RefKind::Unknown => {
+            spelling.to_lowercase()
+        }
+    }
 }
 
 /// Narrows an extraction diagnostic code to a `'static` contract spelling.
@@ -790,6 +979,8 @@ mod tests {
                     parse_status: ParseStatus::Ok,
                 }],
                 symbols: Vec::new(),
+                uses: Vec::new(),
+                scopes: Vec::new(),
                 force: false,
             })
             .expect("publish stale inventory");

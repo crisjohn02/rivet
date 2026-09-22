@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rivet_core::{ParseStatus, SymbolKind};
+use rivet_core::{ParseStatus, RefKind, SymbolKind};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -188,6 +188,68 @@ pub struct SymbolRow {
     pub doc_comment: Option<String>,
 }
 
+/// The column list shared by every `uses` read, in schema order.
+const USE_COLUMNS: &str = "use_id, file, containing_symbol, scope_key, spelling, lookup_name, \
+     ref_kind, start_byte, end_byte, line, col, receiver, hint_json";
+
+/// One row of the `uses` table.
+///
+/// `use_id` is the SQLite-assigned surrogate key: it is `None` for a newly
+/// extracted use and `Some` for a row read back from the store. A refresh that
+/// reuses an unchanged file's uses carries the stored IDs forward so a
+/// no-edit re-index keeps byte-identical rows. `containing_symbol` is the
+/// canonical ID of the innermost named container, or `None` for a top-level
+/// use. `hint_json` is the serde JSON of a [`rivet_core::UseHint`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseRow {
+    /// SQLite row ID (`None` before insert, `Some` when read).
+    pub use_id: Option<i64>,
+    /// Repo-relative `/`-separated file path (the `files` foreign key).
+    pub file: String,
+    /// Canonical ID of the containing declaration, or `None` at file scope.
+    pub containing_symbol: Option<String>,
+    /// Deterministic lexical scope key.
+    pub scope_key: String,
+    /// The identifier exactly as written in source.
+    pub spelling: String,
+    /// Case-folded lookup key following the language's rule.
+    pub lookup_name: String,
+    /// The syntactic form of the use.
+    pub ref_kind: RefKind,
+    /// Zero-based inclusive use start byte.
+    pub start_byte: u32,
+    /// Zero-based exclusive use end byte.
+    pub end_byte: u32,
+    /// One-based line containing `start_byte`.
+    pub line: u32,
+    /// One-based UTF-8 byte column of `start_byte`.
+    pub col: u32,
+    /// Source text of the receiver expression, if any.
+    pub receiver: Option<String>,
+    /// Serde JSON of the adapter's lexical receiver hint.
+    pub hint_json: String,
+}
+
+/// The column list shared by every `scopes` read, in schema order.
+const SCOPE_COLUMNS: &str = "file, scope_key, parent_scope_key, facts_json";
+
+/// One row of the `scopes` table.
+///
+/// `facts_json` holds the language-neutral owned scope facts (imports, typed
+/// and `new` bindings, and declared symbol IDs) so a later resolver can
+/// re-resolve every use without reparsing the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeRow {
+    /// Repo-relative `/`-separated file path (the `files` foreign key).
+    pub file: String,
+    /// Deterministic scope key within the file.
+    pub scope_key: String,
+    /// The enclosing scope's key, or `None` for the file scope.
+    pub parent_scope_key: Option<String>,
+    /// Serde JSON of this scope's facts.
+    pub facts_json: String,
+}
+
 /// The four fingerprint inputs that identify an indexed snapshot's
 /// configuration (ARCHITECTURE "Refresh and invalidation").
 ///
@@ -217,6 +279,14 @@ pub struct InventoryInput {
     /// Every extracted symbol for the current inventory. Symbols are replaced
     /// per file inside the same transaction as the file rows.
     pub symbols: Vec<SymbolRow>,
+    /// Every extracted use for the current inventory. Uses are replaced per
+    /// file, together with that file's symbols and scopes, in the same
+    /// transaction.
+    pub uses: Vec<UseRow>,
+    /// Every extracted scope for the current inventory. Scopes are replaced
+    /// per file, together with that file's symbols and uses, in the same
+    /// transaction.
+    pub scopes: Vec<ScopeRow>,
     /// `--force`: delete every stored fact and rebuild it in this same
     /// transaction, so all current file rows count as `updated`.
     pub force: bool,
@@ -439,6 +509,8 @@ impl Store {
             fingerprint,
             files,
             symbols,
+            uses,
+            scopes,
             force,
         } = input;
 
@@ -531,10 +603,10 @@ impl Store {
             }
         }
 
-        // Replace symbols per current file in the same transaction. Iterating
-        // every current file (not just those with symbols) removes stale
-        // symbols from a file that became parse_error/resource_limit in this
-        // refresh.
+        // Replace symbols, uses, and scopes per current file in the same
+        // transaction. Iterating every current file (not just those with
+        // facts) removes stale facts from a file that became
+        // parse_error/resource_limit in this refresh.
         let mut symbols_by_file: HashMap<String, Vec<SymbolRow>> = HashMap::new();
         for symbol in symbols {
             symbols_by_file
@@ -542,9 +614,24 @@ impl Store {
                 .or_default()
                 .push(symbol);
         }
+        let mut uses_by_file: HashMap<String, Vec<UseRow>> = HashMap::new();
+        for row in uses {
+            uses_by_file.entry(row.file.clone()).or_default().push(row);
+        }
+        let mut scopes_by_file: HashMap<String, Vec<ScopeRow>> = HashMap::new();
+        for row in scopes {
+            scopes_by_file
+                .entry(row.file.clone())
+                .or_default()
+                .push(row);
+        }
         for file in &sorted {
-            let rows = symbols_by_file.remove(&file.path).unwrap_or_default();
-            replace_file_symbols_in_tx(&tx, &file.path, &rows)?;
+            let symbol_rows = symbols_by_file.remove(&file.path).unwrap_or_default();
+            replace_file_symbols_in_tx(&tx, &file.path, &symbol_rows)?;
+            let use_rows = uses_by_file.remove(&file.path).unwrap_or_default();
+            replace_file_uses_in_tx(&tx, &file.path, &use_rows)?;
+            let scope_rows = scopes_by_file.remove(&file.path).unwrap_or_default();
+            replace_file_scopes_in_tx(&tx, &file.path, &scope_rows)?;
         }
 
         write_fingerprint(&tx, &fingerprint, &digest)?;
@@ -712,6 +799,62 @@ impl Store {
         tx.commit()?;
         Ok(rows)
     }
+
+    /// Returns every use row for `file`.
+    ///
+    /// Rows are ordered by `(start_byte, end_byte, ref_kind, use_id)`.
+    pub fn list_uses_for_file(&self, file: &str) -> Result<Vec<UseRow>, Error> {
+        self.select_uses(
+            &format!(
+                "SELECT {USE_COLUMNS} FROM uses WHERE file = ?1 \
+                 ORDER BY start_byte, end_byte, ref_kind COLLATE BINARY, use_id"
+            ),
+            params![file],
+        )
+    }
+
+    /// Returns every use whose persisted `lookup_name` equals `name`.
+    ///
+    /// Rows are ordered by `(file bytes, start_byte, end_byte, ref_kind)`.
+    /// `use_id` is a final tiebreaker, though `UNIQUE(file, start_byte,
+    /// end_byte, ref_kind)` already makes the documented four columns unique.
+    pub fn find_uses_by_lookup_name(&self, name: &str) -> Result<Vec<UseRow>, Error> {
+        self.select_uses(
+            &format!(
+                "SELECT {USE_COLUMNS} FROM uses WHERE lookup_name = ?1 \
+                 ORDER BY file COLLATE BINARY, start_byte, end_byte, \
+                 ref_kind COLLATE BINARY, use_id"
+            ),
+            params![name],
+        )
+    }
+
+    /// Runs a `uses` SELECT and collects every row.
+    fn select_uses(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<UseRow>, Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(sql)?;
+            let rows = stmt.query_map(params, use_row_from)?;
+            rows.collect::<rusqlite::Result<Vec<UseRow>>>()?
+        };
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    /// Returns every scope row for `file`, ordered by `scope_key` bytes.
+    pub fn list_scopes_for_file(&self, file: &str) -> Result<Vec<ScopeRow>, Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT {SCOPE_COLUMNS} FROM scopes WHERE file = ?1 \
+                 ORDER BY scope_key COLLATE BINARY"
+            ))?;
+            let rows = stmt.query_map(params![file], scope_row_from)?;
+            rows.collect::<rusqlite::Result<Vec<ScopeRow>>>()?
+        };
+        tx.commit()?;
+        Ok(rows)
+    }
 }
 
 /// Deletes then inserts `symbols` for `file` inside the caller's transaction.
@@ -783,6 +926,116 @@ fn symbol_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRow> {
         end_line: end_line as u32,
         signature,
         doc_comment,
+    })
+}
+
+/// Deletes then inserts `uses` for `file` inside the caller's transaction.
+///
+/// A `Some(use_id)` is written explicitly so a refresh that reused a stored
+/// row keeps the same surrogate key; `None` lets SQLite assign one.
+fn replace_file_uses_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    file: &str,
+    uses: &[UseRow],
+) -> Result<(), Error> {
+    tx.execute("DELETE FROM uses WHERE file = ?1", params![file])?;
+    if uses.is_empty() {
+        return Ok(());
+    }
+    let mut insert = tx.prepare(
+        "INSERT INTO uses
+             (use_id, file, containing_symbol, scope_key, spelling, lookup_name,
+              ref_kind, start_byte, end_byte, line, col, receiver, hint_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )?;
+    for row in uses {
+        insert.execute(params![
+            row.use_id,
+            row.file,
+            row.containing_symbol,
+            row.scope_key,
+            row.spelling,
+            row.lookup_name,
+            row.ref_kind.as_str(),
+            row.start_byte,
+            row.end_byte,
+            row.line,
+            row.col,
+            row.receiver,
+            row.hint_json,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Maps a `uses` row (selected with [`USE_COLUMNS`]) to a [`UseRow`].
+fn use_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseRow> {
+    let use_id: i64 = row.get("use_id")?;
+    let file: String = row.get("file")?;
+    let containing_symbol: Option<String> = row.get("containing_symbol")?;
+    let scope_key: String = row.get("scope_key")?;
+    let spelling: String = row.get("spelling")?;
+    let lookup_name: String = row.get("lookup_name")?;
+    let ref_kind: String = row.get("ref_kind")?;
+    let ref_kind = ref_kind.parse::<RefKind>().map_err(|error| {
+        // `ref_kind` is the seventh selected column (index 6).
+        rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
+    })?;
+    let start_byte: i64 = row.get("start_byte")?;
+    let end_byte: i64 = row.get("end_byte")?;
+    let line: i64 = row.get("line")?;
+    let col: i64 = row.get("col")?;
+    let receiver: Option<String> = row.get("receiver")?;
+    let hint_json: String = row.get("hint_json")?;
+    Ok(UseRow {
+        use_id: Some(use_id),
+        file,
+        containing_symbol,
+        scope_key,
+        spelling,
+        lookup_name,
+        ref_kind,
+        start_byte: start_byte as u32,
+        end_byte: end_byte as u32,
+        line: line as u32,
+        col: col as u32,
+        receiver,
+        hint_json,
+    })
+}
+
+/// Deletes then inserts `scopes` for `file` inside the caller's transaction.
+fn replace_file_scopes_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    file: &str,
+    scopes: &[ScopeRow],
+) -> Result<(), Error> {
+    tx.execute("DELETE FROM scopes WHERE file = ?1", params![file])?;
+    if scopes.is_empty() {
+        return Ok(());
+    }
+    let mut insert = tx.prepare(
+        "INSERT INTO scopes (file, scope_key, parent_scope_key, facts_json)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for row in scopes {
+        insert.execute(params![
+            row.file,
+            row.scope_key,
+            row.parent_scope_key,
+            row.facts_json,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Maps a `scopes` row (selected with [`SCOPE_COLUMNS`]) to a [`ScopeRow`].
+fn scope_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScopeRow> {
+    Ok(ScopeRow {
+        file: row.get("file")?,
+        scope_key: row.get("scope_key")?,
+        parent_scope_key: row.get("parent_scope_key")?,
+        facts_json: row.get("facts_json")?,
     })
 }
 
@@ -1036,10 +1289,10 @@ fn write_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::{
-        Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, PublishReport, Store,
-        SymbolRow, clamp_mtime_ns, snapshot_digest,
+        Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, PublishReport, ScopeRow,
+        Store, SymbolRow, UseRow, clamp_mtime_ns, snapshot_digest,
     };
-    use rivet_core::{ParseStatus, SymbolKind, content_hash};
+    use rivet_core::{ParseStatus, RefKind, SymbolKind, content_hash};
     use rusqlite::params;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1116,6 +1369,8 @@ mod tests {
             fingerprint,
             files,
             symbols: Vec::new(),
+            uses: Vec::new(),
+            scopes: Vec::new(),
             force: false,
         }
     }
@@ -1257,6 +1512,8 @@ mod tests {
                 fingerprint: sample_fingerprint(),
                 files,
                 symbols: Vec::new(),
+                uses: Vec::new(),
+                scopes: Vec::new(),
                 force: true,
             })
             .unwrap();
@@ -1591,6 +1848,8 @@ mod tests {
                     sample_file("m.php"),
                 ],
                 symbols: rows,
+                uses: Vec::new(),
+                scopes: Vec::new(),
                 force: false,
             })
             .unwrap();
@@ -1621,6 +1880,8 @@ mod tests {
                 fingerprint: sample_fingerprint(),
                 files: vec![sample_file("a.php")],
                 symbols: vec![sample_symbol("a.php", "a#one", "one", 0)],
+                uses: Vec::new(),
+                scopes: Vec::new(),
                 force: false,
             })
             .unwrap();
@@ -1634,9 +1895,155 @@ mod tests {
                 fingerprint: sample_fingerprint(),
                 files: vec![failed],
                 symbols: Vec::new(),
+                uses: Vec::new(),
+                scopes: Vec::new(),
                 force: false,
             })
             .unwrap();
         assert!(store.list_symbols().unwrap().is_empty());
+    }
+
+    /// A fresh use row (no SQLite ID) with a top-level container and an
+    /// unresolved hint; callers mutate the fields they need to vary.
+    fn sample_use(
+        file: &str,
+        spelling: &str,
+        lookup_name: &str,
+        ref_kind: RefKind,
+        start_byte: u32,
+        end_byte: u32,
+    ) -> UseRow {
+        UseRow {
+            use_id: None,
+            file: file.to_string(),
+            containing_symbol: None,
+            scope_key: "top:file".to_string(),
+            spelling: spelling.to_string(),
+            lookup_name: lookup_name.to_string(),
+            ref_kind,
+            start_byte,
+            end_byte,
+            line: 1,
+            col: start_byte + 1,
+            receiver: None,
+            hint_json: "{\"kind\":\"unresolved\"}".to_string(),
+        }
+    }
+
+    /// One scope row for `file` with the given key and JSON facts.
+    fn sample_scope(
+        file: &str,
+        scope_key: &str,
+        parent: Option<&str>,
+        facts_json: &str,
+    ) -> ScopeRow {
+        ScopeRow {
+            file: file.to_string(),
+            scope_key: scope_key.to_string(),
+            parent_scope_key: parent.map(str::to_string),
+            facts_json: facts_json.to_string(),
+        }
+    }
+
+    #[test]
+    fn use_row_round_trips_with_null_container_and_non_ascii_receiver() {
+        let mut store = Store::open_in_memory().unwrap();
+        let facts_json =
+            "{\"imports\":[],\"typed_bindings\":[],\"new_bindings\":[],\"declares\":[]}";
+        let mut use_row = sample_use("a.php", "launch", "launch", RefKind::Call, 179, 185);
+        use_row.receiver = Some("héllo→".to_string());
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![sample_file("a.php")],
+                symbols: Vec::new(),
+                uses: vec![use_row.clone()],
+                scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
+                force: false,
+            })
+            .unwrap();
+
+        let rows = store.list_uses_for_file("a.php").unwrap();
+        assert_eq!(rows.len(), 1);
+        let got = &rows[0];
+        assert!(got.use_id.is_some(), "SQLite must assign a use_id");
+        assert_eq!(got.containing_symbol, None, "NULL container must persist");
+        assert_eq!(got.receiver.as_deref(), Some("héllo→"));
+        assert_eq!(got.hint_json, "{\"kind\":\"unresolved\"}");
+        assert_eq!(
+            UseRow {
+                use_id: got.use_id,
+                ..use_row
+            },
+            *got
+        );
+
+        let scopes = store.list_scopes_for_file("a.php").unwrap();
+        assert_eq!(
+            scopes,
+            vec![sample_scope("a.php", "top:file", None, facts_json)]
+        );
+    }
+
+    #[test]
+    fn find_uses_by_lookup_name_is_byte_ordered() {
+        let mut store = Store::open_in_memory().unwrap();
+        let rows = vec![
+            sample_use("a.php", "Same", "same", RefKind::Type, 10, 14),
+            sample_use("b.php", "same", "same", RefKind::Write, 1, 5),
+            sample_use("a.php", "same", "same", RefKind::Call, 5, 9),
+            sample_use("a.php", "same", "same", RefKind::Read, 5, 9),
+        ];
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![sample_file("a.php"), sample_file("b.php")],
+                symbols: Vec::new(),
+                uses: rows,
+                scopes: Vec::new(),
+                force: false,
+            })
+            .unwrap();
+
+        let ordered: Vec<(String, u32, RefKind)> = store
+            .find_uses_by_lookup_name("same")
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.file, row.start_byte, row.ref_kind))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("a.php".to_string(), 5, RefKind::Call),
+                ("a.php".to_string(), 5, RefKind::Read),
+                ("a.php".to_string(), 10, RefKind::Type),
+                ("b.php".to_string(), 1, RefKind::Write),
+            ]
+        );
+        assert!(store.find_uses_by_lookup_name("absent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_file_cascades_to_uses_and_scopes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let facts_json =
+            "{\"imports\":[],\"typed_bindings\":[],\"new_bindings\":[],\"declares\":[]}";
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: sample_fingerprint(),
+                files: vec![sample_file("a.php")],
+                symbols: Vec::new(),
+                uses: vec![sample_use("a.php", "g", "g", RefKind::Call, 0, 1)],
+                scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
+                force: false,
+            })
+            .unwrap();
+
+        assert_eq!(store.list_uses_for_file("a.php").unwrap().len(), 1);
+        assert_eq!(store.list_scopes_for_file("a.php").unwrap().len(), 1);
+
+        store.delete_file("a.php").unwrap();
+        assert!(store.list_uses_for_file("a.php").unwrap().is_empty());
+        assert!(store.list_scopes_for_file("a.php").unwrap().is_empty());
     }
 }

@@ -52,6 +52,7 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
             symbols: Vec::new(),
             uses: Vec::new(),
             imports: Vec::new(),
+            scopes: Vec::new(),
             diagnostics: vec![Diagnostic {
                 code: "resource_limit".to_string(),
                 detail: format!("visited more than {MAX_VISITED_NODES} Tree-sitter nodes"),
@@ -68,6 +69,7 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
             symbols: Vec::new(),
             uses: Vec::new(),
             imports: Vec::new(),
+            scopes: Vec::new(),
             diagnostics: vec![Diagnostic {
                 code: "parse_error".to_string(),
                 detail: format!("{kind} at byte {byte}"),
@@ -78,11 +80,12 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
 
     let raw = collect_raw(source, root);
     let symbols = build_symbols(raw);
-    let (uses, imports) = uses::extract_uses(source, root, &symbols);
+    let (uses, imports, scopes) = uses::extract_uses(source, root, &symbols);
     ExtractedFile {
         symbols,
         uses,
         imports,
+        scopes,
         diagnostics: Vec::new(),
     }
 }
