@@ -33,6 +33,10 @@ Never trust the implementor's report. Independently:
 3. Build the binary and exercise the new behavior by hand against the fixture, including the cases the task's tests do not cover. Several real defects were caught only this way (anonymous-class members leaking as symbols, an order-sensitive config fingerprint being sorted).
 4. Use a private `CARGO_TARGET_DIR` when reviewing a worktree so a stale shared binary cannot make a broken build look green.
 5. Fold any defect found into the *next* task's prompt as a "review fix" preamble rather than patching it silently.
+6. Never `git add -A` in the main checkout while a task is running there. An
+   implementor writes files continuously, so a blanket stage sweeps its
+   in-progress work into an unrelated commit. Stage explicit paths, or commit
+   only after the run has finished.
 
 ### Parallel tasks
 
