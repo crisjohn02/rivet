@@ -1,10 +1,11 @@
 //! `rivet symbol <query>` (spec §10; OUTPUT-CONTRACT "Coordinates and symbol
 //! objects", "Pagination and resolution", and the `rivet symbol` block).
 //!
-//! T13 resolves canonical IDs, native qualified names, `file:line`, dotted
-//! paths, and short names against stored symbol rows after a refresh, and
-//! paginates ambiguous candidates deterministically. Signatures, doc comments,
-//! and real call lists arrive later: signatures in T14 and call lists in T24.
+//! T12 resolves canonical IDs, native qualified names, dotted paths, and short
+//! names against stored symbol rows after a refresh; T13 adds `file:line` and
+//! deterministic ambiguity pagination; T14 adds `--source` from the stored
+//! `files.source` bytes plus persisted `signature`/`doc_comment`. Real call
+//! lists arrive in T24.
 
 use serde_json::{Map, Value, json};
 
@@ -126,7 +127,7 @@ fn single(
     if options.source {
         object.insert(
             "source".to_string(),
-            source_slice(store, row).map_err(index::store_error)?,
+            Value::String(source_slice(store, row)?),
         );
     }
     object.insert(
@@ -218,17 +219,35 @@ fn symbol_object(store: &Store, row: &SymbolRow) -> Result<Value, rivet_store::E
     }))
 }
 
-/// The symbol's span slice from the file's stored bytes, or null.
-fn source_slice(store: &Store, row: &SymbolRow) -> Result<Value, rivet_store::Error> {
-    let source = store
-        .get_file(&row.file)?
+/// The symbol's span slice from the file's stored bytes (never the live file).
+///
+/// `--source` promises a string, so a missing stored file, an empty `source`
+/// column, or a span outside the stored bytes is a failure rather than a null
+/// or empty result that would look complete.
+fn source_slice(store: &Store, row: &SymbolRow) -> Result<String, CliError> {
+    let bytes = store
+        .get_file(&row.file)
+        .map_err(index::store_error)?
         .and_then(|file| file.source)
-        .and_then(|bytes| {
-            bytes
-                .get(row.start_byte as usize..row.end_byte as usize)
-                .map(|slice| String::from_utf8_lossy(slice).into_owned())
-        });
-    Ok(source.map(Value::String).unwrap_or(Value::Null))
+        .ok_or_else(|| {
+            index::store_error(rivet_store::Error::Configuration {
+                detail: format!("no stored source bytes for {}", row.file),
+            })
+        })?;
+    let slice = bytes
+        .get(row.start_byte as usize..row.end_byte as usize)
+        .ok_or_else(|| {
+            index::store_error(rivet_store::Error::Configuration {
+                detail: format!(
+                    "span [{}, {}) is outside the {} stored bytes of {}",
+                    row.start_byte,
+                    row.end_byte,
+                    bytes.len(),
+                    row.file
+                ),
+            })
+        })?;
+    Ok(String::from_utf8_lossy(slice).into_owned())
 }
 
 /// An empty call/caller list while T24 is pending.

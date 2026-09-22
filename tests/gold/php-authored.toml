@@ -1,4 +1,4 @@
-# Gold spans for the three-file authored PHP fixture.
+# Gold spans for the four-file authored PHP fixture.
 # Generated mechanically; see tests/gold/check_gold.py.
 
 [[declaration]]
@@ -110,6 +110,46 @@ end_byte = 122
 start_line = 8
 end_line = 10
 text = "function launch(): void\n{\n}"
+
+[[declaration]]
+file = "Documented.php"
+qualified_name = "App\\Documented\\Documented"
+kind = "class"
+start_byte = 93
+end_byte = 378
+start_line = 10
+end_line = 30
+text = "final class Documented\n{\n    /**\n     * "
+
+[[declaration]]
+file = "Documented.php"
+qualified_name = "App\\Documented\\Documented::run"
+kind = "method"
+start_byte = 171
+end_byte = 210
+start_line = 15
+end_line = 17
+text = "public function run(): void\n    {\n    }"
+
+[[declaration]]
+file = "Documented.php"
+qualified_name = "App\\Documented\\Documented::plain"
+kind = "method"
+start_byte = 216
+end_byte = 257
+start_line = 19
+end_line = 21
+text = "public function plain(): void\n    {\n    "
+
+[[declaration]]
+file = "Documented.php"
+qualified_name = "App\\Documented\\Documented::separated"
+kind = "method"
+start_byte = 331
+end_byte = 376
+start_line = 27
+end_line = 29
+text = "public function separated(): void\n    {\n"
 
 [[use]]
 file = "ReportService.php"
