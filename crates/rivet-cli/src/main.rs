@@ -9,7 +9,7 @@ use clap::error::ErrorKind;
 use serde_json::Map;
 
 use rivet_cli::transport::{CliError, emit_error, emit_success};
-use rivet_cli::{context_cmd, index, init, refs, symbol};
+use rivet_cli::{context_cmd, index, init, refs, snippet, symbol};
 
 /// Agent-native codebase CLI: structural code navigation and token-budgeted context for coding agents.
 #[derive(Debug, Parser)]
@@ -27,10 +27,10 @@ struct Cli {
 enum Command {
     /// Set up rivet configuration and instructions in a repository.
     Init {
-        /// Install the managed instruction block (T33b; not implemented yet).
+        /// Install or update the managed instruction block in AGENTS.md or CLAUDE.md.
         #[arg(long = "write-snippet")]
         write_snippet: bool,
-        /// Snippet destination, AGENTS.md or CLAUDE.md (T33b; requires `--write-snippet`).
+        /// Snippet destination, AGENTS.md or CLAUDE.md (requires `--write-snippet`).
         #[arg(long = "snippet-file", value_name = "AGENTS.md|CLAUDE.md")]
         snippet_file: Option<String>,
     },
@@ -148,7 +148,7 @@ enum Command {
         #[arg(long = "no-refresh")]
         no_refresh: bool,
     },
-    /// Emit a short agent usage snippet.
+    /// Print the managed agent instruction block.
     Snippet,
 }
 
@@ -306,7 +306,13 @@ fn main() {
                 Err(error) => fail(json, &error, "init"),
             }
         }
-        Command::Snippet => not_implemented(json, "snippet", "T33b"),
+        Command::Snippet => {
+            if json {
+                emit_success(snippet::success_json());
+            } else {
+                print!("{}", snippet::SNIPPET);
+            }
+        }
     }
 }
 
@@ -323,27 +329,6 @@ fn fail(json: bool, error: &CliError, command: &str) -> ! {
         );
     }
     eprintln!("rivet {command}: {}", error.message);
-    std::process::exit(error.exit);
-}
-
-/// Reports an unimplemented command without ever faking success.
-fn not_implemented(json: bool, name: &str, task: &str) -> ! {
-    let message =
-        format!("rivet {name} is not implemented yet (expected in {task}; see docs/TASKS.md)");
-    let error = CliError::general(
-        message,
-        "Only `rivet init`, `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build.",
-    );
-    if json {
-        emit_error(
-            error.code,
-            error.exit,
-            &error.message,
-            &error.hint,
-            *error.extra,
-        );
-    }
-    eprintln!("{}", error.message);
     std::process::exit(error.exit);
 }
 

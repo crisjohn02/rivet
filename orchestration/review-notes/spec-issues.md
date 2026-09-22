@@ -24,3 +24,9 @@ revises the spec, since implementors are not allowed to edit it.
   must not be committed after a later `git init`. A new `.gitignore` is itself
   an eligible unsupported file, so it changes the snapshot digest and makes
   coverage report one more unsupported file.
+- **`docs/INTEGRATION.md` is stale.** Its status line still says "Rivet has no
+  executable yet", although every command is implemented as of T33b. Found in
+  T33b.
+- **No error code for a malformed managed block.** OUTPUT-CONTRACT names none.
+  T33b uses `repository_unavailable`, exit 3, consistent with T33a's handling
+  of an unusable destination.
