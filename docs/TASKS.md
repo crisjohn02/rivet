@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T33b |
-| Next task | T34 |
+| Last completed task | T34 |
+| Next task | T35 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T33b: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 35 unit + 16 bindings + 12 concurrency + 11 context_fit + 19 context_json + 14 context_overlap + 9 context_rank + 19 context_traversal + 12 coverage_honesty + 10 failure_boundaries + 7 force_rebuild + 7 freshness_modes + 7 index_json + 1 index_uses + 22 init_json + 15 kind_aware_lookup + 11 namespace_scopes + 10 receiver_conservatism + 7 refresh + 10 refs_json + 4 reresolve + 7 silent_misses + 18 snippet_json + 9 symbol_calls_json + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 61, rivet-index 92, rivet-languages 57 unit + 12 php_extract + 2 php_uses, rivet-parser 7 unit + 4 grammar_smoke, rivet-store 32; 0 failed); `python3 tests/gold/check_gold.py` verified 51 entries. |
+| Last checks | T34: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 40 unit + 16 bindings + 12 concurrency + 11 context_fit + 19 context_json + 14 context_overlap + 9 context_rank + 19 context_traversal + 12 coverage_honesty + 10 failure_boundaries + 7 force_rebuild + 7 freshness_modes + 20 human_output + 7 index_json + 1 index_uses + 22 init_json + 15 kind_aware_lookup + 11 namespace_scopes + 10 receiver_conservatism + 7 refresh + 10 refs_json + 4 reresolve + 7 silent_misses + 18 snippet_json + 9 symbol_calls_json + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 61, rivet-index 92, rivet-languages 57 unit + 12 php_extract + 2 php_uses, rivet-parser 7 unit + 4 grammar_smoke, rivet-store 32; 0 failed); `python3 tests/gold/check_gold.py` verified 51 entries. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -140,7 +140,7 @@ Read: ARCHITECTURE concurrency/parse policy; spec §§25–27; AGENT-SNIPPET; OU
 | [x] | T31 | Add writer lock timeout, race detection/retry, and cancellation rollback to refresh. | Competing processes and interrupted writers yield a complete snapshot or the documented bounded error; no silent cached fallback. |
 | [x] | T32 | Complete parser resource limits, skip/diagnostic handling, and direct-target errors. | A formerly valid file loses stale facts on parse/resource failure; unrelated queries report partial coverage; direct queries fail with the specified code. |
 | [ ] | T33 | Implement idempotent `init` and `snippet`, including JSON, managed blocks, and guarded text writes. | Repeated init preserves config/text, both-instruction-file ambiguity is explicit, and symlinked write targets are rejected. |
-| [ ] | T34 | Add compact human output/help for the implemented commands. | Resolution marks, pagination, coverage, and context forms remain visible; help fits the spec's limit and uses real supported examples. |
+| [x] | T34 | Add compact human output/help for the implemented commands. | Resolution marks, pagination, coverage, and context forms remain visible; help fits the spec's limit and uses real supported examples. |
 | [ ] | T35 | Select and pin licensed real PHP/TS benchmark repositories; add a small PHP gold sample outside the fixture checkout. Do not execute arbitrary setup scripts during selection. | Repository commits/license attribution are recorded, the PHP fixture exercises common method names, and future held-out tasks remain separate from pilot cases. |
 | [ ] | T36 | Audit the CLI contract and the existing acceptance matrix; close omissions with focused regression cases. | Flags/errors/stream behavior, worktrees, symlink/FIFO handling, rebuild equivalence, Unicode, and partial coverage agree with the docs. Record any remaining gap as a subtask before proceeding. |
 

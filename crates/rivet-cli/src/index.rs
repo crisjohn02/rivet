@@ -200,17 +200,42 @@ pub fn index_metadata(report: &Report) -> Value {
     })
 }
 
-/// The human `rivet index` output (spec §13).
+/// The human `rivet index` output (spec §13's possible output), plus the
+/// deleted count and the coverage notes when coverage is not complete.
+///
+/// "Indexed" counts files with stored facts; the coverage line reports how
+/// many were seen and why the rest were skipped.
 pub fn human(report: &Report) -> String {
-    format!(
-        "Indexed {} files\n{} symbols\n{} relationships\n\nUpdated: {}\nUnchanged: {}\n\nElapsed: {} ms\n",
-        report.files_seen,
-        report.symbols,
-        report.uses,
-        report.updated,
-        report.unchanged,
-        report.elapsed_ms
-    )
+    let mut output = format!(
+        "Indexed {} files\n{} symbols\n{} relationships\n\nUpdated: {}\nUnchanged: {}\nDeleted: {}\n\nElapsed: {} ms\n",
+        grouped(report.files_indexed),
+        grouped(report.symbols),
+        grouped(report.uses),
+        grouped(report.updated),
+        grouped(report.unchanged),
+        grouped(report.deleted),
+        grouped(report.elapsed_ms),
+    );
+    let notes = crate::human::index_notes(&index_metadata(report));
+    if !notes.is_empty() {
+        output.push('\n');
+        output.push_str(&notes);
+    }
+    output
+}
+
+/// `value` with `,` between digit groups (`4821` -> `4,821`), independent of
+/// locale.
+fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut output = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            output.push(',');
+        }
+        output.push(digit);
+    }
+    output
 }
 
 /// Parses `--languages`, rejecting empty and uncompiled names before any
@@ -314,4 +339,18 @@ pub(crate) fn store_error(error: rivet_store::Error) -> CliError {
         _ => "Check .rivet/ permissions and retry.",
     };
     CliError::repository_unavailable(error.to_string(), hint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grouped;
+
+    #[test]
+    fn counts_group_digits_without_locale() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(4821), "4,821");
+        assert_eq!(grouped(32418), "32,418");
+        assert_eq!(grouped(1_000_000), "1,000,000");
+    }
 }

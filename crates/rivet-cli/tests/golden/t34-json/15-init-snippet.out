@@ -1,0 +1,4 @@
+exit 0
+--- stdout
+{"schema_version":1,"created":["AGENTS.md"],"modified":[],"snippet_file":"AGENTS.md"}
+--- stderr

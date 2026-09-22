@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 
 use crate::budget::{self, ContextFit, TOKENIZER};
 use crate::context::{self, ContextOptions};
+use crate::human;
 use crate::index;
 use crate::refresh::{acquire_snapshot, open_context};
 use crate::refs::resolve_target;
@@ -327,31 +328,56 @@ fn configured_budget(config: &Config) -> Result<u64, CliError> {
     Ok(value)
 }
 
-/// The compact human rendering of a successful context lookup: one line per
-/// segment and the estimate summary. Full human formatting is T34.
+/// The human rendering of a successful context lookup (spec §16.1).
+///
+/// Each segment is a `── file:start-end  name  [reason, form]` header (with a
+/// trailing `?` when its link is `name_match`) followed by the segment's
+/// source exactly as the JSON carries it, then a blank line. After the
+/// segments: the omission counts when any is non-zero, a line when the
+/// candidate cap was reached, the estimate line, and the coverage notes.
 pub fn human(value: &Value) -> String {
     let mut output = String::new();
-    if let Some(segments) = value["segments"].as_array() {
-        for segment in segments {
-            let symbol = &segment["symbol"];
-            output.push_str(&format!(
-                "{}:{}-{}  {}  [{}, {}]\n",
-                symbol["file"].as_str().unwrap_or(""),
-                symbol["start_line"].as_u64().unwrap_or(0),
-                symbol["end_line"].as_u64().unwrap_or(0),
-                symbol["qualified_name"].as_str().unwrap_or(""),
-                segment["reason"].as_str().unwrap_or(""),
-                segment["form"].as_str().unwrap_or(""),
-            ));
-        }
+    for segment in value["segments"].as_array().map_or(&[][..], Vec::as_slice) {
+        let symbol = &segment["symbol"];
+        let mark = if segment["resolution"] == "name_match" {
+            " ?"
+        } else {
+            ""
+        };
+        output.push_str(&format!(
+            "── {}  {}  [{}, {}]{mark}\n",
+            human::span(symbol),
+            human::text(&symbol["qualified_name"]),
+            human::text(&segment["reason"]),
+            human::text(&segment["form"]),
+        ));
+        human::push_block(&mut output, human::text(&segment["source"]));
+        output.push('\n');
+    }
+    let omitted = &value["omitted"];
+    let counts: Vec<u64> = ["budget", "overlap", "limit"]
+        .iter()
+        .map(|key| omitted[*key].as_u64().unwrap_or(0))
+        .collect();
+    if counts.iter().any(|count| *count > 0) {
+        output.push_str(&format!(
+            "omitted: {} budget, {} overlap, {} limit\n",
+            counts[0], counts[1], counts[2]
+        ));
+    }
+    if value["candidate_limit_reached"] == true {
+        output.push_str(
+            "candidate_limit_reached: more related symbols may exist beyond the traversal caps\n",
+        );
     }
     output.push_str(&format!(
         "estimated_tokens: {} / {}  (tokenizer: {}; budget_scope: {})\n",
         value["estimated_tokens"].as_u64().unwrap_or(0),
         value["budget_tokens"].as_u64().unwrap_or(0),
-        value["tokenizer"].as_str().unwrap_or(""),
-        value["budget_scope"].as_str().unwrap_or(""),
+        human::text(&value["tokenizer"]),
+        human::text(&value["budget_scope"]),
     ));
+    output.push_str(&human::index_notes(&value["index"]));
     output
 }
 

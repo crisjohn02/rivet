@@ -15,6 +15,7 @@ mod debug_hook;
 pub mod budget;
 pub mod context;
 pub mod context_cmd;
+pub mod human;
 pub mod index;
 pub mod init;
 pub mod references;

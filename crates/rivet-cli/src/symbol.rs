@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 use rivet_index::{QueryOutcome, check_query_syntax, resolve_query, suggestions};
 use rivet_store::{Store, SymbolRow};
 
+use crate::human;
 use crate::index;
 use crate::references::{self, Mode, Selection};
 use crate::refresh::{acquire_snapshot, open_context};
@@ -486,17 +487,81 @@ pub(crate) fn parse_limit(limit: Option<u64>) -> Result<u64, CliError> {
     }
 }
 
-/// The compact human rendering of a successful symbol lookup.
+/// The human rendering of a successful symbol lookup (spec §14).
+///
+/// Name, kind, and location lines, then the canonical ID and parent, the doc
+/// comment, the signature, the `--source` slice when requested, and the
+/// `calls:` / `called by:` lists (absent with `--signature-only`), each with
+/// its own pagination line. Coverage notes close the output.
 pub fn human(value: &Value) -> String {
     let symbol = &value["symbol"];
-    format!(
-        "{}  {}:{}-{}  {}\n",
-        symbol["qualified_name"].as_str().unwrap_or(""),
-        symbol["file"].as_str().unwrap_or(""),
-        symbol["start_line"].as_u64().unwrap_or(0),
-        symbol["end_line"].as_u64().unwrap_or(0),
-        symbol["kind"].as_str().unwrap_or(""),
-    )
+    let mut output = String::new();
+    output.push_str(human::text(&symbol["qualified_name"]));
+    output.push('\n');
+    output.push_str(human::text(&symbol["kind"]));
+    output.push('\n');
+    output.push_str(&human::span(symbol));
+    output.push('\n');
+    output.push_str(&format!("id: {}\n", human::text(&symbol["id"])));
+    if let Some(parent) = value["parent"].as_str() {
+        output.push_str(&format!("parent: {parent}\n"));
+    }
+    if let Some(doc) = value["doc_comment"].as_str() {
+        output.push_str("\ndoc:\n");
+        human::push_indented(&mut output, doc);
+    }
+    output.push_str("\nsignature:\n");
+    match value["signature"].as_str() {
+        Some(signature) => human::push_indented(&mut output, signature),
+        None => output.push_str("  (none)\n"),
+    }
+    if let Some(source) = value["source"].as_str() {
+        output.push_str("\nsource:\n");
+        human::push_block(&mut output, source);
+    }
+    for (key, label) in [("calls", "calls"), ("called_by", "called by")] {
+        let list = &value[key];
+        if list.is_null() {
+            continue;
+        }
+        let items = list["items"].as_array().map_or(&[][..], Vec::as_slice);
+        output.push('\n');
+        if items.is_empty() && list["total"].as_u64().unwrap_or(0) == 0 {
+            output.push_str(&format!("{label}: none\n"));
+            continue;
+        }
+        output.push_str(&format!("{label}:\n"));
+        let rows: Vec<Vec<String>> = items
+            .iter()
+            .map(|item| {
+                let other = if key == "calls" {
+                    // The callee is known only through its binding; an
+                    // unbound call site names its receiver when it has one.
+                    match (item["resolved_target"].as_str(), item["receiver"].as_str()) {
+                        (Some(target), _) => target.to_string(),
+                        (None, Some(receiver)) => format!("(unresolved; receiver {receiver})"),
+                        (None, None) => "(unresolved)".to_string(),
+                    }
+                } else {
+                    match &item["containing_symbol"] {
+                        Value::Null => "(file scope)".to_string(),
+                        containing => human::text(&containing["qualified_name"]).to_string(),
+                    }
+                };
+                vec![human::site(item), other, human::tier(&item["resolution"])]
+            })
+            .collect();
+        output.push_str(&human::columns(&rows, "  "));
+        if let Some(line) = human::page_line_of(list, items.len()) {
+            output.push_str(&format!("  {line}\n"));
+        }
+    }
+    let notes = human::index_notes(&value["index"]);
+    if !notes.is_empty() {
+        output.push('\n');
+        output.push_str(&notes);
+    }
+    output
 }
 
 #[cfg(test)]

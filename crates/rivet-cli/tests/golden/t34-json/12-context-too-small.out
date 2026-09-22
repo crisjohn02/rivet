@@ -1,0 +1,4 @@
+exit 8
+--- stdout
+--- stderr
+{"schema_version":1,"error":"budget_too_small","message":"the context target needs at least 10 estimated tokens, but the budget is 9","hint":"Re-run with `--tokens 10` or higher.","budget_tokens":9,"required_tokens":10,"index":{"snapshot":"blake3:d79404739047eb74729a75cb53fbd47644f143ef4bc10f598e7faacebad2a80d","freshness":"content","coverage":{"complete":false,"files_seen":10,"files_indexed":9,"skipped":{"unsupported":1,"binary":0,"size":0,"encoding":0,"parse_error":0,"resource_limit":0}},"diagnostics":{"total":0,"truncated":false,"items":[]}}}

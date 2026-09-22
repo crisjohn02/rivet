@@ -1,0 +1,4 @@
+exit 0
+--- stdout
+{"schema_version":1,"created":[],"modified":[],"snippet_file":null}
+--- stderr
