@@ -32,3 +32,6 @@ rivet-store = { path = "../rivet-store" }
 [dev-dependencies]
 # Gold-TOML parsing in the T18 index-uses integration test only.
 toml = { workspace = true }
+# AF6 force-rebuild test only: tampers with and dumps stored facts directly.
+# Same pinned, bundled version rivet-store uses, so no new dependency resolves.
+rusqlite = { version = "=0.40.2", features = ["bundled"] }

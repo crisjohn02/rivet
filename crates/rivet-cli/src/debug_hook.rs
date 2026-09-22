@@ -17,9 +17,9 @@
 //! - `RIVET_DEBUG_MAX_NODES=<n>` and `RIVET_DEBUG_MAX_USES=<n>` lower the spec
 //!   §27 parser resource bounds (T32), so a resource-limit test does not need a
 //!   million-node file. They apply only to files this refresh actually parses:
-//!   an unchanged `ok` file is reused without reparsing (even by `index
-//!   --force`, which re-inserts reused facts), so a test lowers them on a fresh
-//!   repository. A failed file is reparsed on every refresh.
+//!   a normal refresh reuses an unchanged `ok` file without reparsing, so a test
+//!   lowers them on a fresh repository or under `index --force`, which reparses
+//!   every eligible file (AF6). A failed file is reparsed on every refresh.
 //!
 //! Call sites use [`debug_point!`], which expands to nothing in a release
 //! build, and [`busy_timeout`] and [`resource_limits`] have

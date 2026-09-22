@@ -9,8 +9,9 @@
 //! content (or *all* enabled content when the extractor fingerprint differs),
 //! drops facts for deleted or newly excluded files, and publishes one atomic
 //! snapshot. Files whose content hash and stored parse status are unchanged keep
-//! their stored symbols; their mtime/size are still rewritten. `--force` clears
-//! every stored fact and rebuilds it in the same publish transaction.
+//! their stored symbols; their mtime/size are still rewritten. `--force` reuses
+//! nothing stored: it rereads and reparses every eligible file, regenerates all
+//! facts and bindings, and replaces every stored fact in the same transaction.
 //!
 //! Concurrency (T31; spec §12.4 steps 3 and 4). Each attempt takes the writer
 //! lock (`BEGIN IMMEDIATE`, 5 second busy timeout) before it loads anything,
@@ -300,8 +301,9 @@ pub struct RefreshOutcome {
 /// path. A failed parse does not abort the refresh: the file is recorded with
 /// its failure status and no symbols, and unrelated results stay available
 /// with partial coverage (ARCHITECTURE "Parse and coverage policy"). An I/O
-/// failure aborts, publishing nothing. `force` clears every stored fact and
-/// rebuilds it in the same transaction (spec §13).
+/// failure aborts, publishing nothing. `force` reuses no stored fact: every
+/// eligible file is reread and reparsed, and every stored fact is replaced in
+/// the same transaction (spec §13; AF6).
 ///
 /// The writer lock is taken first and the whole refresh runs inside it (see
 /// [`refresh_inventory`]). A writer lock not acquired within the busy timeout
@@ -445,15 +447,31 @@ fn refresh_inventory(
 
     // Load the current inventory and facts once. Reused files keep their
     // stored source bytes and symbol/use/scope rows.
-    let mut stored_by_path: HashMap<String, FileRow> = store
-        .list_files()
-        .map_err(store_error)?
-        .into_iter()
-        .map(|file| (file.path.clone(), file))
-        .collect();
-    let mut stored_symbols = symbols_by_file(store)?;
-    let mut stored_uses = uses_by_file(store)?;
-    let mut stored_scopes = scopes_by_file(store)?;
+    //
+    // `--force` (AF6) loads nothing: it is the recovery path for a cache whose
+    // stored facts are suspect although no fingerprint changed, so it must not
+    // trust a single stored row. With no stored inventory, neither the
+    // metadata-mode nor the content-hash reuse test below can match, so every
+    // eligible file is read from disk afresh and reparsed, every symbol, use,
+    // and scope is regenerated, and use IDs restart at 1 exactly as for a
+    // first index. The store's `force` path then deletes every stored fact
+    // before writing these rows, in this same writer transaction.
+    let (mut stored_by_path, mut stored_symbols, mut stored_uses, mut stored_scopes) = if force {
+        Default::default()
+    } else {
+        let files: HashMap<String, FileRow> = store
+            .list_files()
+            .map_err(store_error)?
+            .into_iter()
+            .map(|file| (file.path.clone(), file))
+            .collect();
+        (
+            files,
+            symbols_by_file(store)?,
+            uses_by_file(store)?,
+            scopes_by_file(store)?,
+        )
+    };
     // Newly reparsed uses get explicit IDs above this high-water mark so the
     // in-memory resolver can name them before the publish transaction runs.
     let mut next_use_id = stored_uses
