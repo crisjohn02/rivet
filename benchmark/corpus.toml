@@ -1,0 +1,112 @@
+# Benchmark corpus manifest. Read by benchmark/fetch-corpus.sh and by later
+# benchmark tasks (T37 onward). Field names are stable; add fields rather than
+# renaming them.
+#
+# Both projects are PRIVATE. This public file deliberately records nothing
+# that identifies or describes their contents: no URL, source path, licence
+# text, copyright holder, or internal structure. See benchmark/CORPUS.md.
+
+schema_version = 1
+
+# The pilot / held-out partition (docs/BENCHMARK.md "Pilot before the full
+# benchmark") exists but is recorded privately, because naming the parts
+# would reveal internal structure. It lives in `partition.md` inside the
+# private gold directory ($RIVET_PRIVATE_GOLD_DIR), next to the private gold
+# samples. Pilot tasks (T38) may draw only on the pilot partition.
+partition = "private"
+partition_file = "$RIVET_PRIVATE_GOLD_DIR/partition.md"
+
+# How the counts below were produced (not repeated per project):
+#   files.*        tracked files at `commit`, by extension, counted from
+#                  `git ls-files`. `*_in_excluded_dirs` counts files under a
+#                  directory named by a spec §26 default exclusion (for
+#                  example a nested `vendor/`); rivet skips those without
+#                  counting them as seen.
+#   rivet_index.*  `rivet index --timing --json` from the rivet commit named
+#                  in `measured_with`, release build, on the copy described
+#                  in CORPUS.md. `cold_ms` is the median of 5 runs with the
+#                  `.rivet/` directory deleted first; `noop_refresh_ms` is
+#                  the median of 3 immediately repeated runs with no change;
+#                  `force_ms` is one `--force` run. Machine: Apple Silicon
+#                  macOS laptop. Timings are indicative only; T37 owns the
+#                  measured protocol.
+
+[[project]]
+name = "fluent"
+distribution = "private local repository, not redistributable"
+license = "proprietary, not published"
+commit = "fc96ad75ea658e60df52dbbb8543077b0b931d14"
+languages = ["php"]
+rationale = "Large private Laravel application with substantial first-party code and many methods sharing a name across classes; never public, so unlikely to be memorized."
+
+[project.files]
+tracked = 2824
+php = 1221
+php_in_excluded_dirs = 1
+blade_php = 27
+ts = 0
+d_ts = 0
+tsx = 0
+vue = 777
+js = 235
+mjs = 244
+cjs = 51
+
+[project.rivet_index]
+measured_with = "360c13b"
+files_seen = 2815
+files_indexed = 1219
+skipped_unsupported = 1595
+skipped_binary = 0
+skipped_size = 0
+skipped_encoding = 0
+skipped_parse_error = 1
+skipped_resource_limit = 0
+symbols = 11336
+uses = 125299
+bindings = 30751
+cold_ms = 3485
+noop_refresh_ms = 29315
+force_ms = 17294
+
+[[project]]
+name = "timesheet"
+distribution = "private local repository, not redistributable"
+license = "proprietary, not published"
+commit = "17c26bb26099ef24bf750da7cdec8a3445081a04"
+languages = ["php", "typescript"]
+rationale = "Smaller private Laravel + Vue 3 application: the corpus's only TypeScript, and a second, smaller PHP project; never public."
+# Known limitation for T41 onward: only 48 .ts files (plus 2 .d.ts) and no .tsx.
+# The front end is mostly .vue single-file components, which the TypeScript
+# plan does not support (docs/ADDING-A-LANGUAGE.md "MVP support boundary").
+known_limitations = ["typescript_small: 48 .ts + 2 .d.ts, 0 .tsx", "vue_sfc_unsupported: 326 .vue files"]
+
+[project.files]
+tracked = 719
+php = 276
+php_in_excluded_dirs = 26
+blade_php = 42
+ts = 48
+d_ts = 2
+tsx = 0
+vue = 326
+js = 1
+mjs = 0
+cjs = 0
+
+[project.rivet_index]
+measured_with = "360c13b"
+files_seen = 691
+files_indexed = 250
+skipped_unsupported = 441
+skipped_binary = 0
+skipped_size = 0
+skipped_encoding = 0
+skipped_parse_error = 0
+skipped_resource_limit = 0
+symbols = 1177
+uses = 15610
+bindings = 2448
+cold_ms = 292
+noop_refresh_ms = 342
+force_ms = 418

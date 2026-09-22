@@ -9,6 +9,10 @@
 # Benchmark raw artifacts are large and may contain transcripts; keep results/ and preregistration.
 /benchmark/raw/
 
+# Private benchmark corpus copies must never enter this public repository.
+# fetch-corpus.sh refuses in-repo destinations; this is a second guard.
+/benchmark/corpus/
+
 # Editors and OS
 .DS_Store
 Thumbs.db
