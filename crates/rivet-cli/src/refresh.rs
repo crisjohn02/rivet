@@ -480,7 +480,25 @@ fn refresh_inventory(
     // Resolve every use for the snapshot being published. The rules run over
     // the same rows written below, so bindings and facts commit in one
     // transaction (spec §12.3).
-    let bindings = rivet_index::Resolver::new(&symbols, &uses, &scopes).resolve();
+    //
+    // A PHP file that should have been indexed but was not may declare a
+    // namespaced function, so the global function fallback is suppressed
+    // (AF2). A skipped non-UTF-8 path has no files row; it counts when its
+    // lossy spelling names an enabled PHP file.
+    let php_unindexed = rivet_index::unindexed_php_files(&files)
+        || walk.skipped.iter().any(|path| {
+            language_for_path(&path.lossy).is_some_and(|id| {
+                id.name() == "php"
+                    && config
+                        .languages
+                        .enabled
+                        .iter()
+                        .any(|name| name.as_str() == id.name())
+            })
+        });
+    let bindings = rivet_index::Resolver::new(&symbols, &uses, &scopes)
+        .with_unindexed_php_files(php_unindexed)
+        .resolve();
     let binding_count = bindings.len() as u64;
 
     let fingerprint = Fingerprint {
@@ -790,6 +808,7 @@ fn use_rows(
 /// to its canonical ID, the only form usable after a reparse.
 #[cfg(feature = "lang-php")]
 fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String]) -> Vec<ScopeRow> {
+    use rivet_core::Span;
     use rivet_core::extract::{CallArg, NewBinding, ScopeImport, TypedBinding};
 
     /// The exact persisted `scopes.facts_json` shape.
@@ -801,6 +820,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         call_args: &'a [CallArg],
         unanalysable: bool,
         namespace_unattributed: bool,
+        class_constant_accesses: &'a [Span],
         declares: Vec<&'a str>,
     }
 
@@ -821,6 +841,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                 call_args: &scope.facts.call_args,
                 unanalysable: scope.facts.unanalysable,
                 namespace_unattributed: scope.facts.namespace_unattributed,
+                class_constant_accesses: &scope.facts.class_constant_accesses,
                 declares,
             };
             ScopeRow {
@@ -838,6 +859,8 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
 /// PHP call, type, and import names are case-insensitive, so those fold to
 /// lowercase; property and constant reads/writes keep their exact spelling.
 /// An `Unknown` use has no known referenced kind, so it is stored lowercase.
+/// Folding is ASCII-only, as PHP folds identifiers (AF2), so it matches the
+/// declaration side in [`rivet_languages::php::lookup_name`].
 #[cfg(feature = "lang-php")]
 fn use_lookup_name(spelling: &str, ref_kind: rivet_core::RefKind) -> String {
     use rivet_core::{RefKind, SymbolKind};
@@ -847,7 +870,7 @@ fn use_lookup_name(spelling: &str, ref_kind: rivet_core::RefKind) -> String {
             rivet_languages::php::lookup_name(spelling, SymbolKind::Property)
         }
         RefKind::Call | RefKind::Type | RefKind::Import | RefKind::Unknown => {
-            spelling.to_lowercase()
+            spelling.to_ascii_lowercase()
         }
     }
 }

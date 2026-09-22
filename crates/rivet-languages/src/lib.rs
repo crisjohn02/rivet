@@ -95,6 +95,10 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **7** — AF2: stored PHP `lookup_name`s for symbols and uses fold case by
+///   ASCII only, as PHP does, instead of by Unicode, and `ScopeFacts` gained
+///   `class_constant_accesses`, so a class-constant read is told apart from an
+///   instance property read.
 /// - **6** — AF1: each namespace block of a PHP file gets its own top-level
 ///   scope (`ns{block}:file`) instead of sharing `top:file`, top-level closures
 ///   chain to it, a global `namespace { }` block's declarations lost their
@@ -115,13 +119,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=6";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=7";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=6";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=7";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=6";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=7";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

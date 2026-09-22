@@ -6,12 +6,15 @@
 //!
 //! 1. a canonical ID containing `#`;
 //! 2. a native qualified name containing `\` or `::` (exact, then
-//!    case-insensitively for case-insensitive kinds);
+//!    ASCII-case-insensitively for case-insensitive kinds);
 //! 3. `file:line`, a repository-relative path followed by a positive line after
 //!    the final colon;
 //! 4. a dotted path, comparing separator-normalized qualified names at a
 //!    component boundary;
 //! 5. a short name, matched against the persisted `lookup_name`.
+//!
+//! Every case-insensitive comparison folds ASCII letters only, as PHP does and
+//! as the persisted `lookup_name` is folded (AF2).
 //!
 //! Canonical IDs and native qualified names are tried before `file:line` so a
 //! native `Foo::bar` is never misread as a path. Everything here works from
@@ -62,12 +65,12 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
         if !exact.is_empty() {
             return Ok(QueryOutcome::Symbols(sort_rows(exact)));
         }
-        let folded = query.to_lowercase();
+        let folded = query.to_ascii_lowercase();
         let case_folded: Vec<SymbolRow> = store
             .list_symbols()?
             .into_iter()
             .filter(|row| {
-                case_insensitive_kind(row.kind) && row.qualified_name.to_lowercase() == folded
+                case_insensitive_kind(row.kind) && row.qualified_name.to_ascii_lowercase() == folded
             })
             .collect();
         if !case_folded.is_empty() {
@@ -102,13 +105,13 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
         if !exact.is_empty() {
             return Ok(QueryOutcome::Symbols(sort_rows(exact)));
         }
-        let folded = normalized_query.to_lowercase();
+        let folded = normalized_query.to_ascii_lowercase();
         let case_folded: Vec<SymbolRow> = rows
             .into_iter()
             .filter(|row| {
                 case_insensitive_kind(row.kind)
                     && ends_with_component(
-                        &normalize_separators(&row.qualified_name).to_lowercase(),
+                        &normalize_separators(&row.qualified_name).to_ascii_lowercase(),
                         &folded,
                     )
             })
@@ -120,8 +123,11 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
 
     // (5) Short name. PHP identifiers are case-insensitive except properties and
     // constants, so a lowercased retry is filtered to case-insensitive kinds.
+    // The retry folds ASCII only, exactly as the stored `lookup_name` was
+    // folded (`rivet_languages::php::lookup_name`), because PHP folds only
+    // ASCII letters (AF2).
     let mut short = store.find_symbols_by_lookup_name(query)?;
-    let lowered = query.to_lowercase();
+    let lowered = query.to_ascii_lowercase();
     if lowered != query {
         for row in store.find_symbols_by_lookup_name(&lowered)? {
             if case_insensitive_kind(row.kind)
@@ -245,7 +251,7 @@ pub fn suggestions(store: &Store, query: &str) -> Result<Vec<String>, Error> {
             continue;
         }
         let distance = if case_insensitive_kind(row.kind) {
-            levenshtein(&needle.to_lowercase(), &row.name.to_lowercase())
+            levenshtein(&needle.to_ascii_lowercase(), &row.name.to_ascii_lowercase())
         } else {
             levenshtein(&needle, &row.name)
         };
@@ -431,7 +437,7 @@ mod tests {
             id: format!("{file}#{qualified_name}"),
             file: file.to_string(),
             name: name.to_string(),
-            lookup_name: name.to_lowercase(),
+            lookup_name: name.to_ascii_lowercase(),
             qualified_name: qualified_name.to_string(),
             kind,
             parent_id: None,
@@ -629,5 +635,39 @@ mod tests {
         ]);
         let ranked = super::suggestions(&store, "App\\SurveyService::lunch").unwrap();
         assert_eq!(ranked[0], "App\\SurveyService::launch");
+    }
+
+    #[test]
+    fn case_insensitive_forms_fold_ascii_only() {
+        // PHP folds ASCII letters only (AF2): `Ärger` and `ärger` are distinct
+        // classes, while `Foo` is still found as `FOO`.
+        let store = store_with(vec![
+            symbol("a.php", "Foo", "App\\Foo", SymbolKind::Class, 0, 10, 1, 1),
+            symbol(
+                "a.php",
+                "Ärger",
+                "App\\Ärger",
+                SymbolKind::Class,
+                20,
+                30,
+                2,
+                2,
+            ),
+        ]);
+        let names = |query: &str| -> Vec<String> {
+            symbols(resolve_query(&store, query).unwrap())
+                .into_iter()
+                .map(|row| row.qualified_name)
+                .collect()
+        };
+        assert_eq!(names("FOO"), vec!["App\\Foo"]);
+        assert_eq!(names("app\\foo"), vec!["App\\Foo"]);
+        assert_eq!(names("app.FOO"), vec!["App\\Foo"]);
+        assert_eq!(names("Ärger"), vec!["App\\Ärger"]);
+        assert_eq!(names("ÄRGER"), vec!["App\\Ärger"]);
+        assert_eq!(names("APP\\ÄRGER"), vec!["App\\Ärger"]);
+        assert!(names("ärger").is_empty());
+        assert!(names("app\\ärger").is_empty());
+        assert!(names("app.ärger").is_empty());
     }
 }

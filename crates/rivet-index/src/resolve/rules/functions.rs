@@ -5,6 +5,13 @@
 //! namespace; otherwise the global `name`. When both a namespaced and a global
 //! function exist, the namespaced one is correct, not ambiguous.
 //!
+//! The global fallback is honest only when no unindexed file could declare the
+//! namespaced function (AF2). When some PHP file of the snapshot should have
+//! been indexed but was not ([`RuleCtx::php_files_unindexed`]), a call in a
+//! namespace whose `N\name` is not indexed records nothing. A namespaced
+//! function that is indexed still wins, and a call outside any namespace looks
+//! up the global name directly, which is not a fallback.
+//!
 //! A `use function` alias is owned by `imports.rs`; if an alias is visible but
 //! its target is unindexed, this rule must not fall back to `N\name` or the
 //! global name. Method and static calls carry a receiver and are outside T19.
@@ -59,6 +66,11 @@ pub(crate) fn resolve(
         let qualified = format!("{namespace}\\{}", use_row.spelling);
         if let Some(row) = ctx.unique_function(&qualified) {
             return Some((row.id.clone(), Resolution::Exact));
+        }
+        // An unindexed PHP file may declare `N\name`; falling back to the
+        // global function would then bind the wrong declaration (AF2).
+        if ctx.php_files_unindexed {
+            return None;
         }
     }
     ctx.unique_function(&use_row.spelling)
