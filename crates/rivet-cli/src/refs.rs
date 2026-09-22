@@ -28,6 +28,7 @@ use rivet_index::{QueryOutcome, resolve_query, suggestions};
 use rivet_store::{Store, SymbolRow};
 use serde_json::{Map, Value, json};
 
+use crate::human;
 use crate::index;
 use crate::references::{self, Mode};
 use crate::refresh::{acquire_snapshot, open_context};
@@ -258,31 +259,87 @@ fn parse_kinds(value: Option<&str>) -> Result<Option<HashSet<RefKind>>, CliError
     Ok(Some(kinds))
 }
 
-/// The compact human rendering of a successful reference lookup.
+/// The human rendering of a successful reference lookup (spec §15).
+///
+/// The queried symbol, a count header with the non-zero tiers, one aligned
+/// line per reference (`file:line:column`, containing symbol, kind, tier), the
+/// pagination line when the page is truncated, and the coverage notes. A
+/// `name_match` line ends in `?`; a candidate bound to another declaration
+/// also names that `resolved_target`.
 pub fn human(value: &Value) -> String {
     let symbol = &value["symbol"];
     let mut output = format!(
-        "{} references to {} ({})\n",
-        value["total"].as_u64().unwrap_or(0),
-        symbol["qualified_name"].as_str().unwrap_or(""),
-        value["mode"].as_str().unwrap_or("references"),
+        "{}  {}  {}\n",
+        human::text(&symbol["qualified_name"]),
+        human::text(&symbol["kind"]),
+        human::span(symbol),
     );
-    if let Some(items) = value["references"].as_array() {
-        for item in items {
-            // Human output marks `name_match` results with `?` (spec §11.3).
-            let mark = if item["resolution"] == "name_match" {
-                "?"
-            } else {
-                " "
-            };
-            output.push_str(&format!(
-                "{mark}{}:{}:{}  {}\n",
-                item["file"].as_str().unwrap_or(""),
-                item["line"].as_u64().unwrap_or(0),
-                item["column"].as_u64().unwrap_or(0),
-                item["ref_kind"].as_str().unwrap_or(""),
-            ));
-        }
+
+    let total = value["total"].as_u64().unwrap_or(0);
+    let noun = if total == 1 {
+        "reference"
+    } else {
+        "references"
+    };
+    let mut header = format!("{total} {noun}");
+    let tiers: Vec<String> = ["exact", "scoped", "name_match"]
+        .iter()
+        .filter_map(|tier| {
+            let count = value["by_resolution"][*tier].as_u64().unwrap_or(0);
+            (count > 0).then(|| format!("{count} {tier}"))
+        })
+        .collect();
+    if !tiers.is_empty() {
+        header.push_str(&format!("  ({})", tiers.join(", ")));
+    }
+    if value["mode"] == "candidates" {
+        header.push_str("  mode: candidates");
+    }
+    output.push_str(&header);
+    output.push('\n');
+
+    let items = value["references"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    if !items.is_empty() {
+        output.push('\n');
+        let target = &symbol["id"];
+        let rows: Vec<Vec<String>> = items
+            .iter()
+            .map(|item| {
+                let containing = match &item["containing_symbol"] {
+                    Value::Null => "(file scope)".to_string(),
+                    containing => human::text(&containing["qualified_name"]).to_string(),
+                };
+                let mut resolution = human::tier(&item["resolution"]);
+                // A candidate bound elsewhere keeps its real target
+                // (OUTPUT-CONTRACT "Pagination and resolution").
+                if let Some(bound) = item["resolved_target"].as_str()
+                    && item["resolved_target"] != *target
+                {
+                    resolution.push_str(&format!("  -> {bound}"));
+                }
+                vec![
+                    human::site(item),
+                    containing,
+                    human::text(&item["ref_kind"]).to_string(),
+                    resolution,
+                ]
+            })
+            .collect();
+        output.push_str(&human::columns(&rows, ""));
+    }
+    if let Some(line) = human::page_line_of(value, items.len()) {
+        output.push_str(&line);
+        output.push('\n');
+    }
+    if total == 0 {
+        output.push_str("an empty result does not prove there are no references\n");
+    }
+    let notes = human::index_notes(&value["index"]);
+    if !notes.is_empty() {
+        output.push('\n');
+        output.push_str(&notes);
     }
     output
 }

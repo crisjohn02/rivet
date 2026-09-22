@@ -950,7 +950,8 @@ fn repeated_invocations_are_byte_identical() {
 }
 
 // ---------------------------------------------------------------------------
-// Human mode follows `symbol`/`refs`: a compact summary, human errors.
+// Human mode (T34, spec §16.1): a header per segment followed by its
+// source; `human_output.rs` holds the full golden. Human errors.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -959,15 +960,22 @@ fn human_mode_prints_a_compact_summary() {
     let output = run(temp.path(), &["context", LAUNCH]);
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stderr.is_empty());
+    let text = String::from_utf8(output.stdout).expect("UTF-8");
+    let headers: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("── ") || line.starts_with("estimated_tokens"))
+        .collect();
     assert_eq!(
-        String::from_utf8(output.stdout).expect("UTF-8"),
-        "SurveyService.php:18-21  App\\Services\\SurveyService::launch  [target, full]\n\
-         ReportService.php:21-25  App\\Reporting\\ReportService::runAlias  [caller, full]\n\
-         ReportService.php:28-31  App\\Reporting\\ReportService::runTyped  [caller, full]\n\
-         SurveyService.php:24-27  App\\Services\\SurveyService::relaunch  [caller, full]\n\
-         ReportService.php:34-37  App\\Reporting\\ReportService::runUnknown  [caller, full]\n\
-         SurveyService.php:9-28  App\\Services\\SurveyService  [parent, signature]\n\
-         estimated_tokens: 175 / 4000  (tokenizer: utf8-bytes-v1; budget_scope: source)\n"
+        headers,
+        vec![
+            "── SurveyService.php:18-21  App\\Services\\SurveyService::launch  [target, full]",
+            "── ReportService.php:21-25  App\\Reporting\\ReportService::runAlias  [caller, full]",
+            "── ReportService.php:28-31  App\\Reporting\\ReportService::runTyped  [caller, full]",
+            "── SurveyService.php:24-27  App\\Services\\SurveyService::relaunch  [caller, full]",
+            "── ReportService.php:34-37  App\\Reporting\\ReportService::runUnknown  [caller, full] ?",
+            "── SurveyService.php:9-28  App\\Services\\SurveyService  [parent, signature]",
+            "estimated_tokens: 175 / 4000  (tokenizer: utf8-bytes-v1; budget_scope: source)",
+        ]
     );
 
     let error = run(temp.path(), &["context", LAUNCH, "--tokens", "9"]);

@@ -4,16 +4,50 @@
 //! The command implementations live in the `rivet_cli` library target so
 //! integration tests can drive the shared pipelines directly.
 
-use clap::Parser;
 use clap::error::ErrorKind;
+use clap::{ColorChoice, Parser};
 use serde_json::Map;
 
 use rivet_cli::transport::{CliError, emit_error, emit_success};
-use rivet_cli::{context_cmd, index, init, refs, snippet, symbol};
+use rivet_cli::{context_cmd, human, index, init, refs, snippet, symbol};
 
-/// Agent-native codebase CLI: structural code navigation and token-budgeted context for coding agents.
+/// The help layout for every command (spec §30.1): examples first, then what
+/// the command does and when to prefer it over `rg`, then clap's generated
+/// usage and flag list, so the flags shown are always the flags parsed.
+const HELP_TEMPLATE: &str =
+    "{before-help}{about}\n\n{usage-heading} {usage}\n\n{all-args}{after-help}";
+
+const TOP_EXAMPLES: &str = "\
+Examples:
+  rivet context SurveyService.launch --tokens 3000
+  rivet symbol SurveyService.launch
+  rivet refs SurveyService.launch --json
+  rivet symbol app/Services/SurveyService.php:20
+  rivet init --write-snippet";
+
+const TOP_AFTER: &str = "\
+When to use which:
+  symbol   use instead of `rg` to find where a name is declared, with signature and callers
+  refs     use instead of `rg` to list uses of one declaration, not every same-name string
+  context  use instead of `rg` plus reading files: target and related source in one budget
+  index    never instead of `rg`: optional warm-up and coverage report
+  init     never instead of `rg`: one-time setup of .rivet/config.toml and instructions
+  snippet  never instead of `rg`: prints the instruction block for AGENTS.md or CLAUDE.md
+
+Names: short (launch), dotted (SurveyService.launch), qualified, canonical ID, or file:line.
+Queries refresh the index automatically. `?` marks name-only (name_match) evidence.
+Run `rivet help <command>` for its examples and flags.";
+
+/// Structural code navigation and token-budgeted source retrieval for coding agents.
 #[derive(Debug, Parser)]
-#[command(name = "rivet", version)]
+#[command(
+    name = "rivet",
+    version,
+    color = ColorChoice::Never,
+    help_template = HELP_TEMPLATE,
+    before_help = TOP_EXAMPLES,
+    after_help = TOP_AFTER
+)]
 struct Cli {
     /// Emit exactly one machine-readable JSON object.
     #[arg(long, global = true)]
@@ -25,16 +59,41 @@ struct Cli {
 /// The six MVP commands.
 #[derive(Debug, clap::Subcommand)]
 enum Command {
-    /// Set up rivet configuration and instructions in a repository.
+    /// Set up .rivet/config.toml and, with --write-snippet, the agent instruction block.
+    #[command(
+        help_template = HELP_TEMPLATE,
+        before_help = "\
+Examples:
+  rivet init
+  rivet init --write-snippet
+  rivet init --write-snippet --snippet-file CLAUDE.md --json",
+        after_help = "\
+Use this instead of `rg` when: never; it is setup, not search. Run it once per repository.
+Safe to re-run: existing files are left alone and the managed block is updated in place.
+After setup, queries refresh the index automatically; no `rivet index` step is needed."
+    )]
     Init {
-        /// Install or update the managed instruction block in AGENTS.md or CLAUDE.md.
+        /// Install or update the managed instruction block.
         #[arg(long = "write-snippet")]
         write_snippet: bool,
-        /// Snippet destination, AGENTS.md or CLAUDE.md (requires `--write-snippet`).
+        /// Block destination; requires `--write-snippet`.
         #[arg(long = "snippet-file", value_name = "AGENTS.md|CLAUDE.md")]
         snippet_file: Option<String>,
     },
-    /// Build or refresh the local index.
+    /// Build or refresh the local index and report coverage (optional; queries refresh).
+    #[command(
+        help_template = HELP_TEMPLATE,
+        before_help = "\
+Examples:
+  rivet index
+  rivet index --json
+  rivet index --force --timing --json
+  rivet index --languages php",
+        after_help = "\
+Use this instead of `rg` when: never; it builds the index that symbol/refs/context read.
+No routine call is needed: every query refreshes first. Use it to warm the cache,
+to see coverage (skipped files, diagnostics), or with --force after a suspect cache."
+    )]
     Index {
         /// Rebuild all facts even when content is unchanged.
         #[arg(long)]
@@ -52,7 +111,21 @@ enum Command {
         #[arg(long = "no-refresh")]
         no_refresh: bool,
     },
-    /// Locate a symbol declaration.
+    /// Locate a declaration: kind, location, signature, and its calls and callers.
+    #[command(
+        help_template = HELP_TEMPLATE,
+        before_help = "\
+Examples:
+  rivet symbol SurveyService.launch
+  rivet symbol 'App\\Services\\SurveyService::launch' --source
+  rivet symbol app/Services/SurveyService.php:20 --signature-only
+  rivet symbol SurveyService.launch --min-resolution scoped --limit 20 --json",
+        after_help = "\
+Use this instead of `rg` when you need where a name is declared, not every line mentioning it.
+Queries refresh automatically. `?` marks name-only (name_match) evidence; verify it.
+Several matches exit 5 with candidate IDs: rerun with a quoted canonical ID.
+Both call lists page with --limit/--offset; a truncated list prints its next --offset."
+    )]
     Symbol {
         /// Symbol name, qualified name, or file:line to look up.
         query: String,
@@ -65,20 +138,34 @@ enum Command {
         /// Omit the call/caller lists.
         #[arg(long = "signature-only")]
         signature_only: bool,
-        /// Include the symbol's source slice from stored bytes.
+        /// Include the declaration's stored source text.
         #[arg(long)]
         source: bool,
-        /// Minimum resolution tier to include in both call lists.
+        /// Minimum tier kept in both call lists.
         #[arg(long = "min-resolution", value_name = "exact|scoped|name_match")]
         min_resolution: Option<String>,
         /// Freshness mode, overriding config.
         #[arg(long, value_name = "content|metadata")]
         freshness: Option<String>,
-        /// Answer from the committed snapshot without refreshing.
+        /// Use the committed snapshot; skip the refresh.
         #[arg(long = "no-refresh")]
         no_refresh: bool,
     },
-    /// Find references to a symbol.
+    /// Find references to one declaration, with containing symbol and resolution tier.
+    #[command(
+        help_template = HELP_TEMPLATE,
+        before_help = "\
+Examples:
+  rivet refs SurveyService.launch
+  rivet refs SurveyService.launch --min-resolution scoped
+  rivet refs SurveyService.launch --mode candidates --kind call
+  rivet refs SurveyService.launch --limit 50 --offset 50 --json",
+        after_help = "\
+Use this instead of `rg` when you want uses of one declaration, not every same-name string.
+Queries refresh automatically. Tiers: exact, scoped, name_match (`?`, name-only; verify).
+--mode candidates adds same-name uses bound elsewhere, for auditing. An empty result
+never proves there are no runtime references; check the coverage line."
+    )]
     Refs {
         /// Symbol name, qualified name, or file:line to look up.
         query: String,
@@ -100,11 +187,23 @@ enum Command {
         /// Freshness mode, overriding config.
         #[arg(long, value_name = "content|metadata")]
         freshness: Option<String>,
-        /// Answer from the committed snapshot without refreshing.
+        /// Use the committed snapshot; skip the refresh.
         #[arg(long = "no-refresh")]
         no_refresh: bool,
     },
-    /// Build token-budgeted source context around a symbol.
+    /// Target source plus related callers, callees, and types within a token budget.
+    #[command(
+        help_template = HELP_TEMPLATE,
+        before_help = "\
+Examples:
+  rivet context SurveyService.launch --tokens 3000
+  rivet context SurveyService.launch --depth 2 --exclude-tests
+  rivet context 'App\\Services\\SurveyService::launch' --collapse never --json",
+        after_help = "\
+Use this instead of `rg` when you would otherwise open several files to understand one symbol.
+Queries refresh automatically. Each segment is `[reason, form]`; `signature` is a summary,
+not the full body. The budget counts source only (utf8-bytes-v1), not metadata."
+    )]
     Context {
         /// Symbol name, qualified name, or file:line to look up.
         query: String,
@@ -144,11 +243,21 @@ enum Command {
         /// Freshness mode, overriding config.
         #[arg(long, value_name = "content|metadata")]
         freshness: Option<String>,
-        /// Answer from the committed snapshot without refreshing.
+        /// Use the committed snapshot; skip the refresh.
         #[arg(long = "no-refresh")]
         no_refresh: bool,
     },
-    /// Print the managed agent instruction block.
+    /// Print the managed agent instruction block for AGENTS.md or CLAUDE.md.
+    #[command(
+        help_template = HELP_TEMPLATE,
+        before_help = "\
+Examples:
+  rivet snippet
+  rivet snippet --json",
+        after_help = "\
+Use this instead of `rg` when: never; it prints instructions, it does not search.
+`rivet init --write-snippet` installs the same block. Needs no repository."
+    )]
     Snippet,
 }
 
@@ -328,7 +437,7 @@ fn fail(json: bool, error: &CliError, command: &str) -> ! {
             (*error.extra).clone(),
         );
     }
-    eprintln!("rivet {command}: {}", error.message);
+    eprint!("{}", human::error_text(command, error));
     std::process::exit(error.exit);
 }
 
