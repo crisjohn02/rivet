@@ -174,6 +174,119 @@ pub fn signature_summary(
     summary
 }
 
+/// Orders a container's direct members into source order from stored facts.
+///
+/// Extraction already yields members in source order, but a caller that
+/// rebuilds them from stored rows (the `context` signature form) only has
+/// spans, names, and signatures. Sorting by `(start_byte, end_byte
+/// descending, qualified_name)` recovers source order everywhere except
+/// among the members of one multi-name declaration (`public int $left,
+/// $right = 2;`), which share a span. For such a group the declaration's
+/// collapsed text is scanned left to right: every member's stored signature is
+/// the shared prefix plus that member's own element text (see
+/// [`element_header`]), so each element is matched at the scan position in
+/// turn. If the scan cannot account for every element (an interleaved
+/// comment, say), the group keeps its `qualified_name` order rather than a
+/// guessed one.
+pub fn order_members(members: &mut [ExtractedSymbol], source: &str) {
+    members.sort_by(|a, b| {
+        a.span
+            .start_byte()
+            .cmp(&b.span.start_byte())
+            .then_with(|| b.span.end_byte().cmp(&a.span.end_byte()))
+            .then_with(|| a.qualified_name.as_bytes().cmp(b.qualified_name.as_bytes()))
+    });
+    let mut start = 0;
+    while start < members.len() {
+        let span = members[start].span;
+        let mut end = start + 1;
+        while end < members.len() && members[end].span == span {
+            end += 1;
+        }
+        if end - start > 1
+            && let Some(order) = shared_span_order(&members[start..end], source)
+        {
+            let group: Vec<ExtractedSymbol> = order
+                .iter()
+                .map(|&index| members[start + index].clone())
+                .collect();
+            members[start..end].clone_from_slice(&group);
+        }
+        start = end;
+    }
+}
+
+/// The source order of members sharing one declaration span, as indices into
+/// `group`, or `None` when the declaration text does not account for them.
+fn shared_span_order(group: &[ExtractedSymbol], source: &str) -> Option<Vec<usize>> {
+    let signatures: Vec<&str> = group
+        .iter()
+        .map(|member| member.signature.as_deref())
+        .collect::<Option<_>>()?;
+    let bytes = source.as_bytes();
+    let start = group[0].span.start_byte() as usize;
+    let end = group[0].span.end_byte() as usize;
+    if start > end || end > bytes.len() {
+        return None;
+    }
+    let raw = text(bytes, start, end);
+    let raw = raw.trim_end();
+    let declaration = collapse_whitespace(raw.strip_suffix(';').unwrap_or(raw));
+
+    // The shared prefix ends with the whitespace before the first element
+    // (`public int `); back the common byte prefix off to its last space so a
+    // shared leading name fragment (`$left`, `$lower`) is not taken as prefix.
+    let first = signatures[0].as_bytes();
+    let mut common = first.len();
+    for signature in &signatures[1..] {
+        common = common.min(
+            first
+                .iter()
+                .zip(signature.as_bytes())
+                .take_while(|(a, b)| a == b)
+                .count(),
+        );
+    }
+    let prefix = first[..common].iter().rposition(|byte| *byte == b' ')? + 1;
+    if !declaration.as_bytes().starts_with(&first[..prefix]) {
+        return None;
+    }
+
+    let elements: Vec<&[u8]> = signatures
+        .iter()
+        .map(|signature| &signature.as_bytes()[prefix..])
+        .collect();
+    let text = declaration.as_bytes();
+    let mut position = prefix;
+    let mut order = Vec::with_capacity(group.len());
+    let mut used = vec![false; group.len()];
+    while order.len() < group.len() {
+        let rest = &text[position..];
+        // The longest element that matches here and ends at a separator, so
+        // `$a` never claims the start of `$ab`.
+        let chosen = (0..elements.len())
+            .filter(|&index| {
+                !used[index]
+                    && rest.starts_with(elements[index])
+                    && matches!(rest.get(elements[index].len()), None | Some(b',' | b' '))
+            })
+            .max_by(|&a, &b| elements[a].len().cmp(&elements[b].len()).then(b.cmp(&a)))?;
+        used[chosen] = true;
+        order.push(chosen);
+        position += elements[chosen].len();
+        while text.get(position) == Some(&b' ') {
+            position += 1;
+        }
+        if text.get(position) == Some(&b',') {
+            position += 1;
+        }
+        while text.get(position) == Some(&b' ') {
+            position += 1;
+        }
+    }
+    (position == text.len()).then_some(order)
+}
+
 /// Whether `outer` strictly contains `inner`.
 ///
 /// Strict so that two members sharing one declaration span (a multi-name
@@ -220,7 +333,7 @@ mod tests {
 
     use crate::{LanguageId, grammar, php};
 
-    use super::signature_summary;
+    use super::{order_members, signature_summary};
 
     fn fixture_path(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -487,5 +600,66 @@ abstract class AbstractThing
     public function __construct(private int $seed, public string $tag = 'x') { … }
 }";
         assert_eq!(signature_summary(&class, &members, &source), expected);
+    }
+
+    /// Parses inline PHP source and extracts it.
+    fn extract_source(source: &str) -> ExtractedFile {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&grammar(LanguageId::Php))
+            .expect("pinned PHP grammar must load");
+        let tree = parser
+            .parse(source.as_bytes(), None)
+            .expect("parser must return a tree");
+        php::extract(source.as_bytes(), &tree)
+    }
+
+    /// Reversing the extracted members and re-ordering them from stored facts
+    /// recovers source order, so the summary is unchanged.
+    #[test]
+    fn order_members_recovers_source_order_from_any_order() {
+        let (source, extracted) = extract_fixture("Members.php");
+        let source = String::from_utf8(source).expect("fixture is UTF-8");
+        let (class, members) = container_members(&extracted, "App\\Members\\AbstractThing");
+        let expected = signature_summary(&class, &members, &source);
+
+        let mut shuffled: Vec<_> = members.iter().rev().cloned().collect();
+        order_members(&mut shuffled, &source);
+        assert_eq!(shuffled, members);
+        assert_eq!(signature_summary(&class, &shuffled, &source), expected);
+    }
+
+    /// Members sharing one span are ordered by their position in the
+    /// declaration, not by name, even when a value repeats another element's
+    /// text or one name is a prefix of another.
+    #[test]
+    fn order_members_orders_a_shared_span_by_position() {
+        let source = "<?php\nfinal class M\n{\n    public const ZED = 'A = 1', A = 1, AB = 2;\n    public int $zeta,$alpha = 2,\n        $al;\n}\n";
+        let extracted = extract_source(source);
+        let (class, members) = container_members(&extracted, "M");
+        let mut sorted = members.clone();
+        sorted.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name));
+        order_members(&mut sorted, source);
+        let names: Vec<&str> = sorted.iter().map(|member| member.name.as_str()).collect();
+        assert_eq!(names, vec!["ZED", "A", "AB", "$zeta", "$alpha", "$al"]);
+        assert_eq!(sorted, members);
+        assert_eq!(
+            signature_summary(&class, &sorted, source),
+            signature_summary(&class, &members, source)
+        );
+    }
+
+    /// When the declaration text does not account for every element (a
+    /// comment between elements), the group keeps `qualified_name` order
+    /// rather than a guessed one.
+    #[test]
+    fn order_members_falls_back_to_name_order_when_the_scan_fails() {
+        let source = "<?php\nfinal class M\n{\n    public int $b, /* note */ $a;\n}\n";
+        let extracted = extract_source(source);
+        let (_class, members) = container_members(&extracted, "M");
+        let mut ordered = members.clone();
+        order_members(&mut ordered, source);
+        let names: Vec<&str> = ordered.iter().map(|member| member.name.as_str()).collect();
+        assert_eq!(names, vec!["$a", "$b"]);
     }
 }

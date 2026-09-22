@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T27 |
-| Next task | T28 |
+| Last completed task | T28 |
+| Next task | T29 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | AF5: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 10 unit + 16 bindings + 9 context_rank + 19 context_traversal + 12 coverage_honesty + 7 freshness_modes + 7 index_json + 1 index_uses + 15 kind_aware_lookup + 11 namespace_scopes + 10 receiver_conservatism + 7 refresh + 10 refs_json + 4 reresolve + 7 silent_misses + 9 symbol_calls_json + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 61, rivet-index 90, rivet-languages 52 unit + 12 php_extract + 2 php_uses, rivet-parser 3 unit + 4 grammar_smoke, rivet-store 28; 0 failed); `python3 tests/gold/check_gold.py` verified 51 entries. |
+| Last checks | T28: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 23 unit + 16 bindings + 11 context_fit + 9 context_rank + 19 context_traversal + 12 coverage_honesty + 7 freshness_modes + 7 index_json + 1 index_uses + 15 kind_aware_lookup + 11 namespace_scopes + 10 receiver_conservatism + 7 refresh + 10 refs_json + 4 reresolve + 7 silent_misses + 9 symbol_calls_json + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 61, rivet-index 90, rivet-languages 57 unit + 12 php_extract + 2 php_uses, rivet-parser 3 unit + 4 grammar_smoke, rivet-store 28; 0 failed); `python3 tests/gold/check_gold.py` verified 51 entries. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -112,7 +112,7 @@ Read: spec §§16 and 23; OUTPUT-CONTRACT context; ADDING-A-LANGUAGE signature b
 | [x] | T25a | Review fix for T25: correct the collapsed container form. Render each declared name's own signature instead of repeating the shared header, omit the body marker on bodyless declarations, and settle whether promoted properties are listed separately or left implied by the constructor. | A multi-name declaration renders one line per name with only that name; an abstract or interface method has no `{ … }`; a promoted property appears once, by a stated rule. Must land before T28 consumes the summary. |
 | [x] | T26 | Collect direct context candidates and apply fixed integer priorities/deduplication. | Types, callees, callers, used imports, parent, and reference-based tests have deterministic reasons/order; name-only links do not expand context. |
 | [x] | T27 | Add depth-two traversal, relationship flags, and fixed work caps. | Cycles/high fanout terminate predictably; excluded relationships stay excluded; cap metadata is truthful. |
-| [ ] | T28 | Implement source estimation and greedy budget fitting for all collapse modes. | Exact-fit/tiny-budget cases obey the estimate; a target that cannot fit yields error 8; no partial body or over-budget success. |
+| [x] | T28 | Implement source estimation and greedy budget fitting for all collapse modes. | Exact-fit/tiny-budget cases obey the estimate; a target that cannot fit yields error 8; no partial body or over-budget success. |
 | [ ] | T29 | Suppress parent/child source overlap and count budget/overlap/limit omissions. | Target/member/parent examples contain no duplicated full bodies and estimates use the final emitted summaries. |
 | [ ] | T30 | Wire `context <query>` through discovery, refresh, query resolution, and JSON output. | A single invocation returns useful target/related source without requiring earlier symbol/refs commands. All context options and errors match the contract. |
 

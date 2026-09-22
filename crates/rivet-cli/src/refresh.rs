@@ -196,10 +196,34 @@ impl RefreshMode {
 
 /// The resolver fingerprint recorded in `meta.resolver_fingerprint`.
 ///
-/// T19 writes a real version because bindings are computed on every publish. A
-/// future change to the resolution rules bumps this so the snapshot digest and
-/// T22's invalidation trigger both see it.
-const RESOLVER_FINGERPRINT: &str = "php-rules-v1";
+/// It covers the *binding rules*: how stored uses are resolved to declarations
+/// and which resolution tier each binding carries (imports, functions,
+/// constants, member lookup, `new` and typed receivers, fallbacks). It is
+/// separate from [`EXTRACTOR_FINGERPRINT`], which covers the persisted facts
+/// those rules read. The snapshot digest folds it in, a mismatch on refresh
+/// re-resolves every use without reparsing (T22), and `--no-refresh` refuses a
+/// cache whose stored value differs (AF5).
+///
+/// Any change to resolution behavior, meaning a use that would bind
+/// differently, bind at a different tier, or stop or start binding, must bump
+/// this value, even when the extractor fingerprint changes in the same task.
+/// Relying on an extractor bump to invalidate stale bindings only works by
+/// coincidence and misses a rules-only change.
+///
+/// History, newest first:
+///
+/// - **php-rules-v2** — records the resolution changes of AF1 through AF4,
+///   which had shipped under v1: per-namespace-block top-level scopes (AF1);
+///   kind-aware lookup, ASCII-only case folding, and the global function
+///   fallback suppressed under partial coverage (AF2); typed-parameter
+///   receivers suppressed by any rebinding, reference, or unproven by-value
+///   argument, and no binding for union, intersection, or DNF types (AF3); and
+///   anonymous-class receivers binding nothing, explicit static-call and
+///   class-constant classes binding as `type` uses, and `static::`/`parent::`
+///   binding nothing (AF4).
+/// - **php-rules-v1** — T19: the first real binding rules (imports and
+///   functions), later extended by T20/T21 receivers under the same value.
+const RESOLVER_FINGERPRINT: &str = "php-rules-v2";
 
 /// The shared result of one refresh.
 ///

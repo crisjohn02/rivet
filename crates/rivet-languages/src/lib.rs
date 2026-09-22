@@ -163,6 +163,45 @@ pub fn grammar(id: LanguageId) -> tree_sitter::Language {
     }
 }
 
+/// The collapsed signature form of `symbol` (spec §16.2), dispatched by
+/// language as [`grammar`] is.
+///
+/// `members` are the symbol's direct members in any order; each language
+/// orders them itself (for PHP, [`php::order_members`]) because only the
+/// adapter knows how several members can share one declaration. `source` is
+/// the full text of the file that declares `symbol`, as stored in the
+/// snapshot. No parse tree is needed: the form is rendered from stored spans,
+/// signatures, and source text.
+///
+/// The result is the adapter's summary alone. It does not include the doc
+/// comment; a caller that needs the full §16.2 signature form prepends it.
+///
+/// Returns `None` when the language has no collapsed-form renderer (every
+/// TypeScript build today, which has no extractor either), so a caller can
+/// treat the signature form as unavailable rather than emit an empty one.
+pub fn signature_summary(
+    language: LanguageId,
+    symbol: &rivet_core::ExtractedSymbol,
+    members: &[rivet_core::ExtractedSymbol],
+    source: &str,
+) -> Option<String> {
+    #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
+    let _ = (symbol, members, source);
+    match language {
+        #[cfg(feature = "lang-php")]
+        LanguageId::Php => {
+            let mut ordered = members.to_vec();
+            php::order_members(&mut ordered, source);
+            Some(php::signature_summary(symbol, &ordered, source))
+        }
+        #[cfg(feature = "lang-typescript")]
+        LanguageId::Typescript | LanguageId::Tsx => {
+            let _ = (symbol, members, source);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::EXTRACTOR_FINGERPRINT;
@@ -228,6 +267,52 @@ mod tests {
             EXTRACTOR_FINGERPRINT.contains(";fact-schema="),
             "EXTRACTOR_FINGERPRINT {EXTRACTOR_FINGERPRINT:?} must name the fact schema; bump \
              the `fact-schema` integer whenever a persisted fact's shape or meaning changes"
+        );
+    }
+
+    /// The dispatch renders PHP through the PHP adapter, orders members
+    /// itself, and does not add the doc comment.
+    #[test]
+    #[cfg(feature = "lang-php")]
+    fn signature_summary_dispatches_php_and_orders_members() {
+        use rivet_core::ExtractedFile;
+
+        let source = "<?php\n/**\n * Doc.\n */\nfinal class K\n{\n    public int $b, $a;\n    public function go(): void\n    {\n    }\n}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&super::grammar(super::LanguageId::Php))
+            .expect("grammar");
+        let tree = parser.parse(source, None).expect("tree");
+        let extracted: ExtractedFile = super::php::extract(source.as_bytes(), &tree);
+        let class = extracted.symbols[0].clone();
+        assert_eq!(class.doc_comment.as_deref(), Some("/**\n * Doc.\n */"));
+        let mut members: Vec<_> = extracted.symbols[1..].to_vec();
+        members.reverse();
+        let summary = super::signature_summary(super::LanguageId::Php, &class, &members, source)
+            .expect("PHP renders a summary");
+        assert_eq!(
+            summary,
+            "final class K\n{\n    public int $b;\n    public int $a;\n    public function go(): void { … }\n}"
+        );
+    }
+
+    /// A language without a renderer reports no summary rather than an empty
+    /// one.
+    #[test]
+    #[cfg(feature = "lang-typescript")]
+    fn signature_summary_is_none_without_a_renderer() {
+        let symbol = rivet_core::ExtractedSymbol {
+            qualified_name: "f".to_string(),
+            name: "f".to_string(),
+            kind: rivet_core::SymbolKind::Function,
+            span: rivet_core::Span::new(0, 1).expect("span"),
+            parent_index: None,
+            signature: Some("function f()".to_string()),
+            doc_comment: None,
+        };
+        assert_eq!(
+            super::signature_summary(super::LanguageId::Typescript, &symbol, &[], "f"),
+            None
         );
     }
 }

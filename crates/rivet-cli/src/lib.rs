@@ -9,6 +9,7 @@
 //! `symbol` reference pipeline in [`references`], which is only reachable from
 //! this crate.
 
+pub mod budget;
 pub mod context;
 pub mod index;
 pub mod references;

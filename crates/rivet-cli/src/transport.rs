@@ -25,6 +25,8 @@ pub const EXIT_REPOSITORY_UNAVAILABLE: i32 = 3;
 pub const EXIT_SYMBOL_NOT_FOUND: i32 = 4;
 /// The query matched more than one declaration.
 pub const EXIT_AMBIGUOUS_SYMBOL: i32 = 5;
+/// No allowed form of the context target fits the token budget.
+pub const EXIT_BUDGET_TOO_SMALL: i32 = 8;
 
 /// A CLI failure rendered as an error object in `--json` mode and as human text
 /// otherwise.
@@ -111,6 +113,27 @@ impl CliError {
         CliError {
             code: "ambiguous_symbol",
             exit: EXIT_AMBIGUOUS_SYMBOL,
+            message: message.into(),
+            hint: hint.into(),
+            extra: Box::new(extra),
+        }
+    }
+
+    /// A `budget_too_small` failure (exit 8): no allowed form of the context
+    /// target fits `budget_tokens`. `required_tokens` is the minimum estimate
+    /// among the target's allowed forms (OUTPUT-CONTRACT `rivet context`).
+    pub fn budget_too_small(
+        message: impl Into<String>,
+        hint: impl Into<String>,
+        budget_tokens: u64,
+        required_tokens: u64,
+    ) -> CliError {
+        let mut extra = Map::new();
+        extra.insert("budget_tokens".to_string(), json!(budget_tokens));
+        extra.insert("required_tokens".to_string(), json!(required_tokens));
+        CliError {
+            code: "budget_too_small",
+            exit: EXIT_BUDGET_TOO_SMALL,
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(extra),
@@ -247,6 +270,16 @@ mod tests {
             vec!["total", "truncated", "next_offset", "candidates"]
         );
         assert_eq!(ambiguous.extra.get("next_offset"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn budget_too_small_carries_budget_and_required_tokens_in_order() {
+        let error = CliError::budget_too_small("m", "h", 10, 17);
+        assert_eq!((error.code, error.exit), ("budget_too_small", 8));
+        let keys: Vec<&str> = error.extra.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["budget_tokens", "required_tokens"]);
+        assert_eq!(error.extra.get("budget_tokens"), Some(&json!(10)));
+        assert_eq!(error.extra.get("required_tokens"), Some(&json!(17)));
     }
 
     #[test]

@@ -598,13 +598,19 @@ fn old_fact_schema_snapshot_is_reparsed_and_conditional_stays_unbound() {
             .get_meta("effective_config_fingerprint")
             .expect("read meta")
             .expect("effective-config fingerprint present");
+        // Keep this build's resolver fingerprint so only the fact schema is
+        // stale; a literal here would go stale on every resolver bump.
+        let resolver = store
+            .get_meta("resolver_fingerprint")
+            .expect("read meta")
+            .expect("resolver fingerprint present");
         store
             .publish_inventory(InventoryInput {
                 fingerprint: rivet_store::Fingerprint {
                     index_format_version: rivet_store::INDEX_FORMAT_VERSION.to_string(),
                     effective_config,
                     extractor: pre_schema_extractor_fingerprint(),
-                    resolver: "php-rules-v1".to_string(),
+                    resolver,
                 },
                 files,
                 symbols,

@@ -12,8 +12,9 @@
 //! examined-use caps) and reports `candidate_limit_reached`. With depth 1,
 //! every relationship included, and caps that are not reached it returns
 //! exactly [`collect_candidates`]'s list, which stays as the T26 reference.
-//! Source estimation, budget fitting, overlap suppression, and command wiring
-//! belong to T28 through T30 and are deliberately absent here.
+//! Source estimation and budget fitting live in [`crate::budget`] (T28);
+//! overlap suppression and command wiring belong to T29 and T30 and are
+//! deliberately absent here.
 //!
 //! Callees, type uses, and callers are selected through [`crate::references`],
 //! the same shared pipeline that backs `rivet refs` and the `rivet symbol` call
