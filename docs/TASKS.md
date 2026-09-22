@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T22 |
-| Next task | T23 |
+| Last completed task | T23 |
+| Next task | T24 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T22: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 5 unit + 4 bindings + 7 freshness_modes + 7 index_json + 1 index_uses + 7 refresh + 4 reresolve + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 60, rivet-index 40, rivet-languages 5 unit + 6 php_extract + 2 php_uses, rivet-parser 2 unit + 4 grammar_smoke, rivet-store 28; 0 failed); `--no-default-features` and `--features lang-php` checks compile; `python3 tests/gold/check_gold.py` verified 25 entries. |
+| Last checks | T23: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 6 unit + 4 bindings + 7 freshness_modes + 7 index_json + 1 index_uses + 7 refresh + 10 refs_json + 4 reresolve + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 60, rivet-index 40, rivet-languages 5 unit + 6 php_extract + 2 php_uses, rivet-parser 2 unit + 4 grammar_smoke, rivet-store 28; 0 failed); `--no-default-features` and `--features lang-php` checks compile; `python3 tests/gold/check_gold.py` verified 25 entries. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -95,7 +95,7 @@ Read: spec §11; ARCHITECTURE uses/scopes/bindings; OUTPUT-CONTRACT refs and cal
 | [x] | T20 | Resolve `$this`/`self` member uses and explicit native receiver types. | Correct declaration links are scoped; same-name classes remain distinct; dynamic/late-static behavior does not become exact. |
 | [x] | T21 | Add preceding `new` receiver hints with conservative reassignment/control-flow handling. | A known safe assignment resolves as scoped; reassignment or uncertainty does not retain an unjustified binding. |
 | [x] | T22 | Re-resolve all persisted uses when indexed content/membership changes. | Adding a duplicate declaration, changing an import, or deleting a target updates bindings in unchanged files; unresolved uses survive. |
-| [ ] | T23 | Wire `refs` reference/candidate modes, filters, counts, and pagination. | Default mode excludes uses bound elsewhere; candidate mode includes them with query-relative name-match evidence; aliases are returned. Gold assertions check spans, not just counts. |
+| [x] | T23 | Wire `refs` reference/candidate modes, filters, counts, and pagination. | Default mode excludes uses bound elsewhere; candidate mode includes them with query-relative name-match evidence; aliases are returned. Gold assertions check spans, not just counts. |
 | [ ] | T24 | Populate symbol call/caller lists with shared reference records and per-list pagination. | Top-level calls are retained, repeated call sites are counted correctly, and filters/order match the output contract. |
 
 **Checkpoint D:** run the PHP gold binding/coverage suite and CLI tests. Add one common-name example such as `handle`. Inspect the first page manually: bounded output alone is not evidence of useful references.

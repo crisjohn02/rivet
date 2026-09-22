@@ -165,8 +165,9 @@ fn index_json_reports_inventory_and_is_stable() {
 
 #[test]
 fn unimplemented_command_emits_json_error() {
+    // `refs` is implemented as of T23; `context` (T30) is still unimplemented.
     let temp = git_repo("unimplemented");
-    let output = run(temp.path(), &["refs", "Foo", "--json"]);
+    let output = run(temp.path(), &["context", "Foo", "--json"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty(), "stdout must stay empty");

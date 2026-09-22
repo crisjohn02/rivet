@@ -4,6 +4,7 @@
 
 mod index;
 mod refresh;
+mod refs;
 mod symbol;
 mod transport;
 
@@ -74,6 +75,27 @@ enum Command {
     Refs {
         /// Symbol name, qualified name, or file:line to look up.
         query: String,
+        /// Reference mode.
+        #[arg(long, value_name = "references|candidates")]
+        mode: Option<String>,
+        /// Comma-separated `ref_kind` values to include.
+        #[arg(long, value_name = "a,b")]
+        kind: Option<String>,
+        /// Minimum resolution tier to include.
+        #[arg(long = "min-resolution", value_name = "exact|scoped|name_match")]
+        min_resolution: Option<String>,
+        /// Maximum references to return.
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        /// References to skip before the page.
+        #[arg(long, value_name = "N")]
+        offset: Option<u64>,
+        /// Freshness mode, overriding config.
+        #[arg(long, value_name = "content|metadata")]
+        freshness: Option<String>,
+        /// Answer from the committed snapshot without refreshing.
+        #[arg(long = "no-refresh")]
+        no_refresh: bool,
     },
     /// Build context around a symbol.
     Context {
@@ -82,31 +104,6 @@ enum Command {
     },
     /// Emit a short agent usage snippet.
     Snippet,
-}
-
-impl Command {
-    /// The literal command name as typed on the command line.
-    fn name(&self) -> &'static str {
-        match self {
-            Command::Init => "init",
-            Command::Index { .. } => "index",
-            Command::Symbol { .. } => "symbol",
-            Command::Refs { .. } => "refs",
-            Command::Context { .. } => "context",
-            Command::Snippet => "snippet",
-        }
-    }
-
-    /// The implementing task for a command that is still unimplemented.
-    fn task(&self) -> &'static str {
-        match self {
-            Command::Init | Command::Snippet => "T33",
-            Command::Symbol { .. } => "T12",
-            Command::Refs { .. } => "T23",
-            Command::Context { .. } => "T30",
-            Command::Index { .. } => "T10",
-        }
-    }
 }
 
 fn main() {
@@ -170,7 +167,39 @@ fn main() {
                 Err(error) => fail(json, &error, "symbol"),
             }
         }
-        other => not_implemented(json, &other),
+        Command::Refs {
+            query,
+            mode,
+            kind,
+            min_resolution,
+            limit,
+            offset,
+            freshness,
+            no_refresh,
+        } => {
+            let options = refs::Options {
+                mode,
+                kind,
+                min_resolution,
+                limit,
+                offset,
+                freshness,
+                no_refresh,
+            };
+            match refs::run(&query, options) {
+                Ok(value) => {
+                    if json {
+                        emit_success(value);
+                    } else {
+                        print!("{}", refs::human(&value));
+                    }
+                }
+                Err(error) => fail(json, &error, "refs"),
+            }
+        }
+        Command::Context { .. } => not_implemented(json, "context", "T30"),
+        Command::Init => not_implemented(json, "init", "T33"),
+        Command::Snippet => not_implemented(json, "snippet", "T33"),
     }
 }
 
@@ -191,12 +220,13 @@ fn fail(json: bool, error: &CliError, command: &str) -> ! {
 }
 
 /// Reports an unimplemented command without ever faking success.
-fn not_implemented(json: bool, command: &Command) -> ! {
-    let name = command.name();
-    let task = command.task();
+fn not_implemented(json: bool, name: &str, task: &str) -> ! {
     let message =
         format!("rivet {name} is not implemented yet (expected in {task}; see docs/TASKS.md)");
-    let error = CliError::general(message, "Only `rivet index` is implemented in this build.");
+    let error = CliError::general(
+        message,
+        "Only `rivet index`, `rivet symbol`, and `rivet refs` are implemented in this build.",
+    );
     if json {
         emit_error(
             error.code,

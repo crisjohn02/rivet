@@ -192,7 +192,9 @@ fn single(
 }
 
 /// Builds the `ambiguous_symbol` failure with a paginated candidate page.
-fn ambiguous(
+///
+/// Shared with `refs`, which reports ambiguity exactly as `symbol` does.
+pub(crate) fn ambiguous(
     store: &Store,
     matches: &[SymbolRow],
     query: &str,
@@ -228,7 +230,10 @@ fn ambiguous(
 
 /// Builds one full symbol object (OUTPUT-CONTRACT "Coordinates and symbol
 /// objects").
-fn symbol_object(store: &Store, row: &SymbolRow) -> Result<Value, rivet_store::Error> {
+///
+/// Shared with `refs` for both the queried `symbol` and each reference's
+/// `containing_symbol`.
+pub(crate) fn symbol_object(store: &Store, row: &SymbolRow) -> Result<Value, rivet_store::Error> {
     let file = store.get_file(&row.file)?;
     let content_hash = file.as_ref().and_then(|file| file.content_hash.clone());
     let language = file.and_then(|file| file.language);
@@ -284,7 +289,9 @@ fn empty_call_list() -> Value {
 }
 
 /// Validates `--limit` before any filesystem work.
-fn parse_limit(limit: Option<u64>) -> Result<u64, CliError> {
+///
+/// Shared with `refs`, whose page size has the same range and default.
+pub(crate) fn parse_limit(limit: Option<u64>) -> Result<u64, CliError> {
     match limit {
         None => Ok(DEFAULT_LIMIT),
         Some(value) if value == 0 || value > MAX_LIMIT => Err(CliError::invalid_arguments(
