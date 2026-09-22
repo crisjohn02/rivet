@@ -18,7 +18,7 @@ use rivet_store::{Store, SymbolRow};
 
 use crate::index;
 use crate::references::{self, Mode, Selection};
-use crate::refresh::{cached_report, open_cached_store, open_context, open_store, refresh};
+use crate::refresh::{acquire_snapshot, open_context};
 use crate::transport::CliError;
 
 /// The default `--limit` and its documented maximum (OUTPUT-CONTRACT
@@ -85,17 +85,7 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     // `--no-refresh`, open the committed snapshot directly and never walk.
     let context = open_context()?;
     index::validate_configured_languages(&context.config)?;
-    let (store, report) = if no_refresh {
-        let store = open_cached_store(&context.root)?;
-        let report = cached_report(&store, false)?;
-        (store, report)
-    } else {
-        let effective_freshness = requested_freshness.unwrap_or(context.config.index.freshness);
-        let mode = index::refresh_mode(effective_freshness);
-        let mut store = open_store(&context.root)?;
-        let report = refresh(&context.root.root, &context.config, &mut store, mode, false)?.report;
-        (store, report)
-    };
+    let (store, report) = acquire_snapshot(&context, no_refresh, requested_freshness)?;
 
     // A snapshot is acquired from here on, so an index-dependent failure
     // carries its `index` (OUTPUT-CONTRACT "Errors").

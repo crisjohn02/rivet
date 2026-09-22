@@ -25,12 +25,12 @@ use std::collections::HashSet;
 
 use rivet_core::{RefKind, Resolution};
 use rivet_index::{QueryOutcome, resolve_query, suggestions};
-use rivet_store::Store;
+use rivet_store::{Store, SymbolRow};
 use serde_json::{Map, Value, json};
 
 use crate::index;
 use crate::references::{self, Mode};
-use crate::refresh::{cached_report, open_cached_store, open_context, open_store, refresh};
+use crate::refresh::{acquire_snapshot, open_context};
 use crate::symbol::{self, symbol_object};
 use crate::transport::CliError;
 
@@ -86,17 +86,7 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     // snapshot directly and never walk.
     let context = open_context()?;
     index::validate_configured_languages(&context.config)?;
-    let (store, report) = if no_refresh {
-        let store = open_cached_store(&context.root)?;
-        let report = cached_report(&store, false)?;
-        (store, report)
-    } else {
-        let effective_freshness = requested_freshness.unwrap_or(context.config.index.freshness);
-        let mode = index::refresh_mode(effective_freshness);
-        let mut store = open_store(&context.root)?;
-        let report = refresh(&context.root.root, &context.config, &mut store, mode, false)?.report;
-        (store, report)
-    };
+    let (store, report) = acquire_snapshot(&context, no_refresh, requested_freshness)?;
 
     // A snapshot is acquired from here on, so an index-dependent failure
     // carries its `index` (OUTPUT-CONTRACT "Errors").
@@ -140,42 +130,7 @@ fn answer(
         offset,
     } = options;
 
-    let target = match resolve_query(store, query).map_err(index::store_error)? {
-        QueryOutcome::Symbols(matches) => match matches.len() {
-            0 => {
-                let suggestions = suggestions(store, query).map_err(index::store_error)?;
-                return Err(CliError::symbol_not_found(
-                    format!("query '{query}' matched no symbols"),
-                    "Check the spelling, or use a qualified name or canonical ID.",
-                    suggestions,
-                ));
-            }
-            1 => matches.into_iter().next().expect("exactly one match"),
-            total => return symbol::ambiguous(store, &matches, query, total, limit, offset),
-        },
-        QueryOutcome::PathNotIndexed { path } => {
-            return Err(CliError::symbol_not_found(
-                format!("query '{query}' matched no symbols"),
-                format!(
-                    "{path} is not indexed or is excluded; run `rivet index` and check exclusions."
-                ),
-                Vec::new(),
-            ));
-        }
-        QueryOutcome::NoEnclosingSymbol { suggestions } => {
-            return Err(CliError::symbol_not_found(
-                format!("no symbol encloses {query}"),
-                "Pick the nearest symbol, or query it by name.",
-                suggestions,
-            ));
-        }
-        QueryOutcome::InvalidFileLine { path, reason } => {
-            return Err(CliError::invalid_arguments(
-                format!("invalid file:line query for '{path}': {reason}"),
-                "Use a repository-relative path with `/` separators and no `..`.",
-            ));
-        }
-    };
+    let target = resolve_target(store, query, limit, offset)?;
 
     // A stored `name_match` does not exist, so the relationship between each
     // use's binding and the target is computed here. `bindings` is hashed by
@@ -231,6 +186,51 @@ fn answer(
     );
     object.insert("references".to_string(), Value::Array(references));
     Ok(Value::Object(object))
+}
+
+/// Resolves `query` to exactly one declaration of the acquired snapshot,
+/// handling every [`QueryOutcome`] arm the same way `rivet symbol` does.
+///
+/// Shared by `refs` and `context`. No match is `symbol_not_found` with
+/// suggestions; several are `ambiguous_symbol` with the candidate page at
+/// `limit`/`offset`.
+pub(crate) fn resolve_target(
+    store: &Store,
+    query: &str,
+    limit: u64,
+    offset: u64,
+) -> Result<SymbolRow, CliError> {
+    match resolve_query(store, query).map_err(index::store_error)? {
+        QueryOutcome::Symbols(matches) => match matches.len() {
+            0 => {
+                let suggestions = suggestions(store, query).map_err(index::store_error)?;
+                Err(CliError::symbol_not_found(
+                    format!("query '{query}' matched no symbols"),
+                    "Check the spelling, or use a qualified name or canonical ID.",
+                    suggestions,
+                ))
+            }
+            1 => Ok(matches.into_iter().next().expect("exactly one match")),
+            total => symbol::ambiguous(store, &matches, query, total, limit, offset)
+                .map(|_| unreachable!("`ambiguous` always returns the failure")),
+        },
+        QueryOutcome::PathNotIndexed { path } => Err(CliError::symbol_not_found(
+            format!("query '{query}' matched no symbols"),
+            format!(
+                "{path} is not indexed or is excluded; run `rivet index` and check exclusions."
+            ),
+            Vec::new(),
+        )),
+        QueryOutcome::NoEnclosingSymbol { suggestions } => Err(CliError::symbol_not_found(
+            format!("no symbol encloses {query}"),
+            "Pick the nearest symbol, or query it by name.",
+            suggestions,
+        )),
+        QueryOutcome::InvalidFileLine { path, reason } => Err(CliError::invalid_arguments(
+            format!("invalid file:line query for '{path}': {reason}"),
+            "Use a repository-relative path with `/` separators and no `..`.",
+        )),
+    }
 }
 
 /// Parses `--mode`, rejecting unknown values before any filesystem work.

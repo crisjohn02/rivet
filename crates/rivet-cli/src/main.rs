@@ -9,7 +9,7 @@ use clap::error::ErrorKind;
 use serde_json::Map;
 
 use rivet_cli::transport::{CliError, emit_error, emit_success};
-use rivet_cli::{index, refs, symbol};
+use rivet_cli::{context_cmd, index, refs, symbol};
 
 /// Agent-native codebase CLI: structural code navigation and token-budgeted context for coding agents.
 #[derive(Debug, Parser)]
@@ -97,10 +97,49 @@ enum Command {
         #[arg(long = "no-refresh")]
         no_refresh: bool,
     },
-    /// Build context around a symbol.
+    /// Build token-budgeted source context around a symbol.
     Context {
         /// Symbol name, qualified name, or file:line to look up.
         query: String,
+        /// Source-token budget (1-1000000), overriding config.
+        #[arg(long, value_name = "N")]
+        tokens: Option<u64>,
+        /// Relationship traversal depth, 1 or 2, overriding config.
+        #[arg(long, value_name = "1|2")]
+        depth: Option<u64>,
+        /// Collapse mode, overriding config.
+        #[arg(long, value_name = "auto|always|never")]
+        collapse: Option<String>,
+        /// Include callers from test files.
+        #[arg(long = "include-tests")]
+        include_tests: bool,
+        /// Exclude callers from test files.
+        #[arg(long = "exclude-tests")]
+        exclude_tests: bool,
+        /// Include callers of the target.
+        #[arg(long = "include-callers")]
+        include_callers: bool,
+        /// Exclude callers of the target.
+        #[arg(long = "exclude-callers")]
+        exclude_callers: bool,
+        /// Include callees of the target.
+        #[arg(long = "include-callees")]
+        include_callees: bool,
+        /// Exclude callees of the target.
+        #[arg(long = "exclude-callees")]
+        exclude_callees: bool,
+        /// Maximum segments, the target included.
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        /// Rejected for `context`, which does not paginate.
+        #[arg(long, value_name = "N")]
+        offset: Option<u64>,
+        /// Freshness mode, overriding config.
+        #[arg(long, value_name = "content|metadata")]
+        freshness: Option<String>,
+        /// Answer from the committed snapshot without refreshing.
+        #[arg(long = "no-refresh")]
+        no_refresh: bool,
     },
     /// Emit a short agent usage snippet.
     Snippet,
@@ -199,7 +238,48 @@ fn main() {
                 Err(error) => fail(json, &error, "refs"),
             }
         }
-        Command::Context { .. } => not_implemented(json, "context", "T30"),
+        Command::Context {
+            query,
+            tokens,
+            depth,
+            collapse,
+            include_tests,
+            exclude_tests,
+            include_callers,
+            exclude_callers,
+            include_callees,
+            exclude_callees,
+            limit,
+            offset,
+            freshness,
+            no_refresh,
+        } => {
+            let options = context_cmd::Options {
+                tokens,
+                depth,
+                collapse,
+                include_tests,
+                exclude_tests,
+                include_callers,
+                exclude_callers,
+                include_callees,
+                exclude_callees,
+                limit,
+                offset,
+                freshness,
+                no_refresh,
+            };
+            match context_cmd::run(&query, options) {
+                Ok(value) => {
+                    if json {
+                        emit_success(value);
+                    } else {
+                        print!("{}", context_cmd::human(&value));
+                    }
+                }
+                Err(error) => fail(json, &error, "context"),
+            }
+        }
         Command::Init => not_implemented(json, "init", "T33"),
         Command::Snippet => not_implemented(json, "snippet", "T33"),
     }
@@ -227,7 +307,7 @@ fn not_implemented(json: bool, name: &str, task: &str) -> ! {
         format!("rivet {name} is not implemented yet (expected in {task}; see docs/TASKS.md)");
     let error = CliError::general(
         message,
-        "Only `rivet index`, `rivet symbol`, and `rivet refs` are implemented in this build.",
+        "Only `rivet index`, `rivet symbol`, `rivet refs`, and `rivet context` are implemented in this build.",
     );
     if json {
         emit_error(
