@@ -13,6 +13,7 @@ use rivet_index::{QueryOutcome, resolve_query, suggestions};
 use rivet_store::{Store, SymbolRow};
 
 use crate::index;
+use crate::refresh::{RefreshMode, open_context, open_store, refresh};
 use crate::transport::CliError;
 
 /// The default `--limit` and its documented maximum (OUTPUT-CONTRACT
@@ -54,9 +55,18 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     let limit = parse_limit(limit)?;
     let offset = offset.unwrap_or(0);
 
-    // Refresh first so query results describe the current working tree.
-    let report = index::run(index::Options::default())?;
-    let store = open_store()?;
+    // Refresh first so query results describe the current working tree, then
+    // read every row from the committed snapshot in the same store.
+    let context = open_context()?;
+    index::validate_configured_languages(&context.config)?;
+    let mut store = open_store(&context.root)?;
+    let outcome = refresh(
+        &context.root.root,
+        &context.config,
+        &mut store,
+        RefreshMode::Content,
+    )?;
+    let report = outcome.report;
     let matches = match resolve_query(&store, query).map_err(index::store_error)? {
         QueryOutcome::Symbols(matches) => matches,
         QueryOutcome::PathNotIndexed { path } => {
@@ -265,18 +275,6 @@ fn parse_limit(limit: Option<u64>) -> Result<u64, CliError> {
         )),
         Some(value) => Ok(value),
     }
-}
-
-/// Discovers the root and opens its store; the refresh has already created it.
-fn open_store() -> Result<Store, CliError> {
-    let cwd = std::env::current_dir().map_err(|error| {
-        CliError::repository_unavailable(
-            format!("cannot determine the working directory: {error}"),
-            "Run rivet from inside a repository.",
-        )
-    })?;
-    let root = rivet_core::discover_root(&cwd).map_err(index::root_error)?;
-    Store::open(&root.root.join(".rivet")).map_err(index::store_error)
 }
 
 /// The compact human rendering of a successful symbol lookup.

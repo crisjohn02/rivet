@@ -434,7 +434,6 @@ dependencies = [
  "rivet-store",
  "serde",
  "serde_json",
- "tree-sitter",
 ]
 
 [[package]]
@@ -471,6 +470,7 @@ dependencies = [
 name = "rivet-parser"
 version = "0.1.0"
 dependencies = [
+ "rivet-core",
  "rivet-languages",
  "tree-sitter",
 ]

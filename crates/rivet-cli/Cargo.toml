@@ -24,4 +24,3 @@ rivet-index = { path = "../rivet-index" }
 rivet-languages = { path = "../rivet-languages", default-features = false }
 rivet-parser = { path = "../rivet-parser", default-features = false }
 rivet-store = { path = "../rivet-store" }
-tree-sitter = { workspace = true }

@@ -12,7 +12,6 @@ lang-php = ["rivet-languages/lang-php"]
 lang-typescript = ["rivet-languages/lang-typescript"]
 
 [dependencies]
+rivet-core = { path = "../rivet-core" }
 rivet-languages = { path = "../rivet-languages", default-features = false }
-
-[dev-dependencies]
 tree-sitter = { workspace = true }

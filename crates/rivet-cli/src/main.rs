@@ -3,6 +3,7 @@
 //! Arguments, root discovery, scan/refresh orchestration, output, exit codes.
 
 mod index;
+mod refresh;
 mod symbol;
 mod transport;
 

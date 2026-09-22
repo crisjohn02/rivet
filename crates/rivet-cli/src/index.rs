@@ -1,41 +1,28 @@
-//! `rivet index` inventory refresh (spec §12.4 steps 1–2, §13; OUTPUT-CONTRACT
-//! "Common index metadata" and "Administrative commands").
+//! `rivet index` formatting and options (spec §13; OUTPUT-CONTRACT "Common
+//! index metadata" and "Administrative commands").
 //!
-//! The refresh discovers the root, loads config, walks eligible files, reads
-//! compiled-language source through the bounded T07 reader, and publishes one
-//! atomic snapshot containing both the file inventory and every extracted PHP
-//! symbol. A PHP file that Tree-sitter cannot parse publishes no symbols and is
-//! recorded as `parse_error`/`resource_limit` with a diagnostic.
-//!
-//! Uses, bindings, and TypeScript extraction arrive in later tasks.
-
-use std::io;
-use std::path::Path;
-use std::time::Instant;
+//! T15 moves the actual refresh into [`crate::refresh`]. This module keeps the
+//! command-line options, the thin [`run`] wrapper, and the JSON/human
+//! formatters for the shared [`Report`]. [`Report`] and its coverage fields are
+//! also consumed by every navigation command, so both `index` and `symbol`
+//! format one refresh outcome produced by a single code path.
 
 use serde_json::{Map, Value, json};
 
-use rivet_core::{
-    Config, ConfigError, Freshness, ParseStatus, RootError, SkipReason, SourceRead, WalkError,
-    discover_root, read_source, walk_eligible,
-};
-#[cfg(feature = "lang-php")]
-use rivet_core::{LineIndex, Span, SymbolId, SymbolKind, assign_ordinals};
-use rivet_languages::{EXTRACTOR_FINGERPRINT, is_language_compiled, language_for_path};
-use rivet_store::{
-    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, Store, SymbolRow, clamp_mtime_ns,
-};
+use rivet_core::{Config, ConfigError, Freshness, RootError, WalkError};
+use rivet_languages::is_language_compiled;
 
+use crate::refresh::{RefreshMode, open_context, open_store, refresh};
 use crate::transport::CliError;
 
 /// Maximum number of diagnostic items emitted; counts stay exhaustive.
-const DIAGNOSTIC_CAP: usize = 50;
+pub(crate) const DIAGNOSTIC_CAP: usize = 50;
 
 /// Options accepted by `rivet index`.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// `--force`: accepted for contract compatibility. T10 always re-reads and
-    /// re-hashes eligible files, so fact regeneration is a no-op until T15/T16.
+    /// `--force`: accepted for contract compatibility. T15 always discovers
+    /// changed content; T16 implements the explicit forced rebuild.
     pub force: bool,
     /// `--timing`: include `elapsed_ms` in JSON output.
     pub timing: bool,
@@ -47,18 +34,18 @@ pub struct Options {
 
 /// Coverage skip counts, one per non-`ok` parse status.
 #[derive(Debug, Default, Clone, Copy)]
-struct Skipped {
-    unsupported: u64,
-    binary: u64,
-    size: u64,
-    encoding: u64,
-    parse_error: u64,
-    resource_limit: u64,
+pub(crate) struct Skipped {
+    pub(crate) unsupported: u64,
+    pub(crate) binary: u64,
+    pub(crate) size: u64,
+    pub(crate) encoding: u64,
+    pub(crate) parse_error: u64,
+    pub(crate) resource_limit: u64,
 }
 
 impl Skipped {
     /// The sum of every skipped count.
-    fn total(self) -> u64 {
+    pub(crate) fn total(self) -> u64 {
         self.unsupported
             + self.binary
             + self.size
@@ -70,37 +57,40 @@ impl Skipped {
 
 /// One `diagnostics.items[]` entry.
 #[derive(Debug, Clone)]
-struct DiagnosticItem {
-    file: String,
-    code: &'static str,
-    detail: String,
+pub(crate) struct DiagnosticItem {
+    pub(crate) file: String,
+    pub(crate) code: &'static str,
+    pub(crate) detail: String,
 }
 
 /// The success payload of one refresh.
 #[derive(Debug)]
 pub struct Report {
-    snapshot: String,
-    freshness: Freshness,
-    complete: bool,
-    files_seen: u64,
-    files_indexed: u64,
-    skipped: Skipped,
-    diagnostics_total: usize,
-    diagnostics_truncated: bool,
-    diagnostics: Vec<DiagnosticItem>,
-    symbols: u64,
-    uses: u64,
-    bindings: u64,
-    updated: u64,
-    unchanged: u64,
-    deleted: u64,
-    elapsed_ms: u64,
-    timing: bool,
+    pub(crate) snapshot: String,
+    pub(crate) freshness: Freshness,
+    pub(crate) complete: bool,
+    pub(crate) files_seen: u64,
+    pub(crate) files_indexed: u64,
+    pub(crate) skipped: Skipped,
+    pub(crate) diagnostics_total: usize,
+    pub(crate) diagnostics_truncated: bool,
+    pub(crate) diagnostics: Vec<DiagnosticItem>,
+    pub(crate) symbols: u64,
+    pub(crate) uses: u64,
+    pub(crate) bindings: u64,
+    pub(crate) updated: u64,
+    pub(crate) unchanged: u64,
+    pub(crate) deleted: u64,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) timing: bool,
 }
 
 /// Runs one `rivet index`.
+///
+/// Argument validation and config-language validation happen before any
+/// filesystem work (spec §27). The refresh itself lives in [`crate::refresh`];
+/// this wrapper only decides the effective flags and formats the outcome.
 pub fn run(options: Options) -> Result<Report, CliError> {
-    let started = Instant::now();
     let Options {
         force: _force,
         timing,
@@ -108,210 +98,30 @@ pub fn run(options: Options) -> Result<Report, CliError> {
         freshness,
     } = options;
 
-    // Argument validation happens before any filesystem discovery (spec §27:
-    // invalid arguments take precedence over filesystem work).
     let requested_languages = parse_languages(languages.as_deref())?;
     let requested_freshness = parse_freshness(freshness.as_deref())?;
 
-    let cwd = std::env::current_dir().map_err(|error| {
-        CliError::repository_unavailable(
-            format!("cannot determine the working directory: {error}"),
-            "Run rivet from inside a repository.",
-        )
-    })?;
-    let root = discover_root(&cwd).map_err(root_error)?;
-    let config = Config::load(&root.root).map_err(config_error)?;
-
-    // `--freshness metadata` is accepted and recorded in `index.freshness`, but
-    // T10 hashes source content in both modes; trusting size/mtime and skipping
-    // unchanged reads is T16.
-    let effective_freshness = requested_freshness.unwrap_or(config.index.freshness);
-
-    let enabled = match requested_languages {
-        Some(languages) => languages,
-        None => {
-            validate_configured_languages(&config)?;
-            config.languages.enabled.clone()
-        }
-    };
-
-    // A query auto-creates `.rivet/` only at a Git root and never edits
-    // `.gitignore` (spec §25). `discover_root` reports `has_rivet_dir = false`
-    // only when the boundary was `.git`, so this creates the cache directory
-    // exactly there.
-    let rivet_dir = root.root.join(".rivet");
-    if !root.has_rivet_dir {
-        create_rivet_dir(&rivet_dir)?;
+    let mut context = open_context()?;
+    match requested_languages {
+        Some(languages) => context.config.languages.enabled = languages,
+        None => validate_configured_languages(&context.config)?,
     }
+    // `--freshness metadata` is recorded but T15 hashes source content in
+    // both modes; trusting size/mtime is T16.
+    let effective_freshness = requested_freshness.unwrap_or(context.config.index.freshness);
 
-    let mut store = Store::open(&rivet_dir).map_err(store_error)?;
-    let walk = walk_eligible(&root.root, &config).map_err(walk_error)?;
+    let mut store = open_store(&context.root)?;
+    let outcome = refresh(
+        &context.root.root,
+        &context.config,
+        &mut store,
+        RefreshMode::Content,
+    )?;
 
-    let max_bytes = config.index.max_file_size_kb.saturating_mul(1024);
-    let mut files = Vec::with_capacity(walk.files.len());
-    let mut symbols: Vec<SymbolRow> = Vec::new();
-    let mut skipped = Skipped::default();
-    let mut diagnostics = Vec::new();
-    let mut files_indexed = 0_u64;
-
-    for entry in &walk.files {
-        let language = language_for_path(&entry.rel_path)
-            .filter(|id| enabled.iter().any(|name| name.as_str() == id.name()));
-        let Some(id) = language else {
-            skipped.unsupported += 1;
-            files.push(FileRow {
-                path: entry.rel_path.clone(),
-                language: None,
-                mtime_ns: clamp_mtime_ns(entry.mtime_ns),
-                size: entry.size,
-                content_hash: None,
-                source: None,
-                parse_status: ParseStatus::Unsupported,
-            });
-            continue;
-        };
-
-        let language_name = id.name().to_string();
-        match read_source(&root.root, entry, max_bytes) {
-            SourceRead::Ok { bytes, hash } => {
-                // PHP files are parsed and extracted here; every other
-                // compiled language is still stored as readable bytes with no
-                // facts in this milestone.
-                #[cfg(feature = "lang-php")]
-                let facts = if id.name() == "php" {
-                    Some(php_facts(&entry.rel_path, &bytes))
-                } else {
-                    None
-                };
-                #[cfg(not(feature = "lang-php"))]
-                let facts: Option<FileFacts> = None;
-
-                let (parse_status, source, file_symbols, file_diagnostic) = match facts {
-                    Some(facts) => match facts.error {
-                        Some(status) => (
-                            status,
-                            None,
-                            Vec::new(),
-                            Some(DiagnosticItem {
-                                file: entry.rel_path.clone(),
-                                code: facts.diagnostic_code,
-                                detail: facts.diagnostic_detail,
-                            }),
-                        ),
-                        None => (ParseStatus::Ok, Some(bytes), facts.symbols, None),
-                    },
-                    None => (ParseStatus::Ok, Some(bytes), Vec::new(), None),
-                };
-
-                match parse_status {
-                    ParseStatus::Ok => files_indexed += 1,
-                    ParseStatus::ParseError => skipped.parse_error += 1,
-                    ParseStatus::ResourceLimit => skipped.resource_limit += 1,
-                    _ => {}
-                }
-                if let Some(item) = file_diagnostic {
-                    diagnostics.push(item);
-                }
-                symbols.extend(file_symbols);
-                files.push(FileRow {
-                    path: entry.rel_path.clone(),
-                    language: Some(language_name),
-                    mtime_ns: clamp_mtime_ns(entry.mtime_ns),
-                    size: entry.size,
-                    content_hash: Some(hash),
-                    source,
-                    parse_status,
-                });
-            }
-            SourceRead::Skipped { reason } => {
-                let status = classify_skip(reason, &mut skipped);
-                if let Some((code, detail)) = skip_diagnostic(reason) {
-                    diagnostics.push(DiagnosticItem {
-                        file: entry.rel_path.clone(),
-                        code,
-                        detail: detail.to_string(),
-                    });
-                }
-                files.push(FileRow {
-                    path: entry.rel_path.clone(),
-                    language: Some(language_name),
-                    mtime_ns: clamp_mtime_ns(entry.mtime_ns),
-                    size: entry.size,
-                    content_hash: None,
-                    source: None,
-                    parse_status: status,
-                });
-            }
-            // An I/O failure aborts the refresh; it never silently preserves old
-            // facts (spec §27).
-            SourceRead::Failed(error) => {
-                return Err(CliError::repository_unavailable(
-                    format!("cannot read {}: {error}", entry.rel_path),
-                    "Fix the file permissions or remove the unreadable path, then retry.",
-                ));
-            }
-        }
-    }
-
-    // Non-UTF-8 paths are outside the scan domain but must be reported and force
-    // `complete: false` (OUTPUT-CONTRACT "Common index metadata").
-    for path in &walk.skipped {
-        diagnostics.push(DiagnosticItem {
-            file: path.lossy.clone(),
-            code: "non_utf8_path",
-            detail: "path is not valid UTF-8".to_string(),
-        });
-    }
-
-    let skipped_total = skipped.total();
-    let files_seen = files_indexed + skipped_total;
-    let complete = skipped_total == 0 && walk.skipped.is_empty();
-
-    diagnostics.sort_by(|a, b| {
-        a.file
-            .as_bytes()
-            .cmp(b.file.as_bytes())
-            .then_with(|| a.code.as_bytes().cmp(b.code.as_bytes()))
-            .then_with(|| a.detail.as_bytes().cmp(b.detail.as_bytes()))
-    });
-    let diagnostics_total = diagnostics.len();
-    let diagnostics_truncated = diagnostics_total > DIAGNOSTIC_CAP;
-    diagnostics.truncate(DIAGNOSTIC_CAP);
-
-    let fingerprint = Fingerprint {
-        index_format_version: INDEX_FORMAT_VERSION.to_string(),
-        effective_config: config.fingerprint(),
-        extractor: EXTRACTOR_FINGERPRINT.to_string(),
-        resolver: "none".to_string(),
-    };
-    let symbol_count = symbols.len() as u64;
-    let published = store
-        .publish_inventory(InventoryInput {
-            fingerprint,
-            files,
-            symbols,
-        })
-        .map_err(store_error)?;
-
-    Ok(Report {
-        snapshot: published.digest,
-        freshness: effective_freshness,
-        complete,
-        files_seen,
-        files_indexed,
-        skipped,
-        diagnostics_total,
-        diagnostics_truncated,
-        diagnostics,
-        symbols: symbol_count,
-        uses: 0,
-        bindings: 0,
-        updated: published.updated,
-        unchanged: published.unchanged,
-        deleted: published.deleted,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        timing,
-    })
+    let mut report = outcome.report;
+    report.freshness = effective_freshness;
+    report.timing = timing;
+    Ok(report)
 }
 
 /// Builds the top-level `index --json` object (without `schema_version`, which
@@ -385,146 +195,6 @@ pub fn human(report: &Report) -> String {
     )
 }
 
-/// One readable file's extraction outcome, ready to persist.
-///
-/// `error` is `Some` when parsing failed; then `symbols` is empty and
-/// `diagnostic_code`/`diagnostic_detail` describe the skip.
-struct FileFacts {
-    error: Option<ParseStatus>,
-    diagnostic_code: &'static str,
-    diagnostic_detail: String,
-    symbols: Vec<SymbolRow>,
-}
-
-/// Parses and extracts one PHP file using the pinned T02 grammar.
-#[cfg(feature = "lang-php")]
-fn php_facts(path: &str, source: &[u8]) -> FileFacts {
-    use rivet_languages::{LanguageId, grammar, php};
-
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&grammar(LanguageId::Php))
-        .expect("pinned PHP grammar must load");
-    let tree = parser
-        .parse(source, None)
-        .expect("parser must return a tree");
-    let extracted = php::extract(source, &tree);
-
-    if let Some(diagnostic) = extracted.diagnostics.first() {
-        let error = match diagnostic.code.as_str() {
-            "resource_limit" => ParseStatus::ResourceLimit,
-            _ => ParseStatus::ParseError,
-        };
-        return FileFacts {
-            error: Some(error),
-            diagnostic_code: static_diagnostic_code(&diagnostic.code),
-            diagnostic_detail: diagnostic.detail.clone(),
-            symbols: Vec::new(),
-        };
-    }
-
-    FileFacts {
-        error: None,
-        diagnostic_code: "",
-        diagnostic_detail: String::new(),
-        symbols: build_symbol_rows(path, source, &extracted.symbols),
-    }
-}
-
-/// Narrows an extraction diagnostic code to a `'static` contract spelling.
-#[cfg(feature = "lang-php")]
-fn static_diagnostic_code(code: &str) -> &'static str {
-    match code {
-        "resource_limit" => "resource_limit",
-        _ => "parse_error",
-    }
-}
-
-/// Turns extracted symbols into persisted rows for one file.
-///
-/// Duplicate qualified names within the file receive one-based ordinals in
-/// `(start_byte, end_byte, kind)` order (T03), the canonical ID escapes `%`
-/// and `#`, and line numbers come from the T07 bytes via [`LineIndex`].
-#[cfg(feature = "lang-php")]
-fn build_symbol_rows(
-    path: &str,
-    source: &[u8],
-    extracted: &[rivet_core::ExtractedSymbol],
-) -> Vec<SymbolRow> {
-    let items: Vec<(&str, Span, SymbolKind)> = extracted
-        .iter()
-        .map(|symbol| (symbol.qualified_name.as_str(), symbol.span, symbol.kind))
-        .collect();
-    let ordinals = assign_ordinals(&items);
-    let ids: Vec<String> = extracted
-        .iter()
-        .zip(&ordinals)
-        .map(|(symbol, ordinal)| {
-            SymbolId::new(path, &symbol.qualified_name, *ordinal)
-                .expect("a non-empty path and qualified name")
-                .as_canonical()
-        })
-        .collect();
-    let lines = LineIndex::new(source);
-
-    extracted
-        .iter()
-        .enumerate()
-        .map(|(index, symbol)| SymbolRow {
-            id: ids[index].clone(),
-            file: path.to_string(),
-            name: symbol.name.clone(),
-            lookup_name: rivet_languages::php::lookup_name(&symbol.name, symbol.kind),
-            qualified_name: symbol.qualified_name.clone(),
-            kind: symbol.kind,
-            parent_id: symbol.parent_index.map(|parent| ids[parent].clone()),
-            start_byte: symbol.span.start_byte(),
-            end_byte: symbol.span.end_byte(),
-            start_line: lines.start_line(symbol.span),
-            end_line: lines.end_line(symbol.span),
-            signature: symbol.signature.clone(),
-            doc_comment: symbol.doc_comment.clone(),
-        })
-        .collect()
-}
-
-/// Increments the skip count for `reason` and returns the persisted status.
-///
-/// Symlinks and non-regular files cannot reach here because traversal excludes
-/// them; if one does, it is classified `unsupported` rather than treated as
-/// normal source.
-fn classify_skip(reason: SkipReason, skipped: &mut Skipped) -> ParseStatus {
-    match reason {
-        SkipReason::Size => {
-            skipped.size += 1;
-            ParseStatus::Size
-        }
-        SkipReason::Binary => {
-            skipped.binary += 1;
-            ParseStatus::Binary
-        }
-        SkipReason::Encoding => {
-            skipped.encoding += 1;
-            ParseStatus::Encoding
-        }
-        SkipReason::Symlink | SkipReason::NotRegular => {
-            skipped.unsupported += 1;
-            ParseStatus::Unsupported
-        }
-    }
-}
-
-/// The diagnostic code and detail for a T07 skip, or `None` when the skip is
-/// already represented by a coverage count only.
-fn skip_diagnostic(reason: SkipReason) -> Option<(&'static str, &'static str)> {
-    match reason {
-        SkipReason::Size => Some(("file_too_large", "exceeds max_file_size_kb")),
-        SkipReason::Binary => Some(("binary_file", "NUL byte within the inspected prefix")),
-        SkipReason::Encoding => Some(("invalid_utf8", "source is not valid UTF-8")),
-        SkipReason::Symlink | SkipReason::NotRegular => None,
-    }
-}
-
 /// Parses `--languages`, rejecting empty and uncompiled names before any
 /// filesystem work.
 fn parse_languages(value: Option<&str>) -> Result<Option<Vec<String>>, CliError> {
@@ -565,7 +235,7 @@ fn parse_freshness(value: Option<&str>) -> Result<Option<Freshness>, CliError> {
 }
 
 /// Rejects a configured language that this binary was not built with.
-fn validate_configured_languages(config: &Config) -> Result<(), CliError> {
+pub(crate) fn validate_configured_languages(config: &Config) -> Result<(), CliError> {
     for name in &config.languages.enabled {
         if !is_language_compiled(name) {
             return Err(CliError::invalid_arguments(
@@ -579,18 +249,6 @@ fn validate_configured_languages(config: &Config) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Creates the cache directory at a Git root, tolerating a concurrent creation.
-fn create_rivet_dir(path: &Path) -> Result<(), CliError> {
-    match std::fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(CliError::repository_unavailable(
-            format!("cannot create {}: {error}", path.display()),
-            "Check that the repository root is writable.",
-        )),
-    }
-}
-
 /// Maps root discovery failures to `repository_unavailable` (exit 3).
 pub(crate) fn root_error(error: RootError) -> CliError {
     CliError::repository_unavailable(
@@ -601,7 +259,7 @@ pub(crate) fn root_error(error: RootError) -> CliError {
 
 /// Maps config failures: a malformed schema is an argument error (exit 2) whose
 /// message names the offending key; I/O and unsafe destinations are exit 3.
-fn config_error(error: ConfigError) -> CliError {
+pub(crate) fn config_error(error: ConfigError) -> CliError {
     match &error {
         ConfigError::Invalid { .. } => CliError::invalid_arguments(
             error.to_string(),
@@ -615,7 +273,7 @@ fn config_error(error: ConfigError) -> CliError {
 }
 
 /// Maps traversal failures to `repository_unavailable` (exit 3).
-fn walk_error(error: WalkError) -> CliError {
+pub(crate) fn walk_error(error: WalkError) -> CliError {
     CliError::repository_unavailable(
         error.to_string(),
         "Check the repository permissions and retry.",

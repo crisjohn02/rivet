@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T17 (T13, T14, and T17 ran in parallel worktrees and are merged; T15 and T16 remain) |
-| Next task | T15 |
+| Last completed task | T15 |
+| Next task | T16 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T14 (branch `task/T14`): rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 4 + 7 index_json + 7 symbol_json + 5 symbol_source, rivet-core 60, rivet-index 3, rivet-languages 4 unit + 6 php_extract, rivet-parser 0+4, rivet-store 22; 0 failed); `python3 tests/gold/check_gold.py` verified 25 entries; `cargo build -p rivet-cli --no-default-features` and `--features lang-php` compile. Prior T12 timing kept: 16 ms release / 32 ms debug per `rivet symbol`. |
+| Last checks | T15: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` all pass (rivet-cli 5 unit + 7 index_json + 6 refresh + 7 symbol_json + 13 symbol_query_forms + 5 symbol_source, rivet-core 60, rivet-index 11, rivet-languages 4 unit + 6 php_extract + 2 php_uses, rivet-parser 2 unit + 4 grammar_smoke, rivet-store 22; 0 failed); `python3 tests/gold/check_gold.py` verified 25 entries; `--no-default-features` and `--features lang-php` builds compile. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -78,7 +78,7 @@ Read: ADDING-A-LANGUAGE PHP support and fixtures; spec §10; OUTPUT-CONTRACT sym
 | [x] | T12 | Persist symbol records and implement canonical-ID, short-name, and qualified-name lookup. | `symbol <query> --json` locates the fixture methods; duplicate short names return candidates and exit 5. Call lists are still explicitly unavailable in this development milestone. |
 | [x] | T13 | Add `file:line`, query normalization, deterministic ambiguity pagination, and not-found suggestions. | Same-line nested ambiguity is not guessed; candidate limits/offsets and error envelopes match the contract. |
 | [x] | T14 | Extract declaration signatures/docs and implement `symbol --source` from stored bytes. | Returned source hashes/spans match indexed bytes even if the live file subsequently changes; CRLF/Unicode source is preserved. |
-| [ ] | T15 | Add changed-content refresh and removals to the query path; avoid reparsing equal content. | An edit, deletion, rename, and valid-to-malformed transition update symbol results automatically. A same-size edit with restored mtime is detected in default content mode. |
+| [x] | T15 | Add changed-content refresh and removals to the query path; avoid reparsing equal content. | An edit, deletion, rename, and valid-to-malformed transition update symbol results automatically. A same-size edit with restored mtime is detected in default content mode. |
 | [ ] | T16 | Add effective config/grammar invalidation plus explicit metadata/cached modes and force rebuild behavior. | Changed ignores/languages remove excluded facts; cached responses are labeled and require a compatible index; metadata mode never claims content verification. |
 
 **Checkpoint C:** demonstrate `index → symbol → edit → symbol` from the CLI. Compare clean-rebuild and incremental symbol output. This is the first useful navigation result; measure no-change refresh cost now, without optimizing it yet.

@@ -1,0 +1,562 @@
+//! Changed-content refresh shared by `rivet index` and every query command
+//! (spec §12.3, §12.4 steps 1–2 and 4; ARCHITECTURE "Refresh and
+//! invalidation" and "Concurrency and source consistency").
+//!
+//! [`refresh`] is the single code path that performs a refresh: it walks the
+//! eligible files, reads and hashes each enabled-language file, reparses only
+//! changed content (or *all* enabled content when the stored extractor
+//! fingerprint differs), drops facts for deleted or newly excluded files, and
+//! publishes one atomic snapshot. Files whose content hash and stored parse
+//! status are unchanged keep their stored symbols; their mtime/size are still
+//! rewritten.
+//!
+//! T15 implements [`RefreshMode::Content`] only. Metadata and cached modes
+//! arrive in T16.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Instant;
+
+use rivet_core::{Config, ParseStatus, SourceRead, discover_root, read_source, walk_eligible};
+use rivet_languages::{EXTRACTOR_FINGERPRINT, language_for_path};
+use rivet_parser::parse_file;
+use rivet_store::{
+    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, Store, SymbolRow, clamp_mtime_ns,
+};
+
+use crate::index::{
+    DIAGNOSTIC_CAP, DiagnosticItem, Report, Skipped, config_error, root_error, store_error,
+    walk_error,
+};
+use crate::transport::CliError;
+
+/// The discovered root and loaded configuration shared by `index` and queries.
+pub(crate) struct Context {
+    pub(crate) root: rivet_core::RootInfo,
+    pub(crate) config: Config,
+}
+
+/// Discovers the nearest root and loads its configuration.
+///
+/// This performs no writes; [`open_store`] creates the cache directory only
+/// when the caller is ready to refresh.
+pub(crate) fn open_context() -> Result<Context, CliError> {
+    let cwd = std::env::current_dir().map_err(|error| {
+        CliError::repository_unavailable(
+            format!("cannot determine the working directory: {error}"),
+            "Run rivet from inside a repository.",
+        )
+    })?;
+    let root = discover_root(&cwd).map_err(root_error)?;
+    let config = Config::load(&root.root).map_err(config_error)?;
+    Ok(Context { root, config })
+}
+
+/// Opens the cache store, creating `.rivet/` at a Git root when absent.
+///
+/// A query auto-creates `.rivet/` only at a Git root and never edits
+/// `.gitignore` (spec §25). `discover_root` reports `has_rivet_dir = false`
+/// only when the boundary was `.git`, so this creates the cache directory
+/// exactly there.
+pub(crate) fn open_store(root: &rivet_core::RootInfo) -> Result<Store, CliError> {
+    let rivet_dir = root.root.join(".rivet");
+    if !root.has_rivet_dir {
+        create_rivet_dir(&rivet_dir)?;
+    }
+    Store::open(&rivet_dir).map_err(store_error)
+}
+
+/// Creates the cache directory, tolerating a concurrent creation.
+fn create_rivet_dir(path: &Path) -> Result<(), CliError> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(CliError::repository_unavailable(
+            format!("cannot create {}: {error}", path.display()),
+            "Check that the repository root is writable.",
+        )),
+    }
+}
+
+/// How a refresh decides which bytes are trustworthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshMode {
+    /// Read and hash eligible content; reparse only changed content or when
+    /// the extractor fingerprint changed (spec §12.4 step 2).
+    Content,
+}
+
+/// The shared result of one refresh.
+///
+/// The embedded [`Report`] is the same data `rivet index` formats, so query
+/// commands can attach the identical coverage/diagnostics/snapshot metadata.
+#[derive(Debug)]
+pub struct RefreshOutcome {
+    /// Coverage, diagnostics, counts, and the committed snapshot digest.
+    pub report: Report,
+}
+
+/// Refreshes the index inside one publish transaction and returns its report.
+///
+/// This is the only function that walks, parses, and publishes on the query
+/// path. A failed parse does not abort the refresh: the file is recorded with
+/// its failure status and no symbols, and unrelated results stay available
+/// with partial coverage (ARCHITECTURE "Parse and coverage policy"). An I/O
+/// failure aborts, publishing nothing.
+pub fn refresh(
+    root: &Path,
+    config: &Config,
+    store: &mut Store,
+    mode: RefreshMode,
+) -> Result<RefreshOutcome, CliError> {
+    match mode {
+        RefreshMode::Content => refresh_content(root, config, store),
+    }
+}
+
+/// Walks, reads, conditionally reparses, and publishes the complete inventory.
+fn refresh_content(
+    root: &Path,
+    config: &Config,
+    store: &mut Store,
+) -> Result<RefreshOutcome, CliError> {
+    let started = Instant::now();
+
+    let walk = walk_eligible(root, config).map_err(walk_error)?;
+    let max_bytes = config.index.max_file_size_kb.saturating_mul(1024);
+
+    // A stored extractor fingerprint that differs from this build invalidates
+    // every enabled-language file regardless of content hash (spec §12.3,
+    // ARCHITECTURE "Refresh and invalidation").
+    let stored_extractor = store
+        .get_meta("extractor_fingerprint")
+        .map_err(store_error)?;
+    let fingerprint_matches = stored_extractor.as_deref() == Some(EXTRACTOR_FINGERPRINT);
+
+    // Load the current inventory and symbols once. Reused files keep their
+    // stored source bytes and symbol rows.
+    let mut stored_by_path: HashMap<String, FileRow> = store
+        .list_files()
+        .map_err(store_error)?
+        .into_iter()
+        .map(|file| (file.path.clone(), file))
+        .collect();
+    let mut stored_symbols = symbols_by_file(store)?;
+
+    let mut files = Vec::with_capacity(walk.files.len());
+    let mut symbols: Vec<SymbolRow> = Vec::new();
+    let mut skipped = Skipped::default();
+    let mut diagnostics = Vec::new();
+    let mut files_indexed = 0_u64;
+    let mut reparsed: Vec<String> = Vec::new();
+
+    for entry in &walk.files {
+        let language = language_for_path(&entry.rel_path).filter(|id| {
+            config
+                .languages
+                .enabled
+                .iter()
+                .any(|name| name.as_str() == id.name())
+        });
+        let Some(id) = language else {
+            skipped.unsupported += 1;
+            files.push(FileRow {
+                path: entry.rel_path.clone(),
+                language: None,
+                mtime_ns: clamp_mtime_ns(entry.mtime_ns),
+                size: entry.size,
+                content_hash: None,
+                source: None,
+                parse_status: ParseStatus::Unsupported,
+            });
+            continue;
+        };
+
+        let language_name = id.name().to_string();
+        match read_source(root, entry, max_bytes) {
+            SourceRead::Ok { bytes, hash } => {
+                let stored = stored_by_path.remove(&entry.rel_path);
+                // Do not reparse when the fingerprint is current, the hash is
+                // unchanged, and the file previously parsed cleanly.
+                let reuse = fingerprint_matches
+                    && stored.as_ref().is_some_and(|file| {
+                        file.content_hash.as_deref() == Some(hash.as_str())
+                            && file.parse_status == ParseStatus::Ok
+                    });
+
+                let (parse_status, source, file_symbols, file_diagnostic) = if reuse {
+                    let source = stored
+                        .as_ref()
+                        .and_then(|file| file.source.clone())
+                        .or(Some(bytes));
+                    let file_symbols = stored_symbols.remove(&entry.rel_path).unwrap_or_default();
+                    (ParseStatus::Ok, source, file_symbols, None)
+                } else {
+                    reparsed.push(entry.rel_path.clone());
+                    let extracted = parse_file(id, &bytes);
+                    match extracted.diagnostics.first() {
+                        Some(diagnostic) => {
+                            let status = match diagnostic.code.as_str() {
+                                "resource_limit" => ParseStatus::ResourceLimit,
+                                _ => ParseStatus::ParseError,
+                            };
+                            (
+                                status,
+                                None,
+                                Vec::new(),
+                                Some(DiagnosticItem {
+                                    file: entry.rel_path.clone(),
+                                    code: static_diagnostic_code(&diagnostic.code),
+                                    detail: diagnostic.detail.clone(),
+                                }),
+                            )
+                        }
+                        None => {
+                            let rows = symbol_rows(&entry.rel_path, &bytes, &extracted);
+                            (ParseStatus::Ok, Some(bytes), rows, None)
+                        }
+                    }
+                };
+
+                match parse_status {
+                    ParseStatus::Ok => files_indexed += 1,
+                    ParseStatus::ParseError => skipped.parse_error += 1,
+                    ParseStatus::ResourceLimit => skipped.resource_limit += 1,
+                    _ => {}
+                }
+                if let Some(item) = file_diagnostic {
+                    diagnostics.push(item);
+                }
+                symbols.extend(file_symbols);
+                files.push(FileRow {
+                    path: entry.rel_path.clone(),
+                    language: Some(language_name),
+                    mtime_ns: clamp_mtime_ns(entry.mtime_ns),
+                    size: entry.size,
+                    content_hash: Some(hash),
+                    source,
+                    parse_status,
+                });
+            }
+            SourceRead::Skipped { reason } => {
+                let status = classify_skip(reason, &mut skipped);
+                if let Some((code, detail)) = skip_diagnostic(reason) {
+                    diagnostics.push(DiagnosticItem {
+                        file: entry.rel_path.clone(),
+                        code,
+                        detail: detail.to_string(),
+                    });
+                }
+                files.push(FileRow {
+                    path: entry.rel_path.clone(),
+                    language: Some(language_name),
+                    mtime_ns: clamp_mtime_ns(entry.mtime_ns),
+                    size: entry.size,
+                    content_hash: None,
+                    source: None,
+                    parse_status: status,
+                });
+            }
+            // An I/O failure aborts the refresh; it never silently preserves old
+            // facts (spec §27).
+            SourceRead::Failed(error) => {
+                return Err(CliError::repository_unavailable(
+                    format!("cannot read {}: {error}", entry.rel_path),
+                    "Fix the file permissions or remove the unreadable path, then retry.",
+                ));
+            }
+        }
+    }
+
+    // Non-UTF-8 paths are outside the scan domain but must be reported and force
+    // `complete: false` (OUTPUT-CONTRACT "Common index metadata").
+    for path in &walk.skipped {
+        diagnostics.push(DiagnosticItem {
+            file: path.lossy.clone(),
+            code: "non_utf8_path",
+            detail: "path is not valid UTF-8".to_string(),
+        });
+    }
+
+    let skipped_total = skipped.total();
+    let files_seen = files_indexed + skipped_total;
+    let complete = skipped_total == 0 && walk.skipped.is_empty();
+
+    diagnostics.sort_by(|a, b| {
+        a.file
+            .as_bytes()
+            .cmp(b.file.as_bytes())
+            .then_with(|| a.code.as_bytes().cmp(b.code.as_bytes()))
+            .then_with(|| a.detail.as_bytes().cmp(b.detail.as_bytes()))
+    });
+    let diagnostics_total = diagnostics.len();
+    let diagnostics_truncated = diagnostics_total > DIAGNOSTIC_CAP;
+    diagnostics.truncate(DIAGNOSTIC_CAP);
+
+    let fingerprint = Fingerprint {
+        index_format_version: INDEX_FORMAT_VERSION.to_string(),
+        effective_config: config.fingerprint(),
+        extractor: EXTRACTOR_FINGERPRINT.to_string(),
+        resolver: "none".to_string(),
+    };
+    let symbol_count = symbols.len() as u64;
+    let published = store
+        .publish_inventory(InventoryInput {
+            fingerprint,
+            files,
+            symbols,
+        })
+        .map_err(store_error)?;
+
+    record_reparsed(&reparsed);
+
+    Ok(RefreshOutcome {
+        report: Report {
+            snapshot: published.digest,
+            freshness: config.index.freshness,
+            complete,
+            files_seen,
+            files_indexed,
+            skipped,
+            diagnostics_total,
+            diagnostics_truncated,
+            diagnostics,
+            symbols: symbol_count,
+            uses: 0,
+            bindings: 0,
+            updated: published.updated,
+            unchanged: published.unchanged,
+            deleted: published.deleted,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            timing: false,
+        },
+    })
+}
+
+/// Groups every persisted symbol row by owning file.
+fn symbols_by_file(store: &Store) -> Result<HashMap<String, Vec<SymbolRow>>, CliError> {
+    let mut by_file: HashMap<String, Vec<SymbolRow>> = HashMap::new();
+    for symbol in store.list_symbols().map_err(store_error)? {
+        by_file.entry(symbol.file.clone()).or_default().push(symbol);
+    }
+    Ok(by_file)
+}
+
+/// Builds a `symbols` row list from one file's extracted declarations.
+///
+/// Only PHP has an adapter in this milestone; the TypeScript adapter will fill
+/// this in later without changing the refresh path.
+#[cfg(feature = "lang-php")]
+fn symbol_rows(path: &str, source: &[u8], extracted: &rivet_core::ExtractedFile) -> Vec<SymbolRow> {
+    build_symbol_rows(path, source, &extracted.symbols)
+}
+
+/// No compiled language adapter yet: a parsed tree yields no persisted rows.
+#[cfg(not(feature = "lang-php"))]
+fn symbol_rows(
+    _path: &str,
+    _source: &[u8],
+    _extracted: &rivet_core::ExtractedFile,
+) -> Vec<SymbolRow> {
+    Vec::new()
+}
+
+/// Turns extracted symbols into persisted rows for one file.
+///
+/// Duplicate qualified names within the file receive one-based ordinals in
+/// `(start_byte, end_byte, kind)` order (T03), the canonical ID escapes `%`
+/// and `#`, and line numbers come from the T07 bytes via [`LineIndex`].
+#[cfg(feature = "lang-php")]
+fn build_symbol_rows(
+    path: &str,
+    source: &[u8],
+    extracted: &[rivet_core::ExtractedSymbol],
+) -> Vec<SymbolRow> {
+    use rivet_core::{LineIndex, Span, SymbolId, SymbolKind, assign_ordinals};
+
+    let items: Vec<(&str, Span, SymbolKind)> = extracted
+        .iter()
+        .map(|symbol| (symbol.qualified_name.as_str(), symbol.span, symbol.kind))
+        .collect();
+    let ordinals = assign_ordinals(&items);
+    let ids: Vec<String> = extracted
+        .iter()
+        .zip(&ordinals)
+        .map(|(symbol, ordinal)| {
+            SymbolId::new(path, &symbol.qualified_name, *ordinal)
+                .expect("a non-empty path and qualified name")
+                .as_canonical()
+        })
+        .collect();
+    let lines = LineIndex::new(source);
+
+    extracted
+        .iter()
+        .enumerate()
+        .map(|(index, symbol)| SymbolRow {
+            id: ids[index].clone(),
+            file: path.to_string(),
+            name: symbol.name.clone(),
+            lookup_name: rivet_languages::php::lookup_name(&symbol.name, symbol.kind),
+            qualified_name: symbol.qualified_name.clone(),
+            kind: symbol.kind,
+            parent_id: symbol.parent_index.map(|parent| ids[parent].clone()),
+            start_byte: symbol.span.start_byte(),
+            end_byte: symbol.span.end_byte(),
+            start_line: lines.start_line(symbol.span),
+            end_line: lines.end_line(symbol.span),
+            signature: symbol.signature.clone(),
+            doc_comment: symbol.doc_comment.clone(),
+        })
+        .collect()
+}
+
+/// Narrows an extraction diagnostic code to a `'static` contract spelling.
+fn static_diagnostic_code(code: &str) -> &'static str {
+    match code {
+        "resource_limit" => "resource_limit",
+        _ => "parse_error",
+    }
+}
+
+/// Increments the skip count for `reason` and returns the persisted status.
+///
+/// Symlinks and non-regular files cannot reach here because traversal excludes
+/// them; if one does, it is classified `unsupported` rather than treated as
+/// normal source.
+fn classify_skip(reason: rivet_core::SkipReason, skipped: &mut Skipped) -> ParseStatus {
+    use rivet_core::SkipReason;
+
+    match reason {
+        SkipReason::Size => {
+            skipped.size += 1;
+            ParseStatus::Size
+        }
+        SkipReason::Binary => {
+            skipped.binary += 1;
+            ParseStatus::Binary
+        }
+        SkipReason::Encoding => {
+            skipped.encoding += 1;
+            ParseStatus::Encoding
+        }
+        SkipReason::Symlink | SkipReason::NotRegular => {
+            skipped.unsupported += 1;
+            ParseStatus::Unsupported
+        }
+    }
+}
+
+/// The diagnostic code and detail for a T07 skip, or `None` when the skip is
+/// already represented by a coverage count only.
+fn skip_diagnostic(reason: rivet_core::SkipReason) -> Option<(&'static str, &'static str)> {
+    use rivet_core::SkipReason;
+
+    match reason {
+        SkipReason::Size => Some(("file_too_large", "exceeds max_file_size_kb")),
+        SkipReason::Binary => Some(("binary_file", "NUL byte within the inspected prefix")),
+        SkipReason::Encoding => Some(("invalid_utf8", "source is not valid UTF-8")),
+        SkipReason::Symlink | SkipReason::NotRegular => None,
+    }
+}
+
+/// Records the paths reparsed by this refresh when the test hook is enabled.
+///
+/// The hook appends one repository-relative path per line to the file named by
+/// `RIVET_DEBUG_REPARSED`. It is compiled only into debug builds, so release
+/// binaries never read the variable.
+#[cfg(debug_assertions)]
+fn record_reparsed(paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    let Ok(target) = std::env::var("RIVET_DEBUG_REPARSED") else {
+        return;
+    };
+    if target.is_empty() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+    else {
+        return;
+    };
+    use std::io::Write as _;
+    for path in paths {
+        let _ = writeln!(file, "{path}");
+    }
+}
+
+/// Release builds have no reparse-recording hook.
+#[cfg(not(debug_assertions))]
+fn record_reparsed(_paths: &[String]) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{RefreshMode, refresh};
+    use rivet_core::{Config, ParseStatus, content_hash};
+    use rivet_store::{FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, Store};
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A stale extractor fingerprint must reparse content even when the stored
+    /// hash and parse status are unchanged.
+    #[test]
+    fn extractor_fingerprint_change_reparses_equal_content() {
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "rivet-refresh-unit-{}-{nanos}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+
+        let bytes = b"<?php\nnamespace App;\nfunction f(): void {}\n".to_vec();
+        fs::write(root.join("a.php"), &bytes).expect("write fixture");
+
+        let config = Config::default();
+        let mut store = Store::open_in_memory().expect("open in-memory store");
+        // A current hash and an `ok` status that would be reused, but a stale
+        // extractor fingerprint and no persisted symbols.
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: Fingerprint {
+                    index_format_version: INDEX_FORMAT_VERSION.to_string(),
+                    effective_config: config.fingerprint(),
+                    extractor: "stale-extractor".to_string(),
+                    resolver: "none".to_string(),
+                },
+                files: vec![FileRow {
+                    path: "a.php".to_string(),
+                    language: Some("php".to_string()),
+                    mtime_ns: 0,
+                    size: bytes.len() as u64,
+                    content_hash: Some(content_hash(&bytes)),
+                    source: Some(bytes.clone()),
+                    parse_status: ParseStatus::Ok,
+                }],
+                symbols: Vec::new(),
+            })
+            .expect("publish stale inventory");
+
+        let outcome =
+            refresh(&root, &config, &mut store, RefreshMode::Content).expect("refresh succeeds");
+        assert!(
+            outcome.report.symbols > 0,
+            "fingerprint change must reparse and republish facts"
+        );
+        assert!(
+            store.get_symbol("a.php#App\\f").expect("read").is_some(),
+            "reparsed facts must be published"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}
