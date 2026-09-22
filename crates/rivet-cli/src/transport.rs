@@ -27,6 +27,8 @@ pub const EXIT_SYMBOL_NOT_FOUND: i32 = 4;
 pub const EXIT_AMBIGUOUS_SYMBOL: i32 = 5;
 /// No allowed form of the context target fits the token budget.
 pub const EXIT_BUDGET_TOO_SMALL: i32 = 8;
+/// The working tree kept changing across the refresh and its one retry.
+pub const EXIT_REPOSITORY_CHANGED: i32 = 9;
 
 /// A CLI failure rendered as an error object in `--json` mode and as human text
 /// otherwise.
@@ -73,6 +75,18 @@ impl CliError {
         CliError {
             code: "repository_unavailable",
             exit: EXIT_REPOSITORY_UNAVAILABLE,
+            message: message.into(),
+            hint: hint.into(),
+            extra: Box::new(Map::new()),
+        }
+    }
+
+    /// A `repository_changed` failure (exit 9): a race was detected on the
+    /// refresh and again on its one retry (spec §12.4 step 3).
+    pub fn repository_changed(message: impl Into<String>, hint: impl Into<String>) -> CliError {
+        CliError {
+            code: "repository_changed",
+            exit: EXIT_REPOSITORY_CHANGED,
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(Map::new()),

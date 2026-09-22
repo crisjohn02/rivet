@@ -7,14 +7,18 @@
 //! database whose `meta.index_format_version` differs. Minimal row operations
 //! run inside explicit transactions. [`Store::publish_inventory`] atomically
 //! replaces the complete file inventory and writes the configuration
-//! fingerprints plus the deterministic snapshot digest. Walking, parsing, and
-//! resolution belong to later tasks.
+//! fingerprints plus the deterministic snapshot digest. [`Store::begin_write`]
+//! takes the writer lock for a whole refresh ([`WriteTxn`]), and
+//! [`Store::begin_snapshot_read`] pins one committed snapshot for a query; every
+//! read method joins whichever transaction is open. Walking, parsing, and
+//! resolution belong to the CLI and index crates.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rivet_core::{ParseStatus, RefKind, Resolution, SymbolKind};
 use rusqlite::types::Type;
@@ -22,6 +26,14 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 /// The database file name inside `.rivet/`.
 const INDEX_DB_FILE: &str = "index.db";
+
+/// The writer-lock busy timeout from ARCHITECTURE "Refresh and invalidation"
+/// (`begin immediate transaction (busy timeout: 5 seconds)`).
+pub const WRITER_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// [`WRITER_BUSY_TIMEOUT`] in the milliseconds `PRAGMA busy_timeout` takes; the
+/// default for every statement on a connection.
+const DEFAULT_BUSY_TIMEOUT_MS: i64 = 5_000;
 
 /// The only supported value of `meta.index_format_version`.
 pub const INDEX_FORMAT_VERSION: &str = "1";
@@ -398,6 +410,19 @@ pub enum Error {
         /// What failed.
         detail: String,
     },
+    /// The writer lock (a `BEGIN IMMEDIATE` transaction on `index.db`) was not
+    /// acquired within the busy timeout because another process holds it.
+    WriterLocked {
+        /// The database whose writer lock is held.
+        path: String,
+        /// The busy timeout that elapsed, in milliseconds.
+        timeout_ms: u64,
+    },
+    /// A transaction was begun while another was already open on the store.
+    TransactionState {
+        /// What was attempted.
+        detail: String,
+    },
     /// An underlying SQLite error.
     Sqlite(rusqlite::Error),
 }
@@ -413,6 +438,12 @@ impl fmt::Display for Error {
                 "incompatible index format version {found:?}; expected {INDEX_FORMAT_VERSION:?}"
             ),
             Error::Configuration { detail } => write!(f, "cannot configure store: {detail}"),
+            Error::WriterLocked { path, timeout_ms } => write!(
+                f,
+                "the index writer lock on {path} is held by another process \
+                 (not acquired within {timeout_ms} ms)"
+            ),
+            Error::TransactionState { detail } => write!(f, "invalid transaction state: {detail}"),
             Error::Sqlite(source) => write!(f, "sqlite error: {source}"),
         }
     }
@@ -437,6 +468,8 @@ impl From<rusqlite::Error> for Error {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    /// The on-disk database, or `None` for an in-memory store.
+    db_path: Option<PathBuf>,
 }
 
 impl Store {
@@ -474,8 +507,11 @@ impl Store {
         initialize(&conn, allow_rebuild)?;
         // Set WAL only after the format is accepted so a refused database is
         // left byte-for-byte unchanged (spec §27).
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        Ok(Store { conn })
+        enable_wal(&conn)?;
+        Ok(Store {
+            conn,
+            db_path: Some(path),
+        })
     }
 
     /// Opens a fresh in-memory index cache with the version-1 schema.
@@ -486,7 +522,10 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         configure_connection(&conn)?;
         initialize(&conn, false)?;
-        Ok(Store { conn })
+        Ok(Store {
+            conn,
+            db_path: None,
+        })
     }
 
     /// Inserts or replaces one `files` row in a transaction.
@@ -520,19 +559,405 @@ impl Store {
     /// Atomically replaces the complete `files` inventory and writes the four
     /// fingerprint values plus the snapshot digest into `meta`.
     ///
-    /// The whole publication runs in one `BEGIN IMMEDIATE` transaction: rows
-    /// absent from `input.files` are deleted, present rows are inserted or
-    /// updated, and the `meta` values are written before commit. Any failure
-    /// rolls the transaction back so the previous complete inventory and meta
-    /// stay untouched (spec §12.3; ARCHITECTURE "Refresh and invalidation" and
-    /// "Concurrency and source consistency"). A duplicate new path aborts the
-    /// transaction rather than collapsing two logically distinct inputs.
+    /// The whole publication runs in one `BEGIN IMMEDIATE` transaction (see
+    /// [`Store::begin_write`]): rows absent from `input.files` are deleted,
+    /// present rows are inserted or updated, and the `meta` values are written
+    /// before commit. Any failure rolls the transaction back so the previous
+    /// complete inventory and meta stay untouched (spec §12.3; ARCHITECTURE
+    /// "Refresh and invalidation" and "Concurrency and source consistency"). A
+    /// duplicate new path aborts the transaction rather than collapsing two
+    /// logically distinct inputs.
     ///
     /// When `input.force` is set, every stored fact (`files`, `symbols`,
     /// `uses`, `bindings`, `scopes`, `diagnostics`) is deleted first inside the
     /// same transaction and rebuilt, so every current file row counts as
     /// `updated` (spec §13). The database file itself is never deleted.
+    ///
+    /// This is [`Store::begin_write`], [`WriteTxn::stage_inventory`], and
+    /// [`WriteTxn::commit`] in one call, for callers that computed the
+    /// inventory without holding the writer lock (tests and fixtures). The
+    /// refresh path holds the lock for the whole refresh instead.
     pub fn publish_inventory(&mut self, input: InventoryInput) -> Result<PublishReport, Error> {
+        let mut txn = self.begin_write(WRITER_BUSY_TIMEOUT)?;
+        let staged = txn.stage_inventory(input)?;
+        txn.commit(staged)
+    }
+
+    /// Takes the writer lock: begins one `BEGIN IMMEDIATE` transaction that
+    /// every later read and write on this store joins until the returned guard
+    /// commits or is dropped (ARCHITECTURE "Refresh and invalidation": the
+    /// refresh begins with `begin immediate transaction (busy timeout: 5
+    /// seconds)`).
+    ///
+    /// `busy_timeout` bounds the wait for another process's writer. When it
+    /// elapses the error is [`Error::WriterLocked`]; nothing was read or
+    /// written. Dropping the guard without [`WriteTxn::commit`] rolls the whole
+    /// transaction back, as does a crash or kill of the process, so no partial
+    /// refresh ever becomes visible.
+    pub fn begin_write(&self, busy_timeout: Duration) -> Result<WriteTxn<'_>, Error> {
+        if !self.conn.is_autocommit() {
+            return Err(Error::TransactionState {
+                detail: "a transaction is already open on this store".to_string(),
+            });
+        }
+        let timeout_ms = i64::try_from(busy_timeout.as_millis()).unwrap_or(i64::MAX);
+        self.conn.pragma_update(None, "busy_timeout", timeout_ms)?;
+        let begun = self.conn.execute_batch("BEGIN IMMEDIATE");
+        // The busy timeout is a connection setting, not transactional state, so
+        // the default is restored for every later statement either way.
+        let restored = self
+            .conn
+            .pragma_update(None, "busy_timeout", DEFAULT_BUSY_TIMEOUT_MS);
+        match begun {
+            Ok(()) => {
+                let txn = WriteTxn {
+                    store: self,
+                    open: true,
+                };
+                restored?;
+                Ok(txn)
+            }
+            Err(error) if is_busy(&error) => Err(Error::WriterLocked {
+                path: self.lock_path(),
+                timeout_ms: timeout_ms as u64,
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Begins one committed read transaction and returns the `snapshot_digest`
+    /// it observes.
+    ///
+    /// ARCHITECTURE "Concurrency and source consistency": "Readers use a
+    /// committed read transaction." The digest is read as the transaction's
+    /// first statement, which is what pins the WAL snapshot, so every later
+    /// read on this store (rows, stored source bytes, meta) sees exactly the
+    /// committed snapshot whose digest this returns, even while another process
+    /// publishes (spec §12.4 step 4). The transaction stays open until
+    /// [`Store::end_snapshot_read`] or until the store is dropped; it takes no
+    /// writer lock and never blocks a writer.
+    pub fn begin_snapshot_read(&self) -> Result<Option<String>, Error> {
+        if !self.conn.is_autocommit() {
+            return Err(Error::TransactionState {
+                detail: "a transaction is already open on this store".to_string(),
+            });
+        }
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        let digest = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'snapshot_digest'",
+                [],
+                |row| row.get(0),
+            )
+            .optional();
+        match digest {
+            Ok(digest) => Ok(digest),
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Ends the read transaction begun by [`Store::begin_snapshot_read`]. A
+    /// store with no open transaction is left unchanged.
+    pub fn end_snapshot_read(&self) -> Result<(), Error> {
+        if !self.conn.is_autocommit() {
+            self.conn.execute_batch("COMMIT")?;
+        }
+        Ok(())
+    }
+
+    /// Runs `PRAGMA integrity_check` and returns its result rows (`["ok"]` for
+    /// a healthy database).
+    pub fn integrity_check(&self) -> Result<Vec<String>, Error> {
+        let mut stmt = self.conn.prepare("PRAGMA integrity_check")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// The path named by a writer-lock failure.
+    fn lock_path(&self) -> String {
+        match &self.db_path {
+            Some(path) => path.display().to_string(),
+            None => ":memory:".to_string(),
+        }
+    }
+
+    /// Runs `read` in this store's open transaction, or in a new read
+    /// transaction of its own when none is open.
+    ///
+    /// Inside [`Store::begin_write`] or [`Store::begin_snapshot_read`] every
+    /// read therefore sees the same snapshot (the writer's own uncommitted rows,
+    /// or one committed snapshot).
+    fn read<T>(&self, read: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+        if self.conn.is_autocommit() {
+            let tx = self.conn.unchecked_transaction()?;
+            let value = read(&tx)?;
+            tx.commit()?;
+            Ok(value)
+        } else {
+            read(&self.conn)
+        }
+    }
+
+    /// Returns the `files` row for `path`, if any.
+    pub fn get_file(&self, path: &str) -> Result<Option<FileRow>, Error> {
+        self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT path, language, mtime_ns, size, content_hash, source, parse_status
+                     FROM files WHERE path = ?1",
+                    params![path],
+                    file_row_from,
+                )
+                .optional()?)
+        })
+    }
+
+    /// Returns every `files` row ordered by path bytes.
+    pub fn list_files(&self) -> Result<Vec<FileRow>, Error> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT path, language, mtime_ns, size, content_hash, source, parse_status
+                 FROM files ORDER BY path COLLATE BINARY",
+            )?;
+            let rows = stmt.query_map([], file_row_from)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<FileRow>>>()?)
+        })
+    }
+
+    /// Deletes the `files` row for `path`; dependent facts cascade.
+    pub fn delete_file(&self, path: &str) -> Result<(), Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Returns the `meta` value for `key`, if present.
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>, Error> {
+        self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Inserts or replaces the `meta` value for `key` in a transaction.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Reports whether `PRAGMA foreign_keys` is enabled on this connection.
+    pub fn pragma_foreign_keys(&self) -> Result<bool, Error> {
+        pragma_foreign_keys(&self.conn)
+    }
+
+    /// Deletes then inserts every symbol row for one file in one transaction.
+    ///
+    /// Replacing a whole file's symbols keeps a refresh atomic per file; the
+    /// deferred `parent_id` foreign key allows a child row to be inserted
+    /// before its parent row within the same transaction. `publish_inventory`
+    /// calls the same helper inside its single publication transaction.
+    pub fn replace_file_symbols(&mut self, file: &str, symbols: &[SymbolRow]) -> Result<(), Error> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        replace_file_symbols_in_tx(&tx, file, symbols)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Returns the symbol row with canonical ID `id`, if any.
+    pub fn get_symbol(&self, id: &str) -> Result<Option<SymbolRow>, Error> {
+        self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    &format!("SELECT {SYMBOL_COLUMNS} FROM symbols WHERE id = ?1"),
+                    params![id],
+                    symbol_row_from,
+                )
+                .optional()?)
+        })
+    }
+
+    /// Returns every symbol whose persisted `lookup_name` equals `name`.
+    ///
+    /// Rows are ordered by `(file bytes, start_byte, id)`.
+    pub fn find_symbols_by_lookup_name(&self, name: &str) -> Result<Vec<SymbolRow>, Error> {
+        self.select_symbols(
+            &format!(
+                "SELECT {SYMBOL_COLUMNS} FROM symbols WHERE lookup_name = ?1 \
+                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
+            ),
+            params![name],
+        )
+    }
+
+    /// Returns every symbol whose persisted `qualified_name` equals `qname`.
+    ///
+    /// Rows are ordered by `(file bytes, start_byte, id)`.
+    pub fn find_symbols_by_qualified_name(&self, qname: &str) -> Result<Vec<SymbolRow>, Error> {
+        self.select_symbols(
+            &format!(
+                "SELECT {SYMBOL_COLUMNS} FROM symbols WHERE qualified_name = ?1 \
+                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
+            ),
+            params![qname],
+        )
+    }
+
+    /// Returns every persisted symbol ordered by `(file bytes, start_byte, id)`.
+    ///
+    /// Dotted-path and case-folded qualified-name matching need to normalize
+    /// separators and case in Rust, so they scan this ordered list instead of a
+    /// single indexed lookup.
+    pub fn list_symbols(&self) -> Result<Vec<SymbolRow>, Error> {
+        self.select_symbols(
+            &format!(
+                "SELECT {SYMBOL_COLUMNS} FROM symbols \
+                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
+            ),
+            [],
+        )
+    }
+
+    /// Runs a `symbols` SELECT and collects every row.
+    fn select_symbols(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<SymbolRow>, Error> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params, symbol_row_from)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<SymbolRow>>>()?)
+        })
+    }
+
+    /// Returns every use row for `file`.
+    ///
+    /// Rows are ordered by `(start_byte, end_byte, ref_kind, use_id)`.
+    pub fn list_uses_for_file(&self, file: &str) -> Result<Vec<UseRow>, Error> {
+        self.select_uses(
+            &format!(
+                "SELECT {USE_COLUMNS} FROM uses WHERE file = ?1 \
+                 ORDER BY start_byte, end_byte, ref_kind COLLATE BINARY, use_id"
+            ),
+            params![file],
+        )
+    }
+
+    /// Returns every use whose persisted `lookup_name` equals `name`.
+    ///
+    /// Rows are ordered by `(file bytes, start_byte, end_byte, ref_kind)`.
+    /// `use_id` is a final tiebreaker, though `UNIQUE(file, start_byte,
+    /// end_byte, ref_kind)` already makes the documented four columns unique.
+    pub fn find_uses_by_lookup_name(&self, name: &str) -> Result<Vec<UseRow>, Error> {
+        self.select_uses(
+            &format!(
+                "SELECT {USE_COLUMNS} FROM uses WHERE lookup_name = ?1 \
+                 ORDER BY file COLLATE BINARY, start_byte, end_byte, \
+                 ref_kind COLLATE BINARY, use_id"
+            ),
+            params![name],
+        )
+    }
+
+    /// Runs a `uses` SELECT and collects every row.
+    fn select_uses(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<UseRow>, Error> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params, use_row_from)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<UseRow>>>()?)
+        })
+    }
+
+    /// Returns every scope row for `file`, ordered by `scope_key` bytes.
+    pub fn list_scopes_for_file(&self, file: &str) -> Result<Vec<ScopeRow>, Error> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SCOPE_COLUMNS} FROM scopes WHERE file = ?1 \
+                 ORDER BY scope_key COLLATE BINARY"
+            ))?;
+            let rows = stmt.query_map(params![file], scope_row_from)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<ScopeRow>>>()?)
+        })
+    }
+
+    /// Returns every persisted binding ordered by `use_id`.
+    ///
+    /// Rows are the whole `bindings` table, so a caller can compare
+    /// re-resolution output across refreshes.
+    pub fn list_bindings(&self) -> Result<Vec<BindingRow>, Error> {
+        self.read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT use_id, target_id, resolution FROM bindings ORDER BY use_id")?;
+            let rows = stmt.query_map([], binding_row_from)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<BindingRow>>>()?)
+        })
+    }
+}
+
+/// The writer lock: one open `BEGIN IMMEDIATE` transaction on a [`Store`].
+///
+/// Created by [`Store::begin_write`]. Every read made through the store while
+/// the guard lives joins this transaction, so a refresh loads the previous
+/// inventory, assigns use IDs, and writes the new facts against one state that
+/// no other writer can change. [`WriteTxn::commit`] makes the staged snapshot
+/// visible; dropping the guard, or the process dying, rolls everything back.
+#[derive(Debug)]
+pub struct WriteTxn<'s> {
+    store: &'s Store,
+    open: bool,
+}
+
+/// An inventory written inside a [`WriteTxn`] whose `meta` fingerprints and
+/// snapshot digest are not written yet.
+///
+/// Returned by [`WriteTxn::stage_inventory`] and consumed by
+/// [`WriteTxn::commit`], which computes the digest, writes `meta`, and commits
+/// (ARCHITECTURE "Refresh and invalidation": the recheck comes between the
+/// fact writes and "compute deterministic digest and commit").
+#[derive(Debug)]
+pub struct StagedInventory {
+    fingerprint: Fingerprint,
+    /// The published file rows without their source bytes, which the digest
+    /// does not cover.
+    digest_files: Vec<FileRow>,
+    updated: u64,
+    unchanged: u64,
+    deleted: u64,
+}
+
+impl WriteTxn<'_> {
+    /// The store this transaction belongs to; its reads join the transaction.
+    pub fn store(&self) -> &Store {
+        self.store
+    }
+
+    /// Replaces the complete `files` inventory and every per-file fact inside
+    /// this transaction, without writing `meta` or committing.
+    ///
+    /// Rows absent from `input.files` are deleted, present rows are inserted
+    /// or updated, and symbols, uses, and scopes are replaced per current file.
+    /// The whole `bindings` table is replaced. See [`Store::publish_inventory`]
+    /// for the `force` and `regenerated` semantics. An error leaves the
+    /// transaction open for the caller to drop, which rolls it back.
+    pub fn stage_inventory(&mut self, input: InventoryInput) -> Result<StagedInventory, Error> {
         let InventoryInput {
             fingerprint,
             files,
@@ -543,6 +968,7 @@ impl Store {
             force,
             regenerated,
         } = input;
+        let tx: &Connection = &self.store.conn;
         // OUTPUT-CONTRACT "Administrative commands": "`updated` counts current
         // file rows with changed source/status/language or regenerated facts".
         let regenerated: HashSet<String> = regenerated.into_iter().collect();
@@ -551,13 +977,8 @@ impl Store {
         // independent of the caller's input order.
         let mut sorted = files;
         sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-        let digest = snapshot_digest(&fingerprint, &sorted);
 
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        let previous = load_previous_inventory(&tx)?;
+        let previous = load_previous_inventory(tx)?;
         let incoming: HashSet<&str> = sorted.iter().map(|file| file.path.as_str()).collect();
         let deleted = previous
             .keys()
@@ -581,7 +1002,7 @@ impl Store {
             tx.execute("DELETE FROM files", [])?;
         } else {
             // Delete rows that left the eligible set before writing the new
-            // ones.
+            // ones. `previous` is a `HashMap`; deletion order is unobservable.
             let mut delete = tx.prepare("DELETE FROM files WHERE path = ?1")?;
             for path in previous.keys() {
                 if !incoming.contains(path.as_str()) {
@@ -665,17 +1086,46 @@ impl Store {
         }
         for file in &sorted {
             let symbol_rows = symbols_by_file.remove(&file.path).unwrap_or_default();
-            replace_file_symbols_in_tx(&tx, &file.path, &symbol_rows)?;
+            replace_file_symbols_in_tx(tx, &file.path, &symbol_rows)?;
             let use_rows = uses_by_file.remove(&file.path).unwrap_or_default();
-            replace_file_uses_in_tx(&tx, &file.path, &use_rows)?;
+            replace_file_uses_in_tx(tx, &file.path, &use_rows)?;
             let scope_rows = scopes_by_file.remove(&file.path).unwrap_or_default();
-            replace_file_scopes_in_tx(&tx, &file.path, &scope_rows)?;
+            replace_file_scopes_in_tx(tx, &file.path, &scope_rows)?;
         }
-        insert_bindings_in_tx(&tx, &bindings)?;
+        insert_bindings_in_tx(tx, &bindings)?;
 
-        write_fingerprint(&tx, &fingerprint, &digest)?;
-        tx.commit()?;
+        let digest_files = sorted
+            .into_iter()
+            .map(|file| FileRow {
+                source: None,
+                ..file
+            })
+            .collect();
+        Ok(StagedInventory {
+            fingerprint,
+            digest_files,
+            updated,
+            unchanged,
+            deleted,
+        })
+    }
 
+    /// Computes the deterministic snapshot digest of `staged`, writes the four
+    /// fingerprints and the digest into `meta`, and commits the transaction.
+    ///
+    /// On any failure the guard is dropped and the transaction rolled back.
+    pub fn commit(mut self, staged: StagedInventory) -> Result<PublishReport, Error> {
+        let StagedInventory {
+            fingerprint,
+            digest_files,
+            updated,
+            unchanged,
+            deleted,
+        } = staged;
+        let digest = snapshot_digest(&fingerprint, &digest_files);
+        write_fingerprint(&self.store.conn, &fingerprint, &digest)?;
+        self.store.conn.execute_batch("COMMIT")?;
+        self.open = false;
         Ok(PublishReport {
             updated,
             unchanged,
@@ -684,237 +1134,35 @@ impl Store {
         })
     }
 
-    /// Returns the `files` row for `path`, if any.
-    pub fn get_file(&self, path: &str) -> Result<Option<FileRow>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let row = tx
-            .query_row(
-                "SELECT path, language, mtime_ns, size, content_hash, source, parse_status
-                 FROM files WHERE path = ?1",
-                params![path],
-                file_row_from,
-            )
-            .optional()?;
-        tx.commit()?;
-        Ok(row)
-    }
-
-    /// Returns every `files` row ordered by path bytes.
-    pub fn list_files(&self) -> Result<Vec<FileRow>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let rows = {
-            let mut stmt = tx.prepare(
-                "SELECT path, language, mtime_ns, size, content_hash, source, parse_status
-                 FROM files ORDER BY path COLLATE BINARY",
-            )?;
-            let rows = stmt.query_map([], file_row_from)?;
-            rows.collect::<rusqlite::Result<Vec<FileRow>>>()?
-        };
-        tx.commit()?;
-        Ok(rows)
-    }
-
-    /// Deletes the `files` row for `path`; dependent facts cascade.
-    pub fn delete_file(&self, path: &str) -> Result<(), Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
-        tx.commit()?;
+    /// Rolls the transaction back explicitly, releasing the writer lock.
+    pub fn rollback(mut self) -> Result<(), Error> {
+        self.open = false;
+        self.store.conn.execute_batch("ROLLBACK")?;
         Ok(())
     }
+}
 
-    /// Returns the `meta` value for `key`, if present.
-    pub fn get_meta(&self, key: &str) -> Result<Option<String>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let value = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        tx.commit()?;
-        Ok(value)
+impl Drop for WriteTxn<'_> {
+    fn drop(&mut self) {
+        if self.open && !self.store.conn.is_autocommit() {
+            let _ = self.store.conn.execute_batch("ROLLBACK");
+        }
     }
+}
 
-    /// Inserts or replaces the `meta` value for `key` in a transaction.
-    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Reports whether `PRAGMA foreign_keys` is enabled on this connection.
-    pub fn pragma_foreign_keys(&self) -> Result<bool, Error> {
-        pragma_foreign_keys(&self.conn)
-    }
-
-    /// Deletes then inserts every symbol row for one file in one transaction.
-    ///
-    /// Replacing a whole file's symbols keeps a refresh atomic per file; the
-    /// deferred `parent_id` foreign key allows a child row to be inserted
-    /// before its parent row within the same transaction. `publish_inventory`
-    /// calls the same helper inside its single publication transaction.
-    pub fn replace_file_symbols(&mut self, file: &str, symbols: &[SymbolRow]) -> Result<(), Error> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        replace_file_symbols_in_tx(&tx, file, symbols)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Returns the symbol row with canonical ID `id`, if any.
-    pub fn get_symbol(&self, id: &str) -> Result<Option<SymbolRow>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let row = tx
-            .query_row(
-                &format!("SELECT {SYMBOL_COLUMNS} FROM symbols WHERE id = ?1"),
-                params![id],
-                symbol_row_from,
-            )
-            .optional()?;
-        tx.commit()?;
-        Ok(row)
-    }
-
-    /// Returns every symbol whose persisted `lookup_name` equals `name`.
-    ///
-    /// Rows are ordered by `(file bytes, start_byte, id)`.
-    pub fn find_symbols_by_lookup_name(&self, name: &str) -> Result<Vec<SymbolRow>, Error> {
-        self.select_symbols(
-            &format!(
-                "SELECT {SYMBOL_COLUMNS} FROM symbols WHERE lookup_name = ?1 \
-                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
-            ),
-            params![name],
-        )
-    }
-
-    /// Returns every symbol whose persisted `qualified_name` equals `qname`.
-    ///
-    /// Rows are ordered by `(file bytes, start_byte, id)`.
-    pub fn find_symbols_by_qualified_name(&self, qname: &str) -> Result<Vec<SymbolRow>, Error> {
-        self.select_symbols(
-            &format!(
-                "SELECT {SYMBOL_COLUMNS} FROM symbols WHERE qualified_name = ?1 \
-                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
-            ),
-            params![qname],
-        )
-    }
-
-    /// Returns every persisted symbol ordered by `(file bytes, start_byte, id)`.
-    ///
-    /// Dotted-path and case-folded qualified-name matching need to normalize
-    /// separators and case in Rust, so they scan this ordered list instead of a
-    /// single indexed lookup.
-    pub fn list_symbols(&self) -> Result<Vec<SymbolRow>, Error> {
-        self.select_symbols(
-            &format!(
-                "SELECT {SYMBOL_COLUMNS} FROM symbols \
-                 ORDER BY file COLLATE BINARY, start_byte, id COLLATE BINARY"
-            ),
-            [],
-        )
-    }
-
-    /// Runs a `symbols` SELECT and collects every row.
-    fn select_symbols(
-        &self,
-        sql: &str,
-        params: impl rusqlite::Params,
-    ) -> Result<Vec<SymbolRow>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let rows = {
-            let mut stmt = tx.prepare(sql)?;
-            let rows = stmt.query_map(params, symbol_row_from)?;
-            rows.collect::<rusqlite::Result<Vec<SymbolRow>>>()?
-        };
-        tx.commit()?;
-        Ok(rows)
-    }
-
-    /// Returns every use row for `file`.
-    ///
-    /// Rows are ordered by `(start_byte, end_byte, ref_kind, use_id)`.
-    pub fn list_uses_for_file(&self, file: &str) -> Result<Vec<UseRow>, Error> {
-        self.select_uses(
-            &format!(
-                "SELECT {USE_COLUMNS} FROM uses WHERE file = ?1 \
-                 ORDER BY start_byte, end_byte, ref_kind COLLATE BINARY, use_id"
-            ),
-            params![file],
-        )
-    }
-
-    /// Returns every use whose persisted `lookup_name` equals `name`.
-    ///
-    /// Rows are ordered by `(file bytes, start_byte, end_byte, ref_kind)`.
-    /// `use_id` is a final tiebreaker, though `UNIQUE(file, start_byte,
-    /// end_byte, ref_kind)` already makes the documented four columns unique.
-    pub fn find_uses_by_lookup_name(&self, name: &str) -> Result<Vec<UseRow>, Error> {
-        self.select_uses(
-            &format!(
-                "SELECT {USE_COLUMNS} FROM uses WHERE lookup_name = ?1 \
-                 ORDER BY file COLLATE BINARY, start_byte, end_byte, \
-                 ref_kind COLLATE BINARY, use_id"
-            ),
-            params![name],
-        )
-    }
-
-    /// Runs a `uses` SELECT and collects every row.
-    fn select_uses(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<UseRow>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let rows = {
-            let mut stmt = tx.prepare(sql)?;
-            let rows = stmt.query_map(params, use_row_from)?;
-            rows.collect::<rusqlite::Result<Vec<UseRow>>>()?
-        };
-        tx.commit()?;
-        Ok(rows)
-    }
-
-    /// Returns every scope row for `file`, ordered by `scope_key` bytes.
-    pub fn list_scopes_for_file(&self, file: &str) -> Result<Vec<ScopeRow>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let rows = {
-            let mut stmt = tx.prepare(&format!(
-                "SELECT {SCOPE_COLUMNS} FROM scopes WHERE file = ?1 \
-                 ORDER BY scope_key COLLATE BINARY"
-            ))?;
-            let rows = stmt.query_map(params![file], scope_row_from)?;
-            rows.collect::<rusqlite::Result<Vec<ScopeRow>>>()?
-        };
-        tx.commit()?;
-        Ok(rows)
-    }
-
-    /// Returns every persisted binding ordered by `use_id`.
-    ///
-    /// Rows are the whole `bindings` table, so a caller can compare
-    /// re-resolution output across refreshes.
-    pub fn list_bindings(&self) -> Result<Vec<BindingRow>, Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let rows = {
-            let mut stmt =
-                tx.prepare("SELECT use_id, target_id, resolution FROM bindings ORDER BY use_id")?;
-            let rows = stmt.query_map([], binding_row_from)?;
-            rows.collect::<rusqlite::Result<Vec<BindingRow>>>()?
-        };
-        tx.commit()?;
-        Ok(rows)
-    }
+/// Whether `error` is SQLite reporting that another connection holds a lock.
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::DatabaseBusy
+                || code.code == rusqlite::ErrorCode::DatabaseLocked
+    )
 }
 
 /// Deletes then inserts `symbols` for `file` inside the caller's transaction.
 fn replace_file_symbols_in_tx(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     file: &str,
     symbols: &[SymbolRow],
 ) -> Result<(), Error> {
@@ -988,11 +1236,7 @@ fn symbol_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRow> {
 ///
 /// A `Some(use_id)` is written explicitly so a refresh that reused a stored
 /// row keeps the same surrogate key; `None` lets SQLite assign one.
-fn replace_file_uses_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    file: &str,
-    uses: &[UseRow],
-) -> Result<(), Error> {
+fn replace_file_uses_in_tx(tx: &Connection, file: &str, uses: &[UseRow]) -> Result<(), Error> {
     tx.execute("DELETE FROM uses WHERE file = ?1", params![file])?;
     if uses.is_empty() {
         return Ok(());
@@ -1061,7 +1305,7 @@ fn use_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<UseRow> {
 
 /// Deletes then inserts `scopes` for `file` inside the caller's transaction.
 fn replace_file_scopes_in_tx(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     file: &str,
     scopes: &[ScopeRow],
 ) -> Result<(), Error> {
@@ -1099,10 +1343,7 @@ fn scope_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScopeRow> {
 /// The caller has already deleted the previous rows and written every use, so
 /// each binding's `use_id` foreign key resolves. A duplicate `use_id` aborts
 /// the transaction rather than replacing a link silently.
-fn insert_bindings_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    bindings: &[BindingRow],
-) -> Result<(), Error> {
+fn insert_bindings_in_tx(tx: &Connection, bindings: &[BindingRow]) -> Result<(), Error> {
     if bindings.is_empty() {
         return Ok(());
     }
@@ -1175,7 +1416,7 @@ fn validate_destination(rivet_dir: &Path) -> Result<(), Error> {
 /// Applies the required per-connection pragmas and verifies foreign keys.
 fn configure_connection(conn: &Connection) -> Result<(), Error> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "busy_timeout", 5000_i64)?;
+    conn.pragma_update(None, "busy_timeout", DEFAULT_BUSY_TIMEOUT_MS)?;
     if !pragma_foreign_keys(conn)? {
         return Err(Error::Configuration {
             detail: "PRAGMA foreign_keys did not remain ON".to_string(),
@@ -1190,27 +1431,138 @@ fn pragma_foreign_keys(conn: &Connection) -> Result<bool, Error> {
     Ok(enabled == 1)
 }
 
+/// Puts an accepted database into WAL mode, waiting out competing openers.
+///
+/// A database already in WAL mode is left alone: `PRAGMA journal_mode` is only
+/// queried. Switching a new database from its rollback journal is a write made
+/// by the pragma's own statement after it has taken a read (SHARED) lock. When
+/// another connection holds the write lock, as a competing opener does while it
+/// creates the schema or switches the mode itself, SQLite refuses to wait on
+/// that read-to-write upgrade (deadlock avoidance) and returns `SQLITE_BUSY`
+/// ("database is locked") at once, without calling the busy handler. Several
+/// processes creating the cache together hit this. The switch is therefore
+/// retried until it succeeds or the documented writer busy timeout elapses,
+/// which is [`Error::WriterLocked`]. Only a database `initialize` has already
+/// accepted as current reaches this, so a refused database is never modified
+/// (spec §27).
+fn enable_wal(conn: &Connection) -> Result<(), Error> {
+    let deadline = std::time::Instant::now() + WRITER_BUSY_TIMEOUT;
+    loop {
+        let attempt = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .and_then(|mode| {
+                if mode.eq_ignore_ascii_case("wal") {
+                    Ok(mode)
+                } else {
+                    conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                }
+            });
+        let is_wal = |mode: &String| mode.eq_ignore_ascii_case("wal");
+        // Another connection holding a lock makes SQLite either fail with
+        // `SQLITE_BUSY` or report the old mode instead of switching; both are
+        // waited out.
+        let retryable = match &attempt {
+            Ok(mode) => !is_wal(mode),
+            Err(error) => is_busy(error),
+        };
+        if retryable && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+        match attempt {
+            Ok(mode) if is_wal(&mode) => return Ok(()),
+            Ok(mode) => {
+                return Err(Error::Configuration {
+                    detail: format!("journal_mode stayed {mode:?} instead of WAL"),
+                });
+            }
+            Err(error) if is_busy(&error) => {
+                return Err(Error::WriterLocked {
+                    path: conn.path().unwrap_or(":memory:").to_string(),
+                    timeout_ms: DEFAULT_BUSY_TIMEOUT_MS as u64,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 /// Creates the schema when empty, or validates an existing format version.
 ///
 /// When `allow_rebuild` is set and the stored version differs, the disposable
 /// cache is torn down and recreated instead of being refused.
 fn initialize(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
+    // Fast path without a lock: a current database needs no write, and an
+    // incompatible one is refused without being modified (spec §27).
     match read_existing_version(conn)? {
-        None => create_schema(conn),
-        Some(found) if found == INDEX_FORMAT_VERSION => Ok(()),
-        Some(_) if allow_rebuild => rebuild_schema(conn),
-        Some(found) => Err(Error::IncompatibleIndexFormat { found }),
+        Some(found) if found == INDEX_FORMAT_VERSION => return Ok(()),
+        Some(found) if !allow_rebuild => return Err(Error::IncompatibleIndexFormat { found }),
+        _ => {}
+    }
+
+    // Creating or rebuilding the schema writes it, so it happens under the
+    // writer lock and the version is read again inside the lock: a competing
+    // process may have created or rebuilt the schema since the unlocked read,
+    // and a second `CREATE TABLE` would fail (ARCHITECTURE "Concurrency and
+    // source consistency": an index-format mismatch "rebuilds the disposable
+    // cache under the writer lock"). `PRAGMA foreign_keys` is a no-op inside a
+    // transaction, so a rebuild disables it before `BEGIN IMMEDIATE`.
+    if allow_rebuild {
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+    }
+    let result = initialize_locked(conn, allow_rebuild);
+    if allow_rebuild {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        if !pragma_foreign_keys(conn)? {
+            return Err(Error::Configuration {
+                detail: "PRAGMA foreign_keys did not remain ON after rebuild".to_string(),
+            });
+        }
+    }
+    result
+}
+
+/// Creates or rebuilds the schema inside one `BEGIN IMMEDIATE` transaction,
+/// deciding from the format version read under the lock.
+fn initialize_locked(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
+    if let Err(error) = conn.execute_batch("BEGIN IMMEDIATE") {
+        return Err(if is_busy(&error) {
+            Error::WriterLocked {
+                path: conn.path().unwrap_or(":memory:").to_string(),
+                timeout_ms: DEFAULT_BUSY_TIMEOUT_MS as u64,
+            }
+        } else {
+            error.into()
+        });
+    }
+    let outcome = match read_existing_version(conn) {
+        Ok(None) => create_schema(conn),
+        Ok(Some(found)) if found == INDEX_FORMAT_VERSION => Ok(()),
+        Ok(Some(_)) if allow_rebuild => rebuild_schema(conn),
+        Ok(Some(found)) => Err(Error::IncompatibleIndexFormat { found }),
+        Err(error) => Err(error),
+    };
+    match outcome {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
     }
 }
 
-/// Drops every user table and recreates the version-1 schema atomically.
+/// Drops every user table and recreates the version-1 schema inside the
+/// caller's transaction.
 ///
-/// Foreign keys are disabled for the teardown so tables can be dropped in any
-/// order; they are re-enabled (and re-verified) before returning. Used only by
-/// [`Store::open_rebuildable`] on a database already accepted by
+/// The caller has disabled foreign keys so tables can be dropped in any order.
+/// Used only by [`Store::open_rebuildable`] on a database already accepted by
 /// [`validate_destination`].
 fn rebuild_schema(conn: &Connection) -> Result<(), Error> {
-    conn.pragma_update(None, "foreign_keys", "OFF")?;
     let tables: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
@@ -1218,25 +1570,10 @@ fn rebuild_schema(conn: &Connection) -> Result<(), Error> {
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<rusqlite::Result<Vec<String>>>()?
     };
-
-    let tx = conn.unchecked_transaction()?;
     for name in &tables {
-        tx.execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_identifier(name)))?;
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_identifier(name)))?;
     }
-    tx.execute_batch(SCHEMA_SQL)?;
-    tx.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-        params!["index_format_version", INDEX_FORMAT_VERSION],
-    )?;
-    tx.commit()?;
-
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    if !pragma_foreign_keys(conn)? {
-        return Err(Error::Configuration {
-            detail: "PRAGMA foreign_keys did not remain ON after rebuild".to_string(),
-        });
-    }
-    Ok(())
+    create_schema(conn)
 }
 
 /// Quotes a SQLite identifier by doubling embedded double quotes.
@@ -1268,15 +1605,14 @@ fn read_existing_version(conn: &Connection) -> Result<Option<String>, Error> {
     Ok(Some(value.unwrap_or_default()))
 }
 
-/// Creates the full version-1 schema and records the format version atomically.
+/// Creates the full version-1 schema and records the format version inside
+/// the caller's transaction.
 fn create_schema(conn: &Connection) -> Result<(), Error> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(SCHEMA_SQL)?;
-    tx.execute(
+    conn.execute_batch(SCHEMA_SQL)?;
+    conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
         params!["index_format_version", INDEX_FORMAT_VERSION],
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -1326,9 +1662,7 @@ fn write_file_row(stmt: &mut rusqlite::Statement<'_>, file: &FileRow) -> Result<
 type PreviousFile = (Option<String>, ParseStatus, Option<String>);
 
 /// Loads the current inventory keyed by path, with the comparison fields only.
-fn load_previous_inventory(
-    tx: &rusqlite::Transaction<'_>,
-) -> Result<HashMap<String, PreviousFile>, Error> {
+fn load_previous_inventory(tx: &Connection) -> Result<HashMap<String, PreviousFile>, Error> {
     let raw: Vec<(String, Option<String>, String, Option<String>)> = {
         let mut stmt =
             tx.prepare("SELECT path, content_hash, parse_status, language FROM files")?;
@@ -1354,7 +1688,7 @@ fn load_previous_inventory(
 
 /// Writes the four fingerprints and the snapshot digest into `meta`.
 fn write_fingerprint(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     fingerprint: &Fingerprint,
     digest: &str,
 ) -> Result<(), Error> {
@@ -2204,5 +2538,165 @@ mod tests {
         store.delete_file("a.php").unwrap();
         assert!(store.list_uses_for_file("a.php").unwrap().is_empty());
         assert!(store.list_scopes_for_file("a.php").unwrap().is_empty());
+    }
+
+    /// A second connection cannot take the writer lock while the first holds
+    /// it: it fails with `WriterLocked` naming the database once the busy
+    /// timeout elapses, and succeeds after the first commits.
+    #[test]
+    fn writer_lock_is_exclusive_and_bounded_by_the_busy_timeout() {
+        let temp = TempDir::new("writer-lock");
+        let mut first = Store::open(temp.path()).unwrap();
+        publish(&mut first, vec![sample_file("a.php")]);
+        let second = Store::open(temp.path()).unwrap();
+
+        let mut txn = first
+            .begin_write(std::time::Duration::from_secs(5))
+            .unwrap();
+        let started = std::time::Instant::now();
+        match second.begin_write(std::time::Duration::from_millis(150)) {
+            Err(Error::WriterLocked { path, timeout_ms }) => {
+                assert!(path.ends_with("index.db"), "{path}");
+                assert_eq!(timeout_ms, 150);
+            }
+            other => panic!("expected WriterLocked, got {other:?}"),
+        }
+        assert!(started.elapsed() >= std::time::Duration::from_millis(140));
+        let staged = txn
+            .stage_inventory(inventory(sample_fingerprint(), vec![sample_file("b.php")]))
+            .unwrap();
+        txn.commit(staged).unwrap();
+
+        let txn = second
+            .begin_write(std::time::Duration::from_millis(150))
+            .unwrap();
+        txn.rollback().unwrap();
+        assert_eq!(second.list_files().unwrap().len(), 1);
+    }
+
+    /// Dropping a write transaction after staging rolls every row back, and a
+    /// transaction cannot be nested inside another.
+    #[test]
+    fn dropped_write_transaction_rolls_back_staged_rows() {
+        let temp = TempDir::new("drop-rollback");
+        let mut store = Store::open(temp.path()).unwrap();
+        let before = publish(&mut store, vec![sample_file("a.php")]);
+        {
+            let mut txn = store
+                .begin_write(std::time::Duration::from_secs(5))
+                .unwrap();
+            txn.stage_inventory(inventory(sample_fingerprint(), vec![sample_file("b.php")]))
+                .unwrap();
+            // Reads made through the store join the open transaction.
+            let inside: Vec<String> = txn
+                .store()
+                .list_files()
+                .unwrap()
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
+            assert_eq!(inside, vec!["b.php".to_string()]);
+            assert!(matches!(
+                txn.store().begin_snapshot_read(),
+                Err(Error::TransactionState { .. })
+            ));
+        }
+        let after: Vec<String> = store
+            .list_files()
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        assert_eq!(after, vec!["a.php".to_string()]);
+        assert_eq!(
+            store.get_meta("snapshot_digest").unwrap(),
+            Some(before.digest)
+        );
+        assert_eq!(store.integrity_check().unwrap(), vec!["ok".to_string()]);
+    }
+
+    /// A read transaction keeps seeing the snapshot whose digest it returned,
+    /// rows and stored source included, while another connection publishes.
+    #[test]
+    fn snapshot_read_is_isolated_from_a_concurrent_publish() {
+        let temp = TempDir::new("snapshot-read");
+        let mut writer = Store::open(temp.path()).unwrap();
+        let first = publish(&mut writer, vec![file_with("a.php", b"<?php // one")]);
+        let reader = Store::open(temp.path()).unwrap();
+
+        let pinned = reader.begin_snapshot_read().unwrap();
+        assert_eq!(pinned, Some(first.digest.clone()));
+        let second = publish(
+            &mut writer,
+            vec![
+                file_with("a.php", b"<?php // two"),
+                file_with("b.php", b"<?php"),
+            ],
+        );
+        assert_ne!(second.digest, first.digest);
+
+        let files = reader.list_files().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            reader.get_file("a.php").unwrap().unwrap().source,
+            Some(b"<?php // one".to_vec())
+        );
+        assert_eq!(
+            reader.get_meta("snapshot_digest").unwrap(),
+            Some(first.digest)
+        );
+
+        reader.end_snapshot_read().unwrap();
+        assert_eq!(
+            reader.get_meta("snapshot_digest").unwrap(),
+            Some(second.digest)
+        );
+        assert_eq!(reader.list_files().unwrap().len(), 2);
+    }
+
+    /// The exact failure behind the flaky first-refresh test: opening a
+    /// compatible database still in rollback-journal mode while another
+    /// connection holds its write lock. `PRAGMA journal_mode = WAL` then
+    /// returned `SQLITE_BUSY` ("database is locked") at once, without the busy
+    /// handler. The open must instead wait for the lock and then switch to WAL.
+    #[test]
+    fn open_waits_for_a_held_lock_before_switching_to_wal() {
+        let temp = TempDir::new("wal-switch");
+        let db = temp.path().join("index.db");
+        let holder = rusqlite::Connection::open(&db).unwrap();
+        holder.execute_batch(super::SCHEMA_SQL).unwrap();
+        holder
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('index_format_version', ?1)",
+                params![INDEX_FORMAT_VERSION],
+            )
+            .unwrap();
+        let mode: String = holder
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        // Hold the RESERVED (write) lock, as a competing opener does while it
+        // creates the schema or switches the journal mode. The pragma's own
+        // statement takes a SHARED lock and then tries to upgrade to write;
+        // SQLite refuses to wait on an upgrade from a held read (deadlock
+        // avoidance), so the busy handler is never called.
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let hold = std::time::Duration::from_millis(300);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(hold);
+            holder.execute_batch("COMMIT").unwrap();
+        });
+        let started = std::time::Instant::now();
+        let store = Store::open(temp.path()).expect("open waits for the lock");
+        // It could only have switched once the lock was released.
+        assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+        releaser.join().unwrap();
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        assert_eq!(store.integrity_check().unwrap(), vec!["ok".to_string()]);
     }
 }
