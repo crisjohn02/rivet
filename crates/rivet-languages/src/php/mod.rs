@@ -11,14 +11,19 @@
 //!
 //! Parse policy (docs/ARCHITECTURE.md "Parse and coverage policy"): a file
 //! whose Tree-sitter tree contains any ERROR or MISSING node publishes no
-//! facts and yields one `parse_error` diagnostic. A file that exceeds the
-//! deterministic node cap yields one `resource_limit` diagnostic instead.
+//! facts and yields one `parse_error` diagnostic. A file that exceeds either
+//! deterministic resource bound of [`ResourceLimits`] (spec §27: visited
+//! syntax nodes, extracted uses) publishes no facts and yields one
+//! `resource_limit` diagnostic instead. The node bound is checked first, so a
+//! file that is both too large and malformed is `resource_limit`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use rivet_core::{Diagnostic, ExtractedFile, ExtractedSymbol, Span, SymbolKind};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
+
+use crate::ResourceLimits;
 
 mod namespaces;
 mod signature;
@@ -27,9 +32,6 @@ pub use signature::{order_members, signature_summary};
 
 /// The compiled-once symbol query for the pinned PHP grammar.
 static SYMBOLS_QUERY: OnceLock<Query> = OnceLock::new();
-
-/// Hard cap on Tree-sitter nodes visited per file, before any extraction.
-const MAX_VISITED_NODES: u64 = 1_000_000;
 
 /// The process-wide compiled symbol query.
 fn symbols_query() -> &'static Query {
@@ -46,21 +48,28 @@ fn symbols_query() -> &'static Query {
 /// sorted by declaration start byte so persistence and tests are
 /// deterministic. On a parse or resource failure the symbol list is empty and
 /// a single diagnostic explains the skip.
+///
+/// Uses the spec's default [`ResourceLimits`]; see [`extract_with_limits`].
 pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
+    extract_with_limits(source, tree, ResourceLimits::DEFAULT)
+}
+
+/// [`extract`] with explicit resource bounds.
+///
+/// Both bounds are counts. The node count is taken by one pre-order visit of
+/// the whole tree before any extraction, so a file over the node bound does no
+/// extraction work at all. The use count is taken while the use walker records
+/// uses: the walker stops recording, and stops descending, as soon as one use
+/// more than the bound has been seen. Either way the result is no symbols,
+/// uses, imports, or scopes and one `resource_limit` diagnostic.
+pub fn extract_with_limits(source: &[u8], tree: &Tree, limits: ResourceLimits) -> ExtractedFile {
     let root = tree.root_node();
-    let scan = scan_tree(root);
+    let scan = scan_tree(root, limits.max_visited_nodes);
     if matches!(scan, Scan::ResourceLimit) {
-        return ExtractedFile {
-            symbols: Vec::new(),
-            uses: Vec::new(),
-            imports: Vec::new(),
-            scopes: Vec::new(),
-            diagnostics: vec![Diagnostic {
-                code: "resource_limit".to_string(),
-                detail: format!("visited more than {MAX_VISITED_NODES} Tree-sitter nodes"),
-                start_byte: None,
-            }],
-        };
+        return resource_limit(format!(
+            "visited more than {} Tree-sitter nodes",
+            limits.max_visited_nodes
+        ));
     }
     if root.has_error() {
         let (kind, byte) = match scan {
@@ -83,13 +92,35 @@ pub fn extract(source: &[u8], tree: &Tree) -> ExtractedFile {
     let layout = namespaces::NamespaceLayout::new(root, source);
     let raw = collect_raw(source, root, &layout);
     let symbols = build_symbols(raw);
-    let (uses, imports, scopes) = uses::extract_uses(source, root, &symbols, &layout);
+    let Some((uses, imports, scopes)) =
+        uses::extract_uses(source, root, &symbols, &layout, limits.max_extracted_uses)
+    else {
+        return resource_limit(format!(
+            "extracted more than {} uses",
+            limits.max_extracted_uses
+        ));
+    };
     ExtractedFile {
         symbols,
         uses,
         imports,
         scopes,
         diagnostics: Vec::new(),
+    }
+}
+
+/// The no-facts result of a file that exceeded a resource bound.
+fn resource_limit(detail: String) -> ExtractedFile {
+    ExtractedFile {
+        symbols: Vec::new(),
+        uses: Vec::new(),
+        imports: Vec::new(),
+        scopes: Vec::new(),
+        diagnostics: vec![Diagnostic {
+            code: "resource_limit".to_string(),
+            detail,
+            start_byte: None,
+        }],
     }
 }
 
@@ -113,7 +144,10 @@ enum Scan {
     Done(Option<(String, u32)>),
 }
 
-fn scan_tree(root: Node<'_>) -> Scan {
+///
+/// Every node is counted, named or anonymous; more than `max_nodes` stops the
+/// walk immediately.
+fn scan_tree(root: Node<'_>, max_nodes: u64) -> Scan {
     let has_error = root.has_error();
     let mut first_error: Option<(String, u32)> = None;
     let mut visited: u64 = 0;
@@ -121,7 +155,7 @@ fn scan_tree(root: Node<'_>) -> Scan {
     loop {
         let node = cursor.node();
         visited += 1;
-        if visited > MAX_VISITED_NODES {
+        if visited > max_nodes {
             return Scan::ResourceLimit;
         }
         if has_error && first_error.is_none() && (node.is_error() || node.is_missing()) {

@@ -35,7 +35,7 @@ use rivet_core::{
     Config, Freshness, ParseStatus, SourceRead, discover_root, read_source, walk_eligible,
 };
 use rivet_languages::{EXTRACTOR_FINGERPRINT, language_for_path};
-use rivet_parser::parse_file;
+use rivet_parser::parse_file_with_limits;
 use rivet_store::{
     FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, Store, SymbolRow, UseRow,
     clamp_mtime_ns,
@@ -411,6 +411,7 @@ fn refresh_inventory(
     debug_point!("refresh-locked-{attempt}");
 
     let max_bytes = config.index.max_file_size_kb.saturating_mul(1024);
+    let resource_limits = crate::debug_hook::resource_limits();
 
     // Fingerprint invalidation at the start of every refresh (spec §12.3;
     // ARCHITECTURE "Refresh and invalidation"). The effective-config comparison
@@ -608,7 +609,8 @@ fn refresh_inventory(
                     }
                 } else {
                     reparsed.push(entry.rel_path.clone());
-                    let extracted = parse_file(id, &bytes);
+                    // Deterministic count bounds (spec §27), never time.
+                    let extracted = parse_file_with_limits(id, &bytes, resource_limits);
                     match extracted.diagnostics.first() {
                         Some(diagnostic) => {
                             let status = match diagnostic.code.as_str() {

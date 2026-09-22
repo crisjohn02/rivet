@@ -42,6 +42,48 @@ impl LanguageId {
     }
 }
 
+/// Deterministic per-file parser resource bounds (spec §27).
+///
+/// Both limits are *counts*, never wall-clock time, so the same bytes always
+/// produce the same result: "Deterministic limits avoid wall-clock-dependent
+/// query results." A file that exceeds either bound is recorded as
+/// `resource_limit`, contributes no symbols, uses, or scopes, and gets one
+/// diagnostic. A count equal to the bound is still within it.
+///
+/// Production code always uses [`ResourceLimits::DEFAULT`]. The fields are
+/// public so tests (and the CLI's debug-only test hook) can lower them instead
+/// of building million-node files. Changing a default is a change to which
+/// files carry facts, so it must bump `fact-schema` in
+/// [`EXTRACTOR_FINGERPRINT`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// The most Tree-sitter nodes (named and anonymous) one file's tree may
+    /// contain, counted by a pre-order visit before any extraction.
+    pub max_visited_nodes: u64,
+    /// The most uses one file may yield.
+    pub max_extracted_uses: u64,
+}
+
+/// The spec's initial node bound: one million visited syntax nodes per file.
+pub const MAX_VISITED_NODES: u64 = 1_000_000;
+
+/// The spec's initial use bound: 500,000 extracted uses per file.
+pub const MAX_EXTRACTED_USES: u64 = 500_000;
+
+impl ResourceLimits {
+    /// The spec §27 bounds.
+    pub const DEFAULT: ResourceLimits = ResourceLimits {
+        max_visited_nodes: MAX_VISITED_NODES,
+        max_extracted_uses: MAX_EXTRACTED_USES,
+    };
+}
+
+impl Default for ResourceLimits {
+    fn default() -> ResourceLimits {
+        ResourceLimits::DEFAULT
+    }
+}
+
 /// Returns the language whose grammar handles `rel_path`, or `None` when the
 /// extension maps to no compiled language.
 ///

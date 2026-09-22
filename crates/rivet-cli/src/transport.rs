@@ -25,6 +25,10 @@ pub const EXIT_REPOSITORY_UNAVAILABLE: i32 = 3;
 pub const EXIT_SYMBOL_NOT_FOUND: i32 = 4;
 /// The query matched more than one declaration.
 pub const EXIT_AMBIGUOUS_SYMBOL: i32 = 5;
+/// A directly addressed file failed to parse or hit a parser resource limit.
+pub const EXIT_PARSE_FAILURE: i32 = 6;
+/// A directly addressed file is in a language this build does not index.
+pub const EXIT_UNSUPPORTED_LANGUAGE: i32 = 7;
 /// No allowed form of the context target fits the token budget.
 pub const EXIT_BUDGET_TOO_SMALL: i32 = 8;
 /// The working tree kept changing across the refresh and its one retry.
@@ -45,6 +49,9 @@ pub struct CliError {
     /// Additional contract fields in the order they must appear. Boxed so
     /// `CliError` stays small enough to be a `Result` error type.
     pub extra: Box<Map<String, Value>>,
+    /// Whether this particular error describes the acquired snapshot even
+    /// though its code alone does not say so (see [`CliError::about_snapshot`]).
+    pub snapshot_classified: bool,
 }
 
 impl CliError {
@@ -56,6 +63,7 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(Map::new()),
+            snapshot_classified: false,
         }
     }
 
@@ -67,6 +75,7 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(Map::new()),
+            snapshot_classified: false,
         }
     }
 
@@ -78,6 +87,7 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(Map::new()),
+            snapshot_classified: false,
         }
     }
 
@@ -90,6 +100,7 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(Map::new()),
+            snapshot_classified: false,
         }
     }
 
@@ -107,6 +118,7 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(extra),
+            snapshot_classified: false,
         }
     }
 
@@ -130,7 +142,64 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(extra),
+            snapshot_classified: false,
         }
+    }
+
+    /// A `parse_failure` failure (exit 6): the query directly addresses `file`,
+    /// which the snapshot recorded as `parse_error` or `resource_limit`
+    /// (spec §27: "Targeting that file by path/ID returns exit 6").
+    pub fn parse_failure(
+        message: impl Into<String>,
+        hint: impl Into<String>,
+        file: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> CliError {
+        let mut extra = Map::new();
+        extra.insert("file".to_string(), json!(file.into()));
+        extra.insert("detail".to_string(), json!(detail.into()));
+        CliError {
+            code: "parse_failure",
+            exit: EXIT_PARSE_FAILURE,
+            message: message.into(),
+            hint: hint.into(),
+            extra: Box::new(extra),
+            snapshot_classified: false,
+        }
+    }
+
+    /// An `unsupported_language` failure (exit 7): the query directly
+    /// addresses `file`, which this build does not index. `language` is the
+    /// file's language when its extension names one, else `null`.
+    pub fn unsupported_language(
+        message: impl Into<String>,
+        hint: impl Into<String>,
+        file: impl Into<String>,
+        language: Option<String>,
+    ) -> CliError {
+        let mut extra = Map::new();
+        extra.insert("file".to_string(), json!(file.into()));
+        extra.insert("language".to_string(), json!(language));
+        CliError {
+            code: "unsupported_language",
+            exit: EXIT_UNSUPPORTED_LANGUAGE,
+            message: message.into(),
+            hint: hint.into(),
+            extra: Box::new(extra),
+            snapshot_classified: false,
+        }
+    }
+
+    /// Marks an error whose code is not index-dependent in general as
+    /// describing the acquired snapshot in this instance.
+    ///
+    /// A `repository_unavailable` raised because a query directly addresses a
+    /// file the snapshot recorded as binary, oversize, or non-UTF-8 is a
+    /// statement about that snapshot's classification of the file, unlike a
+    /// lock or I/O failure with the same code, so it carries `index`.
+    pub fn about_snapshot(mut self) -> CliError {
+        self.snapshot_classified = true;
+        self
     }
 
     /// A `budget_too_small` failure (exit 8): no allowed form of the context
@@ -151,6 +220,7 @@ impl CliError {
             message: message.into(),
             hint: hint.into(),
             extra: Box::new(extra),
+            snapshot_classified: false,
         }
     }
 
@@ -161,13 +231,23 @@ impl CliError {
     /// declarations: "no match" or "these matches" is true only of that
     /// snapshot and its coverage. `budget_too_small` is too: its
     /// `required_tokens` is the estimate of a stored symbol's source, which
-    /// only the snapshot can supply. Argument errors, lock/I/O/cache failures,
-    /// and `general` failures are not, even when raised after a refresh.
+    /// only the snapshot can supply. `parse_failure` and `unsupported_language`
+    /// (T32) are too: they report how the snapshot classified a directly
+    /// addressed file, which changes when the file does. So is a
+    /// `repository_unavailable` marked [`CliError::about_snapshot`], raised for
+    /// a directly addressed binary, oversize, or non-UTF-8 file. Argument
+    /// errors, lock/I/O/cache failures, and `general` failures are not, even
+    /// when raised after a refresh.
     pub fn is_index_dependent(&self) -> bool {
-        matches!(
-            self.code,
-            "symbol_not_found" | "ambiguous_symbol" | "budget_too_small"
-        )
+        self.snapshot_classified
+            || matches!(
+                self.code,
+                "symbol_not_found"
+                    | "ambiguous_symbol"
+                    | "budget_too_small"
+                    | "parse_failure"
+                    | "unsupported_language"
+            )
     }
 
     /// Attaches the acquired snapshot's `index` metadata to an index-dependent
@@ -325,6 +405,27 @@ mod tests {
         let keys: Vec<&str> = too_small.extra.keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["budget_tokens", "required_tokens", "index"]);
         assert_eq!(too_small.extra.get("index"), Some(&index));
+
+        let parse = CliError::parse_failure("m", "h", "a.php", "ERROR at byte 3")
+            .with_snapshot_index(index.clone());
+        let keys: Vec<&str> = parse.extra.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["file", "detail", "index"]);
+        assert_eq!((parse.code, parse.exit), ("parse_failure", 6));
+
+        let unsupported = CliError::unsupported_language("m", "h", "a.md", None)
+            .with_snapshot_index(index.clone());
+        let keys: Vec<&str> = unsupported.extra.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["file", "language", "index"]);
+        assert_eq!(unsupported.extra.get("language"), Some(&Value::Null));
+        assert_eq!(
+            (unsupported.code, unsupported.exit),
+            ("unsupported_language", 7)
+        );
+
+        let excluded = CliError::repository_unavailable("m", "h")
+            .about_snapshot()
+            .with_snapshot_index(index.clone());
+        assert_eq!(excluded.extra.get("index"), Some(&index));
 
         for error in [
             CliError::invalid_arguments("m", "h"),
