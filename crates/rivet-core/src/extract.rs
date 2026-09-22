@@ -196,7 +196,14 @@ pub struct NewBinding {
     /// The assigned variable name's byte range.
     pub span: Span,
     /// Whether the right-hand side is a direct `new <class>(...)`.
-    #[serde(default = "default_true")]
+    ///
+    /// There is deliberately no `true` default. A refresh reparses stale facts
+    /// because the extractor fingerprint now covers the fact schema (T22), but
+    /// explicit `--no-refresh` can still read a snapshot committed by an older
+    /// binary, so an absent `direct_new` must mean "not known to be a direct
+    /// `new`" (unresolved), never the unsafe assumption that every old fact was
+    /// an unconditional `new`.
+    #[serde(default)]
     pub direct_new: bool,
     /// The start byte of the nearest enclosing control-flow block within the
     /// function body, or `None` at the body's top level. Two assignments share
@@ -204,12 +211,6 @@ pub struct NewBinding {
     /// not confused with an unconditional one.
     #[serde(default)]
     pub block: Option<u32>,
-}
-
-/// The serde default for [`NewBinding::direct_new`]: facts persisted before
-/// T21 recorded only direct `new` assignments.
-fn default_true() -> bool {
-    true
 }
 
 /// Owned lexical facts recorded for one scope (T18).

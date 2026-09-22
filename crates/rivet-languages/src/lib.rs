@@ -84,14 +84,25 @@ pub fn is_language_compiled(name: &str) -> bool {
 /// names this crate rather than its dependencies, so the grammar crate versions
 /// are compile-time constants kept in sync with the root `Cargo.toml` pins
 /// (`tree-sitter-php = "=0.24.2"`, `tree-sitter-typescript = "=0.23.2"`).
+///
+/// The trailing `fact-schema=N` component covers the *shape and meaning* of the
+/// persisted extractor facts, not just the grammar. Grammar versions alone are
+/// not enough: T21 changed what the adapter records (`new_bindings` gained
+/// `direct_new` and `block`, and `UseHint::NewExpr` gained `use_block`) without
+/// touching a grammar, so a repository indexed by the previous binary would be
+/// reused without reparsing and its stale facts would deserialize with serde
+/// defaults. A change to any persisted fact shape or to the meaning of an
+/// existing field must bump this integer so the next refresh reparses every
+/// enabled-language file. The current schema is 1 (post-T21); it was introduced
+/// by T22 together with this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=1";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=1";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=1";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";
@@ -164,5 +175,18 @@ mod tests {
                  tree-sitter-typescript {version}"
             );
         }
+    }
+
+    /// The fingerprint must also name the persisted fact schema (T22), so a
+    /// change to recorded fact shape or meaning invalidates stored facts even
+    /// when every grammar version is unchanged.
+    #[test]
+    #[cfg(any(feature = "lang-php", feature = "lang-typescript"))]
+    fn fingerprint_names_the_fact_schema() {
+        assert!(
+            EXTRACTOR_FINGERPRINT.contains(";fact-schema="),
+            "EXTRACTOR_FINGERPRINT {EXTRACTOR_FINGERPRINT:?} must name the fact schema; bump \
+             the `fact-schema` integer whenever a persisted fact's shape or meaning changes"
+        );
     }
 }

@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
+use rivet_store::{Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, Store};
+
 /// The binary under test, supplied by Cargo for integration tests.
 const RIVET: &str = env!("CARGO_BIN_EXE_rivet");
 
@@ -107,6 +109,11 @@ fn parse_error(output: &Output, exit: i32) -> Value {
     );
     assert!(output.stdout.is_empty(), "stdout must stay empty on error");
     serde_json::from_slice(&output.stderr).expect("stderr is one JSON object")
+}
+
+/// Opens the committed cache created by a successful `index`.
+fn open_store(root: &Path) -> Store {
+    Store::open(&root.join(".rivet")).expect("open committed store")
 }
 
 const LAUNCH: &str = "App\\Services\\SurveyService::launch";
@@ -353,4 +360,100 @@ fn no_reparse_hook_proves_equal_content_is_not_reparsed() {
         .map(str::to_string)
         .collect();
     assert_eq!(third_lines, vec!["SurveyService.php".to_string()]);
+}
+
+/// Even with no content or membership change and no reparsed file, a refresh
+/// recomputes and republishes every binding, so a changed resolver rule (or a
+/// stale committed binding set) is picked up without a separate fingerprint
+/// trigger.
+///
+/// The committed snapshot is rewritten to hold the current file/symbol/use/scope
+/// rows under a stale resolver fingerprint with an empty `bindings` table. The
+/// next no-edit refresh reparses nothing, yet must restore the full binding set
+/// and advance the stored resolver fingerprint.
+#[test]
+fn stale_bindings_are_re_resolved_without_reparsing() {
+    let temp = fixture_repo("resolver");
+    let root = temp.path();
+
+    let _ = parse_success(&run(root, &["index", "--json"]));
+    let reference = {
+        let store = open_store(root);
+        store.list_bindings().expect("list bindings")
+    };
+    assert!(
+        !reference.is_empty(),
+        "the authored fixture must produce bindings"
+    );
+
+    // Rewrite the snapshot: same facts, stale resolver fingerprint, no
+    // bindings. `publish_inventory` proves the bindings table can hold nothing
+    // while the facts remain reusable.
+    {
+        let mut store = open_store(root);
+        let files = store.list_files().expect("list files");
+        let symbols = store.list_symbols().expect("list symbols");
+        let mut uses = Vec::new();
+        let mut scopes = Vec::new();
+        for file in &files {
+            uses.extend(store.list_uses_for_file(&file.path).expect("list uses"));
+            scopes.extend(store.list_scopes_for_file(&file.path).expect("list scopes"));
+        }
+        let effective_config = store
+            .get_meta("effective_config_fingerprint")
+            .expect("read meta")
+            .expect("effective-config fingerprint present");
+        let extractor = store
+            .get_meta("extractor_fingerprint")
+            .expect("read meta")
+            .expect("extractor fingerprint present");
+        store
+            .publish_inventory(InventoryInput {
+                fingerprint: Fingerprint {
+                    index_format_version: INDEX_FORMAT_VERSION.to_string(),
+                    effective_config,
+                    extractor,
+                    resolver: "php-rules-v0".to_string(),
+                },
+                files,
+                symbols,
+                uses,
+                scopes,
+                bindings: Vec::new(),
+                force: false,
+            })
+            .expect("publish a stale binding state");
+    }
+
+    // A no-edit refresh must not reparse anything.
+    let log_dir = TempDir::new("resolver-log");
+    let log = log_dir.path().join("reparsed.txt");
+    fs::write(&log, b"").expect("create reparse log");
+    let output = run_with_env(
+        root,
+        &["index", "--json"],
+        &[("RIVET_DEBUG_REPARSED", log.as_path())],
+    );
+    let _ = parse_success(&output);
+    let lines: Vec<String> = fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        lines.is_empty(),
+        "an unchanged refresh must reparse nothing: {lines:?}"
+    );
+
+    let store = open_store(root);
+    assert_eq!(
+        store.list_bindings().expect("list bindings"),
+        reference,
+        "re-resolution must rebuild the cleared bindings without reparsing"
+    );
+    assert_ne!(
+        store.get_meta("resolver_fingerprint").expect("read meta"),
+        Some("php-rules-v0".to_string()),
+        "the re-resolving publish must advance the stored resolver fingerprint"
+    );
 }

@@ -224,13 +224,17 @@ fn refresh_inventory(
         .map_err(store_error)?;
     let fingerprint_matches = stored_extractor.as_deref() == Some(EXTRACTOR_FINGERPRINT);
 
-    // Resolver invalidation. T19 recomputes bindings for every use on every
-    // publish (spec §12.3), so a changed resolver fingerprint needs no separate
-    // clear here; T22 adds the membership-change triggers.
-    let stored_resolver = store
-        .get_meta("resolver_fingerprint")
-        .map_err(store_error)?;
-    let _resolver_changed = stored_resolver.as_deref() != Some(RESOLVER_FINGERPRINT);
+    // Resolver invalidation. A changed resolver fingerprint deliberately has no
+    // separate trigger in this function: every refresh re-resolves all persisted
+    // uses over exactly the symbol/use/scope rows it is about to publish, and
+    // `publish_inventory` unconditionally clears the whole `bindings` table
+    // before reinserting the fresh rows (spec §12.3; ARCHITECTURE "Refresh and
+    // invalidation"). There is no early return in `refresh_inventory`, so no
+    // refresh path can keep stale bindings; the resolver fingerprint only feeds
+    // the snapshot digest. The one path that can answer from bindings predating
+    // a rule change is explicit `--no-refresh`, which is labeled `freshness:
+    // cached` and never claims a refresh. This is proven by
+    // `tests/refresh.rs::stale_bindings_are_re_resolved_without_reparsing`.
 
     // Load the current inventory and facts once. Reused files keep their
     // stored source bytes and symbol/use/scope rows.
