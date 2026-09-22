@@ -118,6 +118,18 @@ Read: spec §§16 and 23; OUTPUT-CONTRACT context; ADDING-A-LANGUAGE signature b
 
 **Checkpoint E:** run context/CLI tests and fmt/clippy. Compare the output to reading the three-file fixture manually. Record full rendered output size as well as the source estimate.
 
+## E2. Audit fixes
+
+A whole-codebase adversarial audit on 2026-09-22 found defects the suites did not catch; see `orchestration/review-notes/audit-2026-09-22.md`. Numbers in parentheses are the audit's finding numbers. AF1 through AF4 touch the resolver and PHP extractor and run in order; AF5 is independent.
+
+| Done | ID | Small task | Done when |
+|---|---|---|---|
+| [ ] | AF1 | Fix namespace and scope structure: top-level closures see the file's namespace and imports (1); each namespace block of a multi-namespace file resolves against its own namespace and imports (2); a global `namespace { }` block declares global names (3). | Each audit reproduction yields the correct binding or none; no wrong `exact`; gold unchanged unless a gold span was itself wrong, which must be reported. |
+| [ ] | AF2 | Make declaration lookup kind-aware: a call binds only to a callable, a class use only to a class-like, a property access only to a property (4, 5); fold case only for ASCII, as PHP does (10). | Each audit reproduction yields the correct binding or none. |
+| [ ] | AF3 | Extend receiver conservatism to typed receivers and close the remaining rebinding forms: typed parameters honour unanalysable scopes, by-reference arguments and reassignment (6); union types stay unresolved (7); reference aliases, constructor by-reference arguments and `global` rebinding (8); attribute text cannot mislead by-reference parsing (9). | Each audit reproduction records no binding; safe typed and `new` cases still bind `scoped`. |
+| [ ] | AF4 | Close silent misses: walk anonymous class bodies (11); store a use's normalized short lookup name so unresolved qualified and constant uses name-match (12); record class references in static calls, class-constant access and `::class` (13). | Each audit reproduction appears in refs; nothing previously correct changes tier. |
+| [ ] | AF5 | Contract and coverage honesty: an invalid or unextracted TypeScript file is not reported as indexed (14); index-dependent errors carry `index` (15); `updated` counts regenerated files (16); the non-UTF-8 diagnostic reports a repository-relative path (17); `--no-refresh` rejects a cache from another extractor fingerprint (suspicion 2), confirmed first. | Each item matches OUTPUT-CONTRACT or ARCHITECTURE, with a regression test. |
+
 ## F. Make the PHP slice safe and usable in a pilot
 
 Read: ARCHITECTURE concurrency/parse policy; spec §§25–27; AGENT-SNIPPET; OUTPUT-CONTRACT errors/flags.
