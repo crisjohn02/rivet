@@ -307,6 +307,9 @@ pub(crate) fn store_error(error: rivet_store::Error) -> CliError {
         rivet_store::Error::InvalidDestination { .. } => {
             "Check that .rivet/ is a real writable directory, not a symlink."
         }
+        rivet_store::Error::WriterLocked { .. } => {
+            "Another rivet process is refreshing this index; retry when it finishes."
+        }
         _ => "Check .rivet/ permissions and retry.",
     };
     CliError::repository_unavailable(error.to_string(), hint)

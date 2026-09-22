@@ -1,5 +1,5 @@
 //! Refresh and cached-read paths shared by `rivet index` and every query
-//! command (spec §12.3, §12.4 steps 1–2 and 4; ARCHITECTURE "Refresh and
+//! command (spec §12.3, §12.4; ARCHITECTURE "Refresh and
 //! invalidation" and "Concurrency and source consistency").
 //!
 //! [`refresh`] is the single code path that performs a refresh: it walks the
@@ -11,6 +11,17 @@
 //! snapshot. Files whose content hash and stored parse status are unchanged keep
 //! their stored symbols; their mtime/size are still rewritten. `--force` clears
 //! every stored fact and rebuilds it in the same publish transaction.
+//!
+//! Concurrency (T31; spec §12.4 steps 3 and 4). Each attempt takes the writer
+//! lock (`BEGIN IMMEDIATE`, 5 second busy timeout) before it loads anything,
+//! and walks, reads, parses, writes, and re-resolves inside that one
+//! transaction, so competing refreshes publish in lock order and never from a
+//! stale inventory. A lock not acquired in time is exit 3. Before commit a
+//! second walk must observe the same eligible paths with the same size and
+//! mtime; a difference rolls back and retries the whole refresh once, and a
+//! second difference is `repository_changed` (exit 9). A query then reads
+//! everything from one committed read transaction pinned to the digest it
+//! reports (see [`acquire_snapshot`]).
 //!
 //! [`open_cached_store`] plus [`cached_report`] implement explicit
 //! `--no-refresh` access: they open a compatible committed snapshot and report
@@ -63,6 +74,11 @@ pub(crate) fn open_context() -> Result<Context, CliError> {
 /// `--no-refresh`, opens the committed snapshot directly (keeping the AF5
 /// compatibility check) and never walks.
 ///
+/// Either way the returned store has one open read transaction, and the
+/// returned report's `snapshot` is the digest of exactly the snapshot that
+/// transaction reads, so the query's rows, source bytes, and reported digest
+/// all come from one committed snapshot even while another process publishes.
+///
 /// Shared by `symbol`, `refs`, and `context`. The caller validates every
 /// argument and the configured languages first.
 pub(crate) fn acquire_snapshot(
@@ -70,17 +86,31 @@ pub(crate) fn acquire_snapshot(
     no_refresh: bool,
     requested_freshness: Option<Freshness>,
 ) -> Result<(Store, Report), CliError> {
-    if no_refresh {
+    let (store, report) = if no_refresh {
         let store = open_cached_store(&context.root)?;
         let report = cached_report(&store, false)?;
-        Ok((store, report))
+        (store, report)
     } else {
         let effective_freshness = requested_freshness.unwrap_or(context.config.index.freshness);
         let mode = crate::index::refresh_mode(effective_freshness);
-        let mut store = open_store(&context.root)?;
-        let report = refresh(&context.root.root, &context.config, &mut store, mode, false)?.report;
-        Ok((store, report))
-    }
+        let store = open_store(&context.root)?;
+        let report = refresh_with_retry(
+            &context.root.root,
+            &context.config,
+            &store,
+            mode,
+            false,
+            PinSnapshot::Yes,
+        )?
+        .report;
+        (store, report)
+    };
+    // The store now holds one committed read transaction whose snapshot digest
+    // is `report.snapshot`. Every read the command makes from here, including
+    // the stored source bytes it slices, joins that transaction (spec §12.4
+    // step 4; ARCHITECTURE "Readers use a committed read transaction").
+    debug_point!("query-snapshot-pinned");
+    Ok((store, report))
 }
 
 /// Opens the cache store, creating `.rivet/` at a Git root when absent.
@@ -132,6 +162,10 @@ pub(crate) fn open_cached_store(root: &rivet_core::RootInfo) -> Result<Store, Cl
         }
     }
     let store = Store::open(&rivet_dir).map_err(cached_store_error)?;
+    // Pin one committed snapshot before the first fact is read, so the
+    // compatibility check, the reconstructed report, and every query read agree
+    // on one snapshot (spec §12.4 step 4).
+    store.begin_snapshot_read().map_err(cached_store_error)?;
     check_cached_fingerprints(&store)?;
     Ok(store)
 }
@@ -260,7 +294,7 @@ pub struct RefreshOutcome {
     pub report: Report,
 }
 
-/// Refreshes the index inside one publish transaction and returns its report.
+/// Refreshes the index inside one writer transaction and returns its report.
 ///
 /// This is the only function that walks, parses, and publishes on the query
 /// path. A failed parse does not abort the refresh: the file is recorded with
@@ -268,6 +302,12 @@ pub struct RefreshOutcome {
 /// with partial coverage (ARCHITECTURE "Parse and coverage policy"). An I/O
 /// failure aborts, publishing nothing. `force` clears every stored fact and
 /// rebuilds it in the same transaction (spec §13).
+///
+/// The writer lock is taken first and the whole refresh runs inside it (see
+/// [`refresh_inventory`]). A writer lock not acquired within the busy timeout
+/// is `repository_unavailable` (exit 3) naming the lock; a race detected on
+/// the refresh and again on its one retry is `repository_changed` (exit 9).
+/// Neither ever falls back to the existing snapshot.
 pub fn refresh(
     root: &Path,
     config: &Config,
@@ -275,20 +315,101 @@ pub fn refresh(
     mode: RefreshMode,
     force: bool,
 ) -> Result<RefreshOutcome, CliError> {
-    refresh_inventory(root, config, store, mode, force)
+    refresh_with_retry(root, config, store, mode, force, PinSnapshot::No)
 }
 
-/// Walks, reads, conditionally reparses, and publishes the complete inventory.
+/// How many times a refresh runs before a detected race becomes
+/// `repository_changed`: the first attempt and one retry (spec §12.4 step 3:
+/// "Retry the whole refresh once on a detected race").
+const REFRESH_ATTEMPTS: u32 = 2;
+
+/// Whether a refresh must leave the store in a read transaction pinned to the
+/// snapshot it committed, for a query to answer from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinSnapshot {
+    /// `rivet index`: report the committed snapshot and read nothing more.
+    No,
+    /// A query: begin a read transaction right after the commit and require
+    /// that it observes the committed digest.
+    Yes,
+}
+
+/// Runs [`refresh_inventory`], retrying the whole refresh once on a detected
+/// race (spec §12.4 step 3).
+///
+/// With [`PinSnapshot::Yes`], a read transaction is begun after the commit.
+/// Between the commit and that transaction's first read another process may
+/// publish; its snapshot then differs from the report being returned, which
+/// would pair this refresh's coverage and digest with another snapshot's rows.
+/// The digest is deterministic over the indexed content and configuration, so a
+/// different digest means another refresh saw different content: that is a
+/// detected race too, and it spends the same single retry.
+fn refresh_with_retry(
+    root: &Path,
+    config: &Config,
+    store: &Store,
+    mode: RefreshMode,
+    force: bool,
+    pin: PinSnapshot,
+) -> Result<RefreshOutcome, CliError> {
+    let started = Instant::now();
+    for attempt in 1..=REFRESH_ATTEMPTS {
+        let Some(mut outcome) = refresh_inventory(root, config, store, mode, force, attempt)?
+        else {
+            // A race was detected and this attempt rolled back.
+            continue;
+        };
+        if pin == PinSnapshot::Yes {
+            let pinned = store.begin_snapshot_read().map_err(store_error)?;
+            if pinned.as_deref() != Some(outcome.report.snapshot.as_str()) {
+                store.end_snapshot_read().map_err(store_error)?;
+                debug_point!("query-snapshot-moved-{attempt}");
+                continue;
+            }
+        }
+        outcome.report.elapsed_ms = started.elapsed().as_millis() as u64;
+        return Ok(outcome);
+    }
+    Err(CliError::repository_changed(
+        "the repository changed while it was being indexed, and again during the one retry",
+        "Retry once files under the repository stop changing.",
+    ))
+}
+
+/// One refresh attempt, in the order of the ARCHITECTURE "Refresh and
+/// invalidation" pseudocode: take the writer lock (`BEGIN IMMEDIATE`, busy
+/// timeout 5 seconds); load the fingerprints and inventory; walk; read, hash,
+/// and conditionally reparse each eligible file in path order; replace file
+/// facts; drop deleted files; re-resolve every use; recheck the observed file
+/// metadata and eligible path set; compute the digest and commit.
+///
+/// Returns `Ok(None)` when the recheck detects a race: the transaction was
+/// rolled back and nothing was published. Any error also drops the writer
+/// transaction, rolling it back, so a failed refresh leaves the previous
+/// complete snapshot intact (spec §12.3).
 fn refresh_inventory(
     root: &Path,
     config: &Config,
-    store: &mut Store,
+    store: &Store,
     mode: RefreshMode,
     force: bool,
-) -> Result<RefreshOutcome, CliError> {
+    // Names the debug pause points only; unused in a release build.
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))] attempt: u32,
+) -> Result<Option<RefreshOutcome>, CliError> {
     let started = Instant::now();
 
-    let walk = walk_eligible(root, config).map_err(walk_error)?;
+    // Writer lock first: every read below, including the previous inventory
+    // and the use-ID high-water mark, sees the state this transaction will
+    // replace, and no competing refresh can publish in between (ARCHITECTURE
+    // "Concurrency and source consistency": parsing inside the writer
+    // transaction "prevents competing refreshes from publishing out of
+    // order").
+    debug_point!("refresh-before-lock-{attempt}");
+    let mut txn = store
+        .begin_write(crate::debug_hook::busy_timeout())
+        .map_err(store_error)?;
+    debug_point!("refresh-locked-{attempt}");
+
     let max_bytes = config.index.max_file_size_kb.saturating_mul(1024);
 
     // Fingerprint invalidation at the start of every refresh (spec §12.3;
@@ -341,6 +462,10 @@ fn refresh_inventory(
         .max()
         .unwrap_or(0)
         .saturating_add(1);
+
+    // Walk regular eligible files with local ignore rules. The walked entries
+    // carry the metadata observed for each file; the recheck compares it.
+    let walk = walk_eligible(root, config).map_err(walk_error)?;
 
     let mut files = Vec::with_capacity(walk.files.len());
     let mut symbols: Vec<SymbolRow> = Vec::new();
@@ -549,6 +674,14 @@ fn refresh_inventory(
                     parse_status: status,
                 });
             }
+            // A file that vanished between the walk and the read is a change
+            // to the eligible path set: a detected race, not an I/O failure
+            // (spec §12.4 step 3).
+            SourceRead::Failed(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                drop(txn);
+                debug_point!("refresh-raced-{attempt}");
+                return Ok(None);
+            }
             // An I/O failure aborts the refresh; it never silently preserves old
             // facts (spec §27).
             SourceRead::Failed(error) => {
@@ -644,8 +777,8 @@ fn refresh_inventory(
     } else {
         reparsed.clone()
     };
-    let published = store
-        .publish_inventory(InventoryInput {
+    let staged = txn
+        .stage_inventory(InventoryInput {
             fingerprint,
             files,
             symbols,
@@ -656,10 +789,28 @@ fn refresh_inventory(
             regenerated,
         })
         .map_err(store_error)?;
+    debug_point!("refresh-staged-{attempt}");
+
+    // Recheck observed metadata and the eligible path set (spec §12.4 step 3).
+    // A second walk must list exactly the same eligible paths with the same
+    // size and mtime the first walk observed (and so the metadata stored for
+    // every file read), and the same skipped non-UTF-8 paths. A walk that
+    // fails now, after the first succeeded, is a change as well. Any
+    // difference rolls this attempt back.
+    let stable = walk_eligible(root, config).is_ok_and(|recheck| recheck == walk);
+    if !stable {
+        txn.rollback().map_err(store_error)?;
+        debug_point!("refresh-raced-{attempt}");
+        return Ok(None);
+    }
+
+    // Compute the deterministic digest and commit.
+    let published = txn.commit(staged).map_err(store_error)?;
+    debug_point!("refresh-committed-{attempt}");
 
     record_reparsed(&reparsed);
 
-    Ok(RefreshOutcome {
+    Ok(Some(RefreshOutcome {
         report: Report {
             snapshot: published.digest,
             freshness: mode.freshness(),
@@ -679,7 +830,7 @@ fn refresh_inventory(
             elapsed_ms: started.elapsed().as_millis() as u64,
             timing: false,
         },
-    })
+    }))
 }
 
 /// Groups every persisted symbol row by owning file.

@@ -9,6 +9,9 @@
 //! `symbol` reference pipeline in [`references`], which is only reachable from
 //! this crate.
 
+#[macro_use]
+mod debug_hook;
+
 pub mod budget;
 pub mod context;
 pub mod context_cmd;
