@@ -181,6 +181,67 @@ impl fmt::Display for RefKind {
     }
 }
 
+/// The outcome of reading and parsing one file, as persisted in
+/// `files.parse_status` (ARCHITECTURE "Minimal logical schema").
+///
+/// `Ok` means the stored `source` holds exactly the bytes that were parsed;
+/// every other value is a skip classification with no stored source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ParseStatus {
+    /// The file was parsed and its facts were published.
+    Ok,
+    /// Tree-sitter reported an error or missing node.
+    ParseError,
+    /// A deterministic parser resource limit was reached.
+    ResourceLimit,
+    /// A NUL byte appeared within the inspected prefix.
+    Binary,
+    /// The file exceeded the configured size limit.
+    Size,
+    /// The bytes are not valid UTF-8.
+    Encoding,
+    /// No grammar handles the file's language.
+    Unsupported,
+}
+
+impl ParseStatus {
+    /// The snake_case form used by the output contract.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ParseStatus::Ok => "ok",
+            ParseStatus::ParseError => "parse_error",
+            ParseStatus::ResourceLimit => "resource_limit",
+            ParseStatus::Binary => "binary",
+            ParseStatus::Size => "size",
+            ParseStatus::Encoding => "encoding",
+            ParseStatus::Unsupported => "unsupported",
+        }
+    }
+}
+
+impl FromStr for ParseStatus {
+    type Err = KindParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ok" => Ok(ParseStatus::Ok),
+            "parse_error" => Ok(ParseStatus::ParseError),
+            "resource_limit" => Ok(ParseStatus::ResourceLimit),
+            "binary" => Ok(ParseStatus::Binary),
+            "size" => Ok(ParseStatus::Size),
+            "encoding" => Ok(ParseStatus::Encoding),
+            "unsupported" => Ok(ParseStatus::Unsupported),
+            _ => Err(KindParseError::new("parse_status", value)),
+        }
+    }
+}
+
+impl fmt::Display for ParseStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Error returned when an enum string is not one of its contract values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindParseError {
@@ -217,7 +278,7 @@ impl std::error::Error for KindParseError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{KindParseError, RefKind, Resolution, SymbolKind};
+    use super::{KindParseError, ParseStatus, RefKind, Resolution, SymbolKind};
     use std::str::FromStr;
 
     #[test]
@@ -279,6 +340,36 @@ mod tests {
             assert_eq!(RefKind::from_str(text).unwrap(), *kind);
         }
         assert!(RefKind::from_str("").is_err());
+    }
+
+    #[test]
+    fn parse_status_strings_round_trip() {
+        let statuses = [
+            ParseStatus::Ok,
+            ParseStatus::ParseError,
+            ParseStatus::ResourceLimit,
+            ParseStatus::Binary,
+            ParseStatus::Size,
+            ParseStatus::Encoding,
+            ParseStatus::Unsupported,
+        ];
+        let expected = [
+            "ok",
+            "parse_error",
+            "resource_limit",
+            "binary",
+            "size",
+            "encoding",
+            "unsupported",
+        ];
+        for (status, text) in statuses.iter().zip(expected) {
+            assert_eq!(status.as_str(), text);
+            assert_eq!(ParseStatus::from_str(text).unwrap(), *status);
+        }
+        assert_eq!(
+            ParseStatus::from_str("skipped").unwrap_err(),
+            KindParseError::new("parse_status", "skipped")
+        );
     }
 
     #[test]

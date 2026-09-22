@@ -21,7 +21,7 @@ pub use config::{
     OutputConfig,
 };
 pub use id::{SymbolId, SymbolIdError, assign_ordinals};
-pub use kinds::{KindParseError, RefKind, Resolution, SymbolKind};
+pub use kinds::{KindParseError, ParseStatus, RefKind, Resolution, SymbolKind};
 pub use root::{RootError, RootInfo, discover_root};
 pub use source::{SkipReason, SourceRead, content_hash, read_source};
 pub use span::{LineCol, LineIndex, Span, SpanError};

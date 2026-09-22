@@ -5,3 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 description = "SQLite, atomic publication, snapshot reads"
+
+[dependencies]
+rivet-core = { path = "../rivet-core" }
+# SQLite is bundled from source so no system library is required. Pinned to the
+# exact registry version checked with `cargo search` (docs/BUILDING.md).
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
