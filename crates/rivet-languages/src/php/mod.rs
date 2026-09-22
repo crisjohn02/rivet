@@ -518,6 +518,18 @@ pub fn lookup_name(name: &str, kind: SymbolKind) -> String {
     }
 }
 
+/// The normalized short name of a use spelling (AF4): the last segment of a
+/// qualified spelling, with any `namespace\` prefix and leading `\` removed,
+/// and without a leading `$`.
+///
+/// `\App\Foo`, `Sub\Missing\Foo`, and `namespace\Foo` all give `Foo`;
+/// `$count` gives `count`. Case is left as written; folding depends on the
+/// kind of declaration the use is compared with.
+pub fn use_short_name(spelling: &str) -> &str {
+    let last = spelling.rsplit('\\').next().unwrap_or(spelling);
+    last.strip_prefix('$').unwrap_or(last)
+}
+
 /// Join a namespace and a short name in the PHP native form.
 fn qualified(namespace: Option<&str>, local: &str) -> String {
     match namespace {
@@ -532,8 +544,18 @@ fn node_text(node: Node<'_>, source: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::lookup_name;
+    use super::{lookup_name, use_short_name};
     use rivet_core::SymbolKind;
+
+    #[test]
+    fn use_short_name_keeps_the_last_segment_without_a_dollar() {
+        assert_eq!(use_short_name("\\App\\Foo"), "Foo");
+        assert_eq!(use_short_name("Sub\\Missing\\Foo"), "Foo");
+        assert_eq!(use_short_name("namespace\\Foo"), "Foo");
+        assert_eq!(use_short_name("LIMIT"), "LIMIT");
+        assert_eq!(use_short_name("$count"), "count");
+        assert_eq!(use_short_name("count"), "count");
+    }
 
     #[test]
     fn lookup_name_folds_ascii_only_and_only_for_case_insensitive_kinds() {

@@ -125,12 +125,18 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
     // constants, so a lowercased retry is filtered to case-insensitive kinds.
     // The retry folds ASCII only, exactly as the stored `lookup_name` was
     // folded (`rivet_languages::php::lookup_name`), because PHP folds only
-    // ASCII letters (AF2).
-    let mut short = store.find_symbols_by_lookup_name(query)?;
+    // ASCII letters (AF2). Every candidate is accepted by
+    // [`lookup_name_matches`], the comparison the `refs` matcher also uses
+    // (AF4), so the two cannot disagree about case.
+    let mut short: Vec<SymbolRow> = Vec::new();
     let lowered = query.to_ascii_lowercase();
+    let mut spellings = vec![query];
     if lowered != query {
-        for row in store.find_symbols_by_lookup_name(&lowered)? {
-            if case_insensitive_kind(row.kind)
+        spellings.push(lowered.as_str());
+    }
+    for spelling in spellings {
+        for row in store.find_symbols_by_lookup_name(spelling)? {
+            if lookup_name_matches(query, row.kind, &row.lookup_name)
                 && !short.iter().any(|existing| existing.id == row.id)
             {
                 short.push(row);
@@ -138,6 +144,30 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
         }
     }
     Ok(QueryOutcome::Symbols(sort_rows(short)))
+}
+
+/// Whether the short name `name` (a query, or a use's persisted lookup name)
+/// can name a declaration of `kind` whose persisted lookup name is
+/// `lookup_name` (AF4).
+///
+/// The comparison folds according to the *declaration's* kind, so a name whose
+/// own kind is unknown (a bare identifier) is compared correctly against both
+/// case-sensitive and case-insensitive declarations:
+///
+/// - a property compares case-sensitively with any leading `$` removed from
+///   both sides, because a declaration keeps its `$` and `$x->name` omits it;
+/// - a constant (including an enum case) compares case-sensitively;
+/// - every other kind (class, interface, trait, enum, function, method,
+///   namespace) compares by ASCII case folding, as PHP does (AF2).
+pub fn lookup_name_matches(name: &str, kind: SymbolKind, lookup_name: &str) -> bool {
+    match kind {
+        SymbolKind::Property => {
+            name.strip_prefix('$').unwrap_or(name)
+                == lookup_name.strip_prefix('$').unwrap_or(lookup_name)
+        }
+        SymbolKind::Const => name == lookup_name,
+        _ => name.eq_ignore_ascii_case(lookup_name),
+    }
 }
 
 /// Parses the `file:line` form: a path, a colon, and a positive integer.

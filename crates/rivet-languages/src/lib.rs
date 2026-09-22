@@ -95,6 +95,15 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **9** — AF4: a use's stored `lookup_name` is its normalized short name
+///   (last qualified segment, no leading `$`), and `unknown` uses and `use
+///   const` aliases keep their case; anonymous class bodies are walked, with
+///   no `$this`/`self`/`static` receiver hint inside them; the class before
+///   `::` in a static call, class-constant access, static property access, or
+///   `::class` is recorded as a `type` use and its member carries the new
+///   `UseHint::NamedClass`; `::class` records no member use; an `instanceof`
+///   class operand is a `type` use rather than `unknown`; and an enum case's
+///   own name is no longer recorded as a use.
 /// - **8** — AF3: `UseHint::Typed` gained `origin` (parameter or property), and
 ///   a union, intersection, or DNF type or a by-reference parameter no longer
 ///   records a typed receiver; a reference taken to a variable (`$y = &$x`, a
@@ -128,13 +137,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=8";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=9";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=8";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=9";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=8";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=9";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

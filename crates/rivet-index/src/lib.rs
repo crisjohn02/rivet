@@ -11,5 +11,5 @@
 mod query;
 pub mod resolve;
 
-pub use query::{QueryOutcome, levenshtein, resolve_query, suggestions};
+pub use query::{QueryOutcome, levenshtein, lookup_name_matches, resolve_query, suggestions};
 pub use resolve::{Resolver, resolve_all, unindexed_php_files};

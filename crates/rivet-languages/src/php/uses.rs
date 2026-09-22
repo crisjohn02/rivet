@@ -35,6 +35,18 @@
 //! - the facts behind the `global` rule: which scopes are global, the calls
 //!   in them, `goto`, and every name a scope can rebind through `global` or
 //!   `$GLOBALS`.
+//!
+//! AF4 adds:
+//!
+//! - anonymous class bodies are walked; their uses keep the nearest named
+//!   container, but `$this`, `self`, and `static` inside them record no
+//!   receiver evidence, because they name the anonymous class;
+//! - the class named before `::` in a static call, a class-constant access, a
+//!   static property access, or `::class` as a [`RefKind::Type`] use, and the
+//!   member after it with a [`UseHint::NamedClass`] hint; `::class` itself is
+//!   not a member use;
+//! - the class operand of `instanceof` as a [`RefKind::Type`] use; and
+//! - no use for an enum case's own name, which is a declaration.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -83,8 +95,9 @@ struct Walker<'a> {
     scope_facts: BTreeMap<String, ScopeFacts>,
     /// Stack of lexical function-body variable scopes; the last is current.
     scopes: Vec<HashMap<String, Binding>>,
-    /// Stack of enclosing class-like node ids.
-    class_stack: Vec<usize>,
+    /// Stack of enclosing class-like node ids, each with whether it is an
+    /// anonymous class (AF4).
+    class_stack: Vec<(usize, bool)>,
     /// Stack of enclosing function-body ordinals; `None` at file scope.
     body_stack: Vec<Option<u32>>,
     next_body_ordinal: u32,
@@ -378,6 +391,26 @@ impl Walker<'_> {
                     }
                 }
             }
+            // An enum case's name is a declaration, never a use; its backing
+            // value is code (AF4).
+            "enum_case" => {
+                if let Some(value) = node.child_by_field_name("value") {
+                    self.visit(value, false);
+                }
+            }
+            // The class operand of `instanceof` is a type position (AF4).
+            "binary_expression" if is_instanceof(node) => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    self.visit(left, false);
+                }
+                if let Some(right) = node.child_by_field_name("right") {
+                    if matches!(right.kind(), "name" | "qualified_name" | "relative_name") {
+                        self.push_use(right, RefKind::Type, None, UseHint::Unresolved);
+                    } else {
+                        self.visit(right, false);
+                    }
+                }
+            }
             // A bare constant reference or namespaced constant is unclassified.
             "name" | "qualified_name" | "relative_name" => {
                 self.push_use(node, RefKind::Unknown, None, UseHint::Unresolved);
@@ -392,7 +425,8 @@ impl Walker<'_> {
 
     /// Descend into a class-like declaration body, tracking the class context.
     fn visit_class(&mut self, node: Node<'_>) {
-        self.class_stack.push(node.id());
+        self.class_stack
+            .push((node.id(), node.kind() == "anonymous_class"));
         if let Some(body) = node.child_by_field_name("body") {
             self.visit(body, false);
         } else {
@@ -629,7 +663,7 @@ impl Walker<'_> {
             if name.kind() == "name" {
                 let receiver_text = scope.map(|scope| self.text(scope));
                 let hint = scope
-                    .map(|scope| self.receiver_hint(scope))
+                    .map(|scope| self.scope_hint(scope))
                     .unwrap_or(UseHint::Unresolved);
                 receiver = Some(self.call_receiver_from_scope(scope, &hint));
                 self.push_use(name, RefKind::Call, receiver_text, hint);
@@ -638,11 +672,15 @@ impl Walker<'_> {
             }
         }
         if let Some(scope) = scope {
-            // A class-name scope is carried as the receiver, not a second use.
-            if !matches!(
-                scope.kind(),
-                "name" | "qualified_name" | "relative_name" | "relative_scope"
-            ) {
+            // A class named explicitly is a type use of that class (AF4); a
+            // relative scope names no class by itself.
+            let named = self.record_scope_class(scope);
+            if !named
+                && !matches!(
+                    scope.kind(),
+                    "name" | "qualified_name" | "relative_name" | "relative_scope"
+                )
+            {
                 self.visit(scope, false);
             }
         }
@@ -659,16 +697,24 @@ impl Walker<'_> {
         let Some(scope) = scope else {
             return CallReceiver::Unknown;
         };
-        match scope.kind() {
-            "name" | "qualified_name" | "relative_name" => CallReceiver::Class {
-                spelling: self.text(scope),
-            },
-            "relative_scope" => match self.text(scope).to_ascii_lowercase().as_str() {
+        let text = self.text(scope);
+        let relative = scope.kind() == "relative_scope"
+            || (scope.kind() == "name" && is_relative_keyword(&text));
+        if relative {
+            // Inside an anonymous class, `self` and `static` name that
+            // anonymous class, which is not an indexed symbol (AF4).
+            if self.in_anonymous_class() {
+                return CallReceiver::Unknown;
+            }
+            return match text.to_ascii_lowercase().as_str() {
                 "self" | "static" => CallReceiver::SelfClass,
                 // `parent` names an ancestor v0.1 does not traverse.
                 _ => CallReceiver::Unknown,
-            },
-            _ => call_receiver_from_hint(hint, Some(&self.text(scope))),
+            };
+        }
+        match scope.kind() {
+            "name" | "qualified_name" | "relative_name" => CallReceiver::Class { spelling: text },
+            _ => call_receiver_from_hint(hint, Some(&text)),
         }
     }
 
@@ -835,8 +881,12 @@ impl Walker<'_> {
     /// field, so the arguments are found by kind; before AF3 they were never
     /// walked. An anonymous class carries its arguments inside the
     /// `anonymous_class` node; its constructor is not an indexed symbol, so
-    /// its arguments are recorded with an unknown receiver. The anonymous
-    /// class body is still not walked.
+    /// its arguments are recorded with an unknown receiver.
+    ///
+    /// AF4: the anonymous class body is walked after the arguments, which
+    /// PHP evaluates in the enclosing scope. Its uses keep the nearest named
+    /// container (spec §10.1), but `$this`, `self`, and `static` inside it name
+    /// the anonymous class, so they record no receiver evidence.
     fn visit_object_creation(&mut self, node: Node<'_>) {
         self.record_call_site(node);
         let class = object_creation_class(node);
@@ -851,20 +901,22 @@ impl Walker<'_> {
         let arguments = named_children(anonymous.unwrap_or(node))
             .into_iter()
             .find(|child| child.kind() == "arguments");
-        let Some(arguments) = arguments else {
-            return;
-        };
-        let receiver = match (anonymous, class) {
-            (None, Some(class)) => self.constructor_receiver(class),
-            _ => CallReceiver::Unknown,
-        };
-        self.record_call_args(
-            arguments,
-            "__construct",
-            CallArgKind::Constructor,
-            Some(receiver),
-        );
-        self.visit(arguments, false);
+        if let Some(arguments) = arguments {
+            let receiver = match (anonymous, class) {
+                (None, Some(class)) => self.constructor_receiver(class),
+                _ => CallReceiver::Unknown,
+            };
+            self.record_call_args(
+                arguments,
+                "__construct",
+                CallArgKind::Constructor,
+                Some(receiver),
+            );
+            self.visit(arguments, false);
+        }
+        if let Some(anonymous) = anonymous {
+            self.visit_class(anonymous);
+        }
     }
 
     /// The class whose constructor `new <class>(...)` runs, for call-argument
@@ -879,6 +931,9 @@ impl Walker<'_> {
         }
         let spelling = self.text(class);
         match spelling.to_ascii_lowercase().as_str() {
+            // Inside an anonymous class `new self` runs the anonymous class's
+            // constructor, which is not an indexed symbol (AF4).
+            "self" if self.in_anonymous_class() => CallReceiver::Unknown,
             "self" => CallReceiver::SelfClass,
             "static" | "parent" => CallReceiver::Unknown,
             _ => CallReceiver::Class { spelling },
@@ -904,12 +959,15 @@ impl Walker<'_> {
 
     fn visit_scoped_property(&mut self, node: Node<'_>, write: bool) {
         let scope = node.child_by_field_name("scope");
+        if let Some(scope) = scope {
+            self.record_scope_class(scope);
+        }
         if let Some(name) = node.child_by_field_name("name")
             && name.kind() == "variable_name"
         {
             let receiver = scope.map(|scope| self.text(scope));
             let hint = scope
-                .map(|scope| self.receiver_hint(scope))
+                .map(|scope| self.scope_hint(scope))
                 .unwrap_or(UseHint::Unresolved);
             let kind = if write { RefKind::Write } else { RefKind::Read };
             self.push_use(name, kind, receiver, hint);
@@ -923,9 +981,15 @@ impl Walker<'_> {
         }
         let scope = children[0];
         let name = children[children.len() - 1];
+        // `Foo::BAR` and `Foo::class` are type uses of `Foo` (AF4).
+        self.record_scope_class(scope);
+        // `::class` is the class-name literal, not a member.
+        if name.kind() == "name" && self.text(name).eq_ignore_ascii_case("class") {
+            return;
+        }
         if name.kind() == "name" || name.kind() == "variable_name" {
             let receiver = Some(self.text(scope));
-            let hint = self.receiver_hint(scope);
+            let hint = self.scope_hint(scope);
             let before = self.uses.len();
             self.push_use(name, RefKind::Read, receiver, hint);
             // A class-constant read and an instance property read are otherwise
@@ -968,6 +1032,11 @@ impl Walker<'_> {
         let binding = if right.kind() == "object_creation_expression" {
             object_creation_class(right)
                 .filter(|class| matches!(class.kind(), "name" | "qualified_name" | "relative_name"))
+                // Inside an anonymous class, `new self` and `new static` name
+                // the anonymous class, never the enclosing named one (AF4).
+                .filter(|class| {
+                    !(self.in_anonymous_class() && is_relative_keyword(&self.text(*class)))
+                })
                 .map(|class| Binding::New(self.text(class), right.end_byte() as u32))
         } else {
             None
@@ -1020,10 +1089,15 @@ impl Walker<'_> {
     /// Derive the receiver hint for a member/static receiver expression.
     fn receiver_hint(&self, node: Node<'_>) -> UseHint {
         match node.kind() {
-            "relative_scope" => UseHint::SelfOrStatic,
+            "relative_scope" => self.relative_scope_hint(),
             "variable_name" => {
                 let text = self.text(node);
                 if text == "$this" {
+                    // `$this` inside an anonymous class is the anonymous
+                    // instance, never the enclosing named class (AF4).
+                    if self.in_anonymous_class() {
+                        return UseHint::Unresolved;
+                    }
                     return UseHint::This;
                 }
                 match self.scopes.last().and_then(|scope| scope.get(&text)) {
@@ -1052,7 +1126,7 @@ impl Walker<'_> {
                     return UseHint::Unresolved;
                 }
                 let property = self.text(name);
-                let Some(class_id) = self.class_stack.last() else {
+                let Some((class_id, _)) = self.class_stack.last() else {
                     return UseHint::Unresolved;
                 };
                 match self
@@ -1069,6 +1143,61 @@ impl Walker<'_> {
             }
             _ => UseHint::Unresolved,
         }
+    }
+
+    /// Whether the innermost enclosing class-like is an anonymous class (AF4).
+    fn in_anonymous_class(&self) -> bool {
+        self.class_stack
+            .last()
+            .is_some_and(|(_, anonymous)| *anonymous)
+    }
+
+    /// The hint for `self`, `static`, or `parent` before `::` (AF4).
+    ///
+    /// Inside an anonymous class each names the anonymous class (or its
+    /// ancestor), not the enclosing named class, so no evidence is recorded.
+    fn relative_scope_hint(&self) -> UseHint {
+        if self.in_anonymous_class() {
+            UseHint::Unresolved
+        } else {
+            UseHint::SelfOrStatic
+        }
+    }
+
+    /// The receiver hint for the scope of `Scope::member` (AF4).
+    ///
+    /// A class named explicitly is [`UseHint::NamedClass`]; `self`, `static`,
+    /// and `parent` keep their relative-scope hint; any other expression is
+    /// hinted like a member receiver.
+    fn scope_hint(&self, scope: Node<'_>) -> UseHint {
+        match scope.kind() {
+            "name" | "qualified_name" | "relative_name" => {
+                let text = self.text(scope);
+                if scope.kind() == "name" && is_relative_keyword(&text) {
+                    self.relative_scope_hint()
+                } else {
+                    UseHint::NamedClass {
+                        class_spelling: text,
+                    }
+                }
+            }
+            _ => self.receiver_hint(scope),
+        }
+    }
+
+    /// Records the class named explicitly before `::` as a type use (AF4).
+    ///
+    /// Returns whether `scope` was such a class name. `self`, `static`,
+    /// `parent`, and any expression scope record nothing here.
+    fn record_scope_class(&mut self, scope: Node<'_>) -> bool {
+        if !matches!(scope.kind(), "name" | "qualified_name" | "relative_name") {
+            return false;
+        }
+        if scope.kind() == "name" && is_relative_keyword(&self.text(scope)) {
+            return false;
+        }
+        self.push_use(scope, RefKind::Type, None, UseHint::Unresolved);
+        true
     }
 
     fn bind_variable(&mut self, name: Node<'_>, binding: Binding) {
@@ -1502,6 +1631,9 @@ fn call_receiver_from_hint(hint: &UseHint, receiver: Option<&str>) -> CallReceiv
             spelling: type_spelling.clone(),
         },
         UseHint::This | UseHint::SelfOrStatic => CallReceiver::SelfClass,
+        UseHint::NamedClass { class_spelling } => CallReceiver::Class {
+            spelling: class_spelling.clone(),
+        },
         UseHint::Imported { .. } | UseHint::Unresolved => CallReceiver::Unknown,
     }
 }
@@ -1514,6 +1646,21 @@ fn call_receiver_from_hint(hint: &UseHint, receiver: Option<&str>) -> CallReceiv
 fn is_unbounded_builtin(callee: &str) -> bool {
     let name = callee.trim_start_matches('\\');
     !name.contains('\\') && matches!(name.to_ascii_lowercase().as_str(), "extract" | "eval")
+}
+
+/// Whether a scope spelling is `self`, `static`, or `parent`, which PHP
+/// compares case-insensitively (AF4).
+fn is_relative_keyword(text: &str) -> bool {
+    matches!(
+        text.to_ascii_lowercase().as_str(),
+        "self" | "static" | "parent"
+    )
+}
+
+/// Whether a `binary_expression` is an `instanceof` test (AF4).
+fn is_instanceof(node: Node<'_>) -> bool {
+    node.child_by_field_name("operator")
+        .is_some_and(|operator| operator.kind().eq_ignore_ascii_case("instanceof"))
 }
 
 /// Whether an `arguments` node carries at least one argument.
@@ -2524,6 +2671,279 @@ mod tests {
                     }
                 ),
             ]
+        );
+    }
+
+    /// Every use as `(spelling, ref_kind, start_byte, hint)`, in span order.
+    fn use_summary(file: &ExtractedFile) -> Vec<(String, &'static str, u32, UseHint)> {
+        file.uses
+            .iter()
+            .map(|use_| {
+                (
+                    use_.spelling.clone(),
+                    use_.ref_kind.as_str(),
+                    use_.span.start_byte(),
+                    use_.hint.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// The byte offset of the `nth` occurrence of `needle` in `source`.
+    fn offset(source: &str, needle: &str, nth: usize) -> u32 {
+        source
+            .match_indices(needle)
+            .nth(nth)
+            .unwrap_or_else(|| panic!("missing occurrence #{nth} of {needle}"))
+            .0 as u32
+    }
+
+    /// AF4 finding 11: an anonymous class body is walked. Its uses keep the
+    /// nearest named container, and `$this`, `self`, and `static` inside it
+    /// record no receiver evidence, because they name the anonymous class.
+    #[test]
+    fn anonymous_class_bodies_are_walked_without_self_evidence() {
+        let source = "<?php\nclass Outer {\n    public function run() {}\n    public function host() {\n        \
+                      $a = new class {\n            public function run(Dep $d) {\n                \
+                      launch(); new Dep(); $this->run(); self::run(); static::run(); \
+                      $n = new self(); $n->run(); $f = fn () => $this->run();\n            }\n        };\n        \
+                      $this->run(); self::run();\n    }\n}\n";
+        let file = extract(source);
+        let host = file
+            .symbols
+            .iter()
+            .position(|symbol| symbol.qualified_name == "Outer::host")
+            .expect("host is a symbol");
+        // The anonymous class's `run` is not an addressable symbol.
+        assert!(!file.symbols.iter().any(|symbol| symbol.span.start_byte()
+            > offset(source, "new class", 0)
+            && symbol.name == "run"));
+        let body_start = offset(source, "new class", 0);
+        let body_end = offset(source, "};", 0);
+        let inside: Vec<_> = file
+            .uses
+            .iter()
+            .filter(|use_| use_.span.start_byte() > body_start && use_.span.end_byte() < body_end)
+            .collect();
+        let spellings: Vec<(&str, &str)> = inside
+            .iter()
+            .map(|use_| (use_.spelling.as_str(), use_.ref_kind.as_str()))
+            .collect();
+        assert_eq!(
+            spellings,
+            vec![
+                ("Dep", "type"),
+                ("launch", "call"),
+                ("Dep", "type"),
+                ("run", "call"),
+                ("run", "call"),
+                ("run", "call"),
+                ("self", "type"),
+                ("run", "call"),
+                ("run", "call"),
+            ]
+        );
+        for use_ in &inside {
+            assert_eq!(use_.containing_symbol_index, Some(host), "{use_:?}");
+            if use_.ref_kind == rivet_core::RefKind::Call {
+                assert_eq!(use_.hint, UseHint::Unresolved, "{use_:?}");
+            }
+        }
+        // `new self` inside the anonymous class runs its own constructor.
+        let ctor = file
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.facts.call_args.iter())
+            .find(|arg| arg.kind == CallArgKind::Constructor);
+        assert!(ctor.is_none(), "no argument was passed: {ctor:?}");
+        // Outside the anonymous class `$this` and `self` keep their hints.
+        let after: Vec<UseHint> = file
+            .uses
+            .iter()
+            .filter(|use_| use_.span.start_byte() > body_end)
+            .map(|use_| use_.hint.clone())
+            .collect();
+        assert_eq!(after, vec![UseHint::This, UseHint::SelfOrStatic]);
+    }
+
+    /// AF4: `$this->prop` inside an anonymous class reads the anonymous
+    /// class's own typed property, never the enclosing class's.
+    #[test]
+    fn anonymous_class_typed_properties_are_its_own() {
+        let source = "<?php\nclass Outer {\n    private Svc $svc;\n    public function host() {\n        \
+                      new class { private Other $svc; function a() { $this->svc->go(); } };\n        \
+                      new class { function b() { $this->svc->go(); } };\n    }\n}\n";
+        let file = extract(source);
+        assert_eq!(
+            call_hint(&file, "go", 0),
+            UseHint::Typed {
+                type_spelling: "Other".to_string(),
+                origin: TypedOrigin::Property,
+            }
+        );
+        assert_eq!(call_hint(&file, "go", 1), UseHint::Unresolved);
+    }
+
+    /// AF4: a constructor argument of an anonymous class is still evaluated
+    /// in the enclosing scope and recorded with an unknown receiver.
+    #[test]
+    fn anonymous_class_arguments_stay_in_the_enclosing_scope() {
+        let source = "<?php\n$v = 1;\n$a = new class($v) { function f() { $v = 2; } };\n";
+        let file = extract(source);
+        let args: Vec<_> = file_scope(&file)
+            .call_args
+            .iter()
+            .map(|arg| (arg.variable.as_str(), arg.kind, arg.receiver.clone()))
+            .collect();
+        assert_eq!(
+            args,
+            vec![("$v", CallArgKind::Constructor, Some(CallReceiver::Unknown))]
+        );
+        // The body's `$v = 2` is the anonymous method's own local.
+        assert_eq!(binding_count(&file, "$v"), 1, "only `$v = 1`");
+    }
+
+    /// AF4 finding 13: the class named before `::` is a type use, and the
+    /// member carries a `NamedClass` hint. `::class` is not a member, and
+    /// `self`, `static`, and `parent` record no type use.
+    #[test]
+    fn explicit_class_scopes_record_a_type_use() {
+        let source = "<?php\nFoo::make(); Foo::BAR; Foo::$prop; Foo::class; \\App\\Foo::make(); \
+                      static::make(); parent::make(); self::X; $x::class;\n";
+        let file = extract(source);
+        let named = |spelling: &str| UseHint::NamedClass {
+            class_spelling: spelling.to_string(),
+        };
+        assert_eq!(
+            use_summary(&file),
+            vec![
+                (
+                    "Foo".to_string(),
+                    "type",
+                    offset(source, "Foo::make", 0),
+                    UseHint::Unresolved
+                ),
+                (
+                    "make".to_string(),
+                    "call",
+                    offset(source, "make", 0),
+                    named("Foo")
+                ),
+                (
+                    "Foo".to_string(),
+                    "type",
+                    offset(source, "Foo::BAR", 0),
+                    UseHint::Unresolved
+                ),
+                (
+                    "BAR".to_string(),
+                    "read",
+                    offset(source, "BAR", 0),
+                    named("Foo")
+                ),
+                (
+                    "Foo".to_string(),
+                    "type",
+                    offset(source, "Foo::$prop", 0),
+                    UseHint::Unresolved
+                ),
+                (
+                    "$prop".to_string(),
+                    "read",
+                    offset(source, "$prop", 0),
+                    named("Foo")
+                ),
+                (
+                    "Foo".to_string(),
+                    "type",
+                    offset(source, "Foo::class", 0),
+                    UseHint::Unresolved
+                ),
+                (
+                    "\\App\\Foo".to_string(),
+                    "type",
+                    offset(source, "\\App", 0),
+                    UseHint::Unresolved
+                ),
+                (
+                    "make".to_string(),
+                    "call",
+                    offset(source, "make", 1),
+                    named("\\App\\Foo")
+                ),
+                (
+                    "make".to_string(),
+                    "call",
+                    offset(source, "make", 2),
+                    UseHint::SelfOrStatic
+                ),
+                (
+                    "make".to_string(),
+                    "call",
+                    offset(source, "make", 3),
+                    UseHint::SelfOrStatic
+                ),
+                (
+                    "X".to_string(),
+                    "read",
+                    offset(source, "X;", 0),
+                    UseHint::SelfOrStatic
+                ),
+            ]
+        );
+        // The class-constant read is still told apart from a property read.
+        let constants = &file_scope(&file).class_constant_accesses;
+        let bar = offset(source, "BAR", 0);
+        assert!(constants.iter().any(|span| span.start_byte() == bar));
+    }
+
+    /// AF4: an `instanceof` class operand is a type use; a variable operand
+    /// records nothing.
+    #[test]
+    fn instanceof_operands_are_type_uses() {
+        let source = "<?php\n$x instanceof \\App\\I; $x instanceof J; $x instanceof $y;\n";
+        let file = extract(source);
+        let summary: Vec<(String, &str)> = use_summary(&file)
+            .into_iter()
+            .map(|(spelling, kind, _, _)| (spelling, kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![("\\App\\I".to_string(), "type"), ("J".to_string(), "type")]
+        );
+    }
+
+    /// AF4 item 6: a `catch` type was already a type use before AF4.
+    #[test]
+    fn catch_types_are_type_uses() {
+        let source = "<?php\ntry {} catch (Foo | \\App\\Bar $e) {}\n";
+        let file = extract(source);
+        let summary: Vec<(String, &str)> = use_summary(&file)
+            .into_iter()
+            .map(|(spelling, kind, _, _)| (spelling, kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("Foo".to_string(), "type"),
+                ("\\App\\Bar".to_string(), "type")
+            ]
+        );
+    }
+
+    /// AF4: an enum case's own name is a declaration, not a use; its backing
+    /// value is still code.
+    #[test]
+    fn enum_case_names_are_not_uses() {
+        let source = "<?php\nenum S: int { case A = 1; case B = Foo::C; }\n";
+        let file = extract(source);
+        let summary: Vec<(String, &str)> = use_summary(&file)
+            .into_iter()
+            .map(|(spelling, kind, _, _)| (spelling, kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![("Foo".to_string(), "type"), ("C".to_string(), "read")]
         );
     }
 }

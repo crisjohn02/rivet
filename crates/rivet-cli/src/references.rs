@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rivet_core::{RefKind, Resolution};
+use rivet_index::lookup_name_matches;
 use rivet_store::{BindingRow, Store, SymbolRow, UseRow};
 use serde_json::{Map, Value, json};
 
@@ -132,7 +133,10 @@ pub(crate) fn collect_matches(
 
         let (resolution, resolved_target, include) = match selection {
             Selection::Query(mode) => {
-                let name_matches = row.lookup_name == target.lookup_name;
+                // Folded by the target declaration's kind, exactly as the
+                // `rivet symbol` short-name lookup folds (AF4).
+                let name_matches =
+                    lookup_name_matches(&row.lookup_name, target.kind, &target.lookup_name);
                 let bound_to_target = binding.is_some_and(|binding| binding.target_id == target.id);
 
                 // A use bound to the target is always kept, even when its
