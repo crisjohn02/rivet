@@ -173,6 +173,30 @@ pub(crate) fn function_alias_visible(use_row: &UseRow, facts: &ScopeFacts) -> bo
     })
 }
 
+/// Resolves a visible `use function` alias by spelling alone.
+///
+/// [`via_imports`] needs a [`UseRow`] only to match the alias token of an
+/// `Import` use by span; call-argument adjudication (T21b) has no `UseRow` and
+/// matches by spelling like every other non-`Import` use.
+pub(crate) fn function_via_imports<'a>(
+    ctx: &RuleCtx<'a>,
+    facts: &ScopeFacts,
+    spelling: &str,
+) -> ImportOutcome<'a> {
+    let matching: Vec<&ScopeImport> = facts
+        .imports
+        .iter()
+        .filter(|import| {
+            import.kind == ImportKind::Function
+                && alias_matches(&import.alias, spelling, import.kind)
+        })
+        .collect();
+    if matching.is_empty() {
+        return ImportOutcome::NoMatch;
+    }
+    import_targets(ctx, &matching)
+}
+
 /// PHP's alias comparison: constants are case-sensitive, classes and functions
 /// are not.
 fn alias_matches(alias: &str, spelling: &str, kind: ImportKind) -> bool {

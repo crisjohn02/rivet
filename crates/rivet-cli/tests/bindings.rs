@@ -583,3 +583,166 @@ fn every_php_rebinding_form_leaves_the_new_receiver_unbound() {
         .count();
     assert_eq!(bound_go, 1, "only the safe call binds: {value}");
 }
+
+/// The `A\Svc` fixture for the T21b cases: `go`, one by-reference method, and
+/// one by-value method, so both function and method adjudication are visible.
+const SVC_WITH_PARAMS_PHP: &str = "<?php\ndeclare(strict_types=1);\nnamespace A;\nfinal class Svc\n{\n    public function go(): void\n    {\n    }\n\n    public function takesRef(&$x): void\n    {\n    }\n\n    public function takesValue($x): void\n    {\n    }\n}\n";
+
+/// Indexes `Case.php` against the shared `A\Svc` fixture and returns the rows.
+fn index_t21b_case(label: &str, source: &str) -> (TempDir, Vec<UseRow>, Vec<BindingRow>) {
+    let temp = TempDir::new(label);
+    let root = temp.path();
+    fs::create_dir_all(root.join(".git")).expect("create .git");
+    write_php(root, "A.php", SVC_WITH_PARAMS_PHP);
+    write_php(root, "Case.php", source);
+    let _ = index_json(root);
+    let store = open_store(root);
+    let uses = all_use_rows(&store);
+    let bindings = store.list_bindings().expect("list bindings");
+    (temp, uses, bindings)
+}
+
+/// The `$s->go()` call in `Case.php`.
+fn go_use(uses: &[UseRow]) -> &UseRow {
+    uses.iter()
+        .find(|row| {
+            row.file == "Case.php"
+                && row.ref_kind.as_str() == "call"
+                && row.spelling == "go"
+                && row.receiver.as_deref() == Some("$s")
+        })
+        .expect("Case.php has a $s->go() call")
+}
+
+/// Asserts that `Case.php`'s `$s->go()` records no binding.
+fn assert_go_unbound(label: &str, source: &str) {
+    let (_temp, uses, bindings) = index_t21b_case(label, source);
+    let go = go_use(&uses);
+    assert!(
+        binding_for(&bindings, go).is_none(),
+        "{label}: a receiver whose scope cannot be trusted must record no binding: {go:?}"
+    );
+}
+
+/// Asserts that `Case.php`'s `$s->go()` binds `A\Svc::go` as `scoped`.
+fn assert_go_bound_scoped(label: &str, source: &str) {
+    let (_temp, uses, bindings) = index_t21b_case(label, source);
+    let go = go_use(&uses);
+    let binding = binding_for(&bindings, go)
+        .unwrap_or_else(|| panic!("{label}: the safe receiver must bind: {go:?}"));
+    assert_eq!(binding.target_id, "A.php#A\\Svc::go", "{label}");
+    assert_eq!(binding.resolution.as_str(), "scoped", "{label}");
+}
+
+/// T21b case 1: an indexed function whose matching parameter is by-reference
+/// rebinds the argument.
+#[test]
+fn by_reference_callee_parameter_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "by-ref-function-parameter",
+        "<?php\ndeclare(strict_types=1);\nfunction takesRef(&$x): void\n{\n}\n$s = new \\A\\Svc();\ntakesRef($s);\n$s->go();\n",
+    );
+}
+
+/// T21b case 1, positive: the same call shape with an indexed by-value
+/// parameter does not rebind, so suppressing everything would be wrong.
+#[test]
+fn by_value_callee_parameter_keeps_the_new_receiver() {
+    assert_go_bound_scoped(
+        "by-value-function-parameter",
+        "<?php\ndeclare(strict_types=1);\nfunction takesValue($x): void\n{\n}\n$s = new \\A\\Svc();\ntakesValue($s);\n$s->go();\n",
+    );
+}
+
+/// T21b case 1: an indexed by-reference method rebinds its argument.
+#[test]
+fn by_reference_method_parameter_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "by-ref-method-parameter",
+        "<?php\ndeclare(strict_types=1);\n$svc = new \\A\\Svc();\n$s = new \\A\\Svc();\n$svc->takesRef($s);\n$s->go();\n",
+    );
+}
+
+/// T21b case 1, positive: an indexed by-value method does not rebind.
+#[test]
+fn by_value_method_parameter_keeps_the_new_receiver() {
+    assert_go_bound_scoped(
+        "by-value-method-parameter",
+        "<?php\ndeclare(strict_types=1);\n$svc = new \\A\\Svc();\n$s = new \\A\\Svc();\n$svc->takesValue($s);\n$s->go();\n",
+    );
+}
+
+/// T21b case 1: a method on an unknown receiver cannot be resolved, so it
+/// suppresses.
+#[test]
+fn method_on_an_unknown_receiver_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "method-unknown-receiver",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\n$x->takesValue($s);\n$s->go();\n",
+    );
+}
+
+/// T21b case 2: a by-reference builtin at the argument's position rebinds it.
+#[test]
+fn by_reference_builtin_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "by-ref-builtin-preg-match",
+        "<?php\ndeclare(strict_types=1);\n$subject = 'x';\n$s = new \\A\\Svc();\npreg_match('/x/', $subject, $s);\n$s->go();\n",
+    );
+    assert_go_unbound(
+        "by-ref-builtin-sort",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\nsort($s);\n$s->go();\n",
+    );
+}
+
+/// T21b case 2: an unindexed global function that is not a known by-reference
+/// builtin is never assumed safe.
+#[test]
+fn unknown_global_function_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "unknown-global-function",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\nstrlen($s);\n$s->go();\n",
+    );
+}
+
+/// T21b case 3: a dynamic variable write rebinds a variable the walker cannot
+/// name, so the whole scope records nothing.
+#[test]
+fn dynamic_variable_write_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "dynamic-double-dollar",
+        "<?php\ndeclare(strict_types=1);\n$name = 's';\n$s = new \\A\\Svc();\n$$name = mk();\n$s->go();\n",
+    );
+    assert_go_unbound(
+        "dynamic-braced",
+        "<?php\ndeclare(strict_types=1);\n$name = 's';\n$s = new \\A\\Svc();\n${$name} = mk();\n$s->go();\n",
+    );
+}
+
+/// T21b case 4: a `$GLOBALS` write can overwrite any global, so the whole
+/// scope records nothing.
+#[test]
+fn globals_write_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "globals-write",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\n$GLOBALS['s'] = mk();\n$s->go();\n",
+    );
+}
+
+/// T21b case 5: `extract` can create or overwrite any local.
+#[test]
+fn extract_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "extract",
+        "<?php\ndeclare(strict_types=1);\n$arr = [];\n$s = new \\A\\Svc();\nextract($arr);\n$s->go();\n",
+    );
+}
+
+/// T21b case 6: `eval` can do anything.
+#[test]
+fn eval_suppresses_the_new_receiver() {
+    assert_go_unbound(
+        "eval",
+        "<?php\ndeclare(strict_types=1);\n$s = new \\A\\Svc();\neval('$x = 1;');\n$s->go();\n",
+    );
+}

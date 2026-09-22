@@ -58,7 +58,7 @@ fn names_enclosing_class(use_row: &UseRow, hint: &UseHint) -> bool {
 }
 
 /// The nearest class-like symbol enclosing the use's container, if any.
-fn enclosing_class<'a>(ctx: &RuleCtx<'a>, use_row: &UseRow) -> Option<&'a SymbolRow> {
+pub(crate) fn enclosing_class<'a>(ctx: &RuleCtx<'a>, use_row: &UseRow) -> Option<&'a SymbolRow> {
     let mut current = use_row.containing_symbol.as_deref();
     while let Some(id) = current {
         let row = ctx.symbol_by_id(id)?;

@@ -6,6 +6,7 @@
 pub(crate) mod functions;
 pub(crate) mod imports;
 pub(crate) mod new_expr;
+pub(crate) mod php_builtins;
 pub(crate) mod receivers;
 
 use rivet_store::SymbolRow;

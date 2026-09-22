@@ -87,30 +87,36 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// The trailing `fact-schema=N` component covers the *shape and meaning* of the
 /// persisted extractor facts, not just the grammar. Grammar versions alone are
-/// not enough: T21 changed what the adapter records (`new_bindings` gained
-/// `direct_new` and `block`, and `UseHint::NewExpr` gained `use_block`) without
-/// touching a grammar, so a repository indexed by the previous binary would be
-/// reused without reparsing and its stale facts would deserialize with serde
-/// defaults. T21a widened `new_bindings` again to include recognized rebinding
-/// forms, so a variable rebound by `foreach`, destructuring, `catch`, and the
-/// like is no longer treated as singly assigned. T25 adds enum cases and
-/// promoted constructor properties as `const`/`property` symbols, so an index
-/// built by the previous binary is missing addressable declarations; the
-/// integer is bumped to force a reparse. T25a changes the stored signature text
-/// of every member of a multi-name property or constant declaration (each now
-/// names only its own element instead of repeating the shared header), so an
-/// index built before it would keep the old text. A change to any persisted
-/// fact shape or to the meaning of an existing field must bump this integer so
-/// the next refresh reparses every enabled-language file. The current schema is
-/// 4 (post-T25a); it was introduced by T22 together with this component.
+/// not enough: a change to what the adapter records invalidates stored facts
+/// without touching a grammar, and a reused index would deserialize stale facts
+/// through serde defaults. Any change to a persisted fact's shape or to the
+/// meaning of an existing field must bump this integer so the next refresh
+/// reparses every enabled-language file.
+///
+/// History, newest first:
+///
+/// - **5** — the merge of T21b into T25a. T25/T25a had reached 4 while T21b
+///   independently reached 3, so neither value described the union and the
+///   merge took a new integer.
+/// - **T21b** — `ScopeFacts` gained `call_args` and `unanalysable`, so a scope
+///   holding a by-reference argument or an unanalysable construct records no
+///   `new`-receiver binding.
+/// - **T25a** — stored signature text changed: one line per declared name, and
+///   no body marker on a bodyless declaration.
+/// - **T25** — enum cases and promoted constructor properties became
+///   addressable symbols, so an older index is missing declarations.
+/// - **T21a** — `new_bindings` widened to every recognized rebinding form.
+/// - **T21** — `new_bindings` gained `direct_new` and `block`, and
+///   `UseHint::NewExpr` gained `use_block`.
+/// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=4";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=5";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=4";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=5";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=4";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=5";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

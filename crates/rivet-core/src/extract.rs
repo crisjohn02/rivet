@@ -219,13 +219,73 @@ pub struct NewBinding {
     pub block: Option<u32>,
 }
 
+/// How a call argument's callee must be looked up (T21b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallArgKind {
+    /// A plain function call `f(...)`.
+    Function,
+    /// A member call `$receiver->f(...)`.
+    Method,
+    /// A static call `Class::f(...)`.
+    StaticMethod,
+}
+
+/// The receiver information a resolver needs to find a method declaration for
+/// one call argument (T21b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CallReceiver {
+    /// A class spelling to resolve through the alias/namespace scope chain.
+    Class {
+        /// The class name exactly as written (`SurveySvc`, `\App\Svc`).
+        spelling: String,
+    },
+    /// `$this`, `self`, or `static`: the method is declared on the class that
+    /// encloses the call.
+    SelfClass,
+    /// No usable receiver (an unknown variable, `parent`, or a dynamic name).
+    Unknown,
+}
+
+/// One positional call argument that passes a bare variable and can therefore
+/// rebind it when the callee declares that parameter by reference (T21b).
+///
+/// A by-reference argument written with an explicit `&` at the call site is
+/// already recorded as an ordinary rebinding (T21a) and is not duplicated here.
+/// This fact exists because the call site alone does not say whether the
+/// callee's parameter is by-reference; only the callee's indexed declaration or
+/// a known builtin table can answer that, and that lookup needs the index. The
+/// resolver consults these facts and either proves the parameter is by-value or
+/// suppresses the variable's `new`-receiver binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallArg {
+    /// The passed variable exactly as written, including a leading `$`.
+    pub variable: String,
+    /// The callee name exactly as written (`takesRef`, `preg_match`, `go`).
+    pub callee: String,
+    /// How to resolve `callee`.
+    pub kind: CallArgKind,
+    /// The positional argument index, 0-based. `None` for a named argument,
+    /// whose parameter position cannot be mapped without the callee's
+    /// declaration order; the resolver treats it as unknown and suppresses.
+    #[serde(default)]
+    pub position: Option<u32>,
+    /// For a member or static call, how to find the method's class. `None` for
+    /// a function call.
+    #[serde(default)]
+    pub receiver: Option<CallReceiver>,
+    /// The passed variable's byte range.
+    pub span: Span,
+}
+
 /// Owned lexical facts recorded for one scope (T18).
 ///
-/// The persisted `scopes.facts_json` holds exactly `imports`,
-/// `typed_bindings`, `new_bindings`, and `declares`. [`declares`](Self::declares)
-/// holds indices into the owning [`ExtractedFile::symbols`] because a language
-/// adapter has no file path; the persistence layer rewrites each index to its
-/// canonical symbol ID.
+/// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
+/// `new_bindings`, `call_args`, `unanalysable`, and `declares`.
+/// [`declares`](Self::declares) holds indices into the owning
+/// [`ExtractedFile::symbols`] because a language adapter has no file path; the
+/// persistence layer rewrites each index to its canonical symbol ID.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ScopeFacts {
     /// Imports visible in this scope, in source order.
@@ -237,6 +297,15 @@ pub struct ScopeFacts {
     /// rebinding (T21a) is recorded as a non-direct entry, so a variable with
     /// more than one entry is rejected as a receiver.
     pub new_bindings: Vec<NewBinding>,
+    /// Call arguments that pass a bare variable and may rebind it (T21b).
+    #[serde(default)]
+    pub call_args: Vec<CallArg>,
+    /// True when this scope contains a construct whose effect on local
+    /// variables the adapter cannot bound: a dynamic variable write, a
+    /// `$GLOBALS` write, `extract`, `eval`, or a call whose callee is dynamic.
+    /// The `new`-receiver rule records no binding anywhere in such a scope.
+    #[serde(default)]
+    pub unanalysable: bool,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,
 }
