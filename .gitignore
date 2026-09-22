@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+# Cargo.lock is committed for the binary; do not ignore it.
+
+# rivet's own cache when run against this repository
+/.rivet/
+
+# Benchmark raw artifacts are large and may contain transcripts; keep results/ and preregistration.
+/benchmark/raw/
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local scratch
+/tmp/
