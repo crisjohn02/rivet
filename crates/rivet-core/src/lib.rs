@@ -10,6 +10,7 @@ pub mod config;
 pub mod id;
 pub mod kinds;
 pub mod root;
+pub mod source;
 pub mod span;
 #[cfg(test)]
 mod test_support;
@@ -22,5 +23,6 @@ pub use config::{
 pub use id::{SymbolId, SymbolIdError, assign_ordinals};
 pub use kinds::{KindParseError, RefKind, Resolution, SymbolKind};
 pub use root::{RootError, RootInfo, discover_root};
+pub use source::{SkipReason, SourceRead, content_hash, read_source};
 pub use span::{LineCol, LineIndex, Span, SpanError};
 pub use walk::{FileEntry, SkippedPath, WalkError, WalkResult, walk_eligible};

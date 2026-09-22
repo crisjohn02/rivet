@@ -25,6 +25,9 @@ toml = "=1.1.6"
 # Gitignore-aware directory traversal in rivet-core only. Pinned to the exact
 # registry version checked with `cargo search`.
 ignore = "=0.4.33"
+# Content hashing in rivet-core only. Pinned to the exact registry version
+# checked with `cargo search`.
+blake3 = "=1.8.7"
 # Grammars and the core parser are pinned to an exact compatible set: the grammar
 # crates expose `tree-sitter-language` 0.1, which tree-sitter 0.27.0 expects.
 tree-sitter = "=0.27.0"

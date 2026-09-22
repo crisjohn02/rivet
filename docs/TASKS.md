@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T06 |
-| Next task | T07 |
+| Last completed task | T07 |
+| Next task | T08 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test -p rivet-core` 51 passed/0 failed; `cargo test --workspace` 55 passed/0 failed. |
+| Last checks | rustc/cargo 1.98.1. `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test -p rivet-core` 59 passed/0 failed. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -61,7 +61,7 @@ Read: spec §§22, 25–27; ARCHITECTURE schema/refresh; OUTPUT-CONTRACT transpo
 |---|---|---|---|
 | [x] | T05 | Implement root discovery and config validation. Support `.git` files/directories, `.rivet/`, nearest-boundary precedence, and built-in defaults. | Nested/worktree fixtures resolve correctly; invalid config fails before indexing. No instruction-file changes. |
 | [x] | T06 | Implement eligible-file traversal. Apply local ignore rules, configured exclusions, dependency defaults, and nested-repository boundaries. | Fixture inventory is deterministic and includes eligible untracked/hidden files; symlinks and special files are excluded. |
-| [ ] | T07 | Add bounded regular-file reads, source hashing, encoding/size/binary classification, and basic coverage records. | Stored candidate bytes and hashes agree; oversized, invalid-UTF-8, symlink, and FIFO cases cannot become normal source reads. |
+| [x] | T07 | Add bounded regular-file reads, source hashing, encoding/size/binary classification, and basic coverage records. | Stored candidate bytes and hashes agree; oversized, invalid-UTF-8, symlink, and FIFO cases cannot become normal source reads. |
 | [ ] | T08 | Create the SQLite schema and minimal store operations. Enable foreign keys and persist/retrieve file bytes and metadata. Validate cache destinations before writes. | An in-memory/temporary store round-trip preserves source bytes; symlinked cache destinations are rejected. No migrations framework beyond a format version. |
 | [ ] | T09 | Implement atomic publication of a file inventory and deterministic snapshot digest. | One transaction publishes all file rows; a deliberately failed transaction leaves the previous complete inventory intact. Digest ignores row IDs/mtime-only changes. |
 | [ ] | T10 | Wire the first real `rivet index --json` path, including coverage and work counters. Establish the shared success/error transport. | Indexing the tiny fixture produces valid output; repeat indexing has correct updated/unchanged counts. Unimplemented navigation commands clearly fail. |
