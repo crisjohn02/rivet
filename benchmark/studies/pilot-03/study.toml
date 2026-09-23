@@ -1,0 +1,80 @@
+# Pilot study manifest (T38a format; see benchmark/runner/TASK-FORMAT.md).
+# Public-safe: opaque task IDs and harness settings only. Tasks, prompts and
+# gold answers live in $RIVET_PILOT_TASKS_DIR; run artifacts in
+# $RIVET_PILOT_RUNS_DIR. Both are private and outside this repository.
+schema_version = 1
+study_id = "pilot-03"
+kind = "pilot"
+
+tasks = ["p1", "p2", "p3", "p4", "p5"]
+
+arms = ["B", "C"]
+trials = 3
+seed = 20260925
+retry_rule = "rerun_block_once"
+
+# Hard cap across the whole study, including retries. Before each block and
+# each run the runner requires charged + max_budget_usd + reserve <= cap.
+budget_cap_usd = 9.0  # $25 approved in total; $5.25 spent by pilot-01, its smoke and probe, and pilot-02
+# Claude Code checks --max-budget-usd between turns, so one run can end a
+# little above its own budget; the reserve is that allowance.
+per_run_reserve_usd = 0.25
+
+[harness]
+model = "claude-opus-5-5"
+settings = '{"effortLevel":"high"}'
+flags = [
+  "-p",
+  "--setting-sources", "project",
+  "--strict-mcp-config",
+  "--disable-slash-commands",
+  "--no-session-persistence",
+  "--output-format", "stream-json",
+  "--verbose",
+  "--permission-prompts", "none",
+]
+# Built-in tools that exist in the session at all (--tools).
+tools = ["Read", "Grep", "Glob", "Bash"]
+# docs/BENCHMARK.md "Config B prompt, verbatim"; both arms. The runner
+# refuses the manifest if this ever differs from that document.
+append_system_prompt = """
+When searching code, prefer `rg -n <pattern> <dir>` scoped to a likely directory over repository-wide searches. Read specific line ranges rather than whole files. Before reading a file, search for the symbol's definition and read only the enclosing function or class."""
+
+[arms_config.B]
+rivet = false
+allowed_tools = ["Read", "Grep", "Glob", "Bash(rg:*)", "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)"]
+disallowed_tools = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Bash(rivet:*)"]
+
+[arms_config.C]
+rivet = true
+snippet_file = "CLAUDE.md"
+allowed_tools = ["Read", "Grep", "Glob", "Bash(rg:*)", "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)", "Bash(rivet:*)"]
+disallowed_tools = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task"]
+
+[sandbox]
+# Every agent process runs under `sandbox-exec` (benchmark/runner/sandbox.py).
+# Reads of these paths are denied in both arms, identically. "~/" expands to
+# the runner's home and every path is resolved with realpath. The runner also
+# always denies $RIVET_PILOT_TASKS_DIR, $RIVET_CORPUS_DIR and
+# $RIVET_PILOT_RUNS_DIR, except the attempt's own workspace and the study's
+# pinned rivet copy. The runner refuses to start if a workspace, the harness
+# binary or the rivet copy would fall under a denied path.
+deny_read_paths = [
+  "~/rivet-corpus/gold",   # gold answers, partition notes, held-out gold
+  "~/ssr",
+  "~/rivet",               # rivet's repository
+  "~/rivet-wt",            # rivet's worktrees
+  # ~/.claude/projects is narrowed to the regex below: denying all of it would
+  # also deny the child Claude Code's own per-project state.
+]
+deny_read_regexes = [
+  # Session transcripts and scratch of the orchestrator (a rivet session) and of
+  # any session on the private originals (~/ssr). Narrowed from all of
+  # /private/tmp/claude-* and ~/.claude/projects, which would also deny the
+  # child Claude Code's own scratch and state. The runs directory must be named
+  # so that its sessions' slugs cannot match, e.g. ~/pilot-runs-rivet.
+  '^/private/tmp/claude-[0-9]+/-Users-[^-/]+-(rivet|ssr)(-|/|$)',
+  '^/Users/[^/]+/[.]claude/projects/-Users-[^-/]+-(rivet|ssr)(-|/|$)',
+]
+# Arm B additionally gets (deny process-exec (regex #"/rivet$")).
+deny_rivet_exec_in_b = true
