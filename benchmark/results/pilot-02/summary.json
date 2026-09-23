@@ -1,0 +1,651 @@
+{
+  "accounting": {
+    "B": {
+      "accounted": 15,
+      "attempts": 15,
+      "contaminated": 0,
+      "crash_or_invalid_answer": 0,
+      "evaluator_failures": 0,
+      "infrastructure_failures": 0,
+      "isolation_violations": 0,
+      "limit_reached": 0,
+      "missing": 0,
+      "rerun_attempts": 0,
+      "scheduled": 15,
+      "successful": 15,
+      "unscheduled_runs": 0
+    },
+    "C": {
+      "accounted": 15,
+      "attempts": 15,
+      "contaminated": 0,
+      "crash_or_invalid_answer": 0,
+      "evaluator_failures": 0,
+      "infrastructure_failures": 0,
+      "isolation_violations": 0,
+      "limit_reached": 0,
+      "missing": 0,
+      "rerun_attempts": 0,
+      "scheduled": 15,
+      "successful": 15,
+      "unscheduled_runs": 0
+    }
+  },
+  "adoption_c": {
+    "eligible_runs": 15,
+    "errors_by_exit": {},
+    "invocations_by_command": {
+      "context": 6,
+      "refs": 13,
+      "symbol": 5
+    },
+    "runs_invoking_rivet": 12,
+    "runs_with_known_commands": 15,
+    "runs_with_known_fallbacks": 15,
+    "text_fallbacks": 4
+  },
+  "analysis_version": "t38c-1",
+  "arm_means": {
+    "cost_usd": {
+      "all_tasks": {
+        "B": {
+          "mean": 0.1310926666666667,
+          "tasks": 5
+        },
+        "C": {
+          "mean": 0.1221562,
+          "tasks": 5
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 0.1310926666666667,
+        "C": 0.1221562
+      },
+      "paired_tasks": [
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5"
+      ]
+    },
+    "input_tokens_total": {
+      "all_tasks": {
+        "B": {
+          "mean": 67405.66666666666,
+          "tasks": 5
+        },
+        "C": {
+          "mean": 56551.53333333334,
+          "tasks": 5
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 67405.66666666666,
+        "C": 56551.53333333334
+      },
+      "paired_tasks": [
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5"
+      ]
+    },
+    "output_tokens": {
+      "all_tasks": {
+        "B": {
+          "mean": 1599.6,
+          "tasks": 5
+        },
+        "C": {
+          "mean": 1440.7333333333331,
+          "tasks": 5
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 1599.6,
+        "C": 1440.7333333333331
+      },
+      "paired_tasks": [
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5"
+      ]
+    },
+    "success": {
+      "all_tasks": {
+        "B": {
+          "mean": 1.0,
+          "tasks": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "tasks": 5
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 1.0,
+        "C": 1.0
+      },
+      "paired_tasks": [
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5"
+      ]
+    },
+    "tool_calls_total": {
+      "all_tasks": {
+        "B": {
+          "mean": 6.466666666666667,
+          "tasks": 5
+        },
+        "C": {
+          "mean": 4.2,
+          "tasks": 5
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 6.466666666666667,
+        "C": 4.2
+      },
+      "paired_tasks": [
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5"
+      ]
+    },
+    "wall_clock_seconds": {
+      "all_tasks": {
+        "B": {
+          "mean": 23.267553,
+          "tasks": 5
+        },
+        "C": {
+          "mean": 23.838120333333332,
+          "tasks": 5
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 23.267553,
+        "C": 23.838120333333332
+      },
+      "paired_tasks": [
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5"
+      ]
+    }
+  },
+  "arms": [
+    "B",
+    "C"
+  ],
+  "comparisons": {
+    "cost_usd": {
+      "change_pct": -6.816908141314803,
+      "paired_tasks": 5,
+      "ratio_c_over_b": 0.931830918586852,
+      "reduction_pct": 6.816908141314803,
+      "undefined_reason": null
+    },
+    "input_tokens_total": {
+      "change_pct": -16.10270155328185,
+      "paired_tasks": 5,
+      "ratio_c_over_b": 0.8389729844671815,
+      "reduction_pct": 16.10270155328185,
+      "undefined_reason": null
+    },
+    "output_tokens": {
+      "change_pct": -9.93164957906144,
+      "paired_tasks": 5,
+      "ratio_c_over_b": 0.9006835042093856,
+      "reduction_pct": 9.93164957906144,
+      "undefined_reason": null
+    },
+    "success": {
+      "difference_pp": 0.0,
+      "paired_tasks": 5
+    },
+    "tool_calls_total": {
+      "change_pct": -35.051546391752574,
+      "paired_tasks": 5,
+      "ratio_c_over_b": 0.6494845360824743,
+      "reduction_pct": 35.051546391752574,
+      "undefined_reason": null
+    },
+    "wall_clock_seconds": {
+      "change_pct": 2.4522017134046337,
+      "paired_tasks": 5,
+      "ratio_c_over_b": 1.0245220171340463,
+      "reduction_pct": -2.4522017134046337,
+      "undefined_reason": null
+    }
+  },
+  "gates": {
+    "efficiency_point_estimate": "not_evaluated",
+    "evidence_of_reduction": "not_evaluated",
+    "reason": "pilot study; docs/BENCHMARK.md forbids treating the pilot as the confirmatory study",
+    "study_integrity": "not_evaluated",
+    "success_non_inferiority": "not_evaluated"
+  },
+  "inputs": {
+    "runs_csv_sha256": "536320bb3256082729b061a9c7fa167926c413503ae2b9d254b056356865d5b3",
+    "study_manifest_sha256": "ea4eb57b9226096f328b91024189576b90580297f0ff70d8df9bb6b0a778d3eb"
+  },
+  "intervals": "not computed (pilot; paired intervals are T48a)",
+  "per_task": {
+    "cost_usd": {
+      "p1": {
+        "B": {
+          "mean": 0.06869,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 0.06518833333333333,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p2": {
+        "B": {
+          "mean": 0.096817,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 0.09394066666666667,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p3": {
+        "B": {
+          "mean": 0.28869000000000006,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 0.245235,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p4": {
+        "B": {
+          "mean": 0.12866933333333333,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 0.12578699999999998,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p5": {
+        "B": {
+          "mean": 0.07259700000000001,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 0.08063,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "input_tokens_total": {
+      "p1": {
+        "B": {
+          "mean": 28781.333333333332,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 26159.666666666668,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p2": {
+        "B": {
+          "mean": 38700.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 35618.333333333336,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p3": {
+        "B": {
+          "mean": 160585.33333333334,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 136620.0,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p4": {
+        "B": {
+          "mean": 76407.33333333333,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 55640.666666666664,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p5": {
+        "B": {
+          "mean": 32554.333333333332,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 28719.0,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "output_tokens": {
+      "p1": {
+        "B": {
+          "mean": 717.6666666666666,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 633.6666666666666,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p2": {
+        "B": {
+          "mean": 1435.6666666666667,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1278.3333333333333,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p3": {
+        "B": {
+          "mean": 2884.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 2966.6666666666665,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p4": {
+        "B": {
+          "mean": 1852.6666666666667,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1313.0,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p5": {
+        "B": {
+          "mean": 1108.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1012.0,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "success": {
+      "p1": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p2": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p3": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p4": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p5": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "tool_calls_total": {
+      "p1": {
+        "B": {
+          "mean": 3.3333333333333335,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 3.0,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p2": {
+        "B": {
+          "mean": 5.666666666666667,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 2.6666666666666665,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p3": {
+        "B": {
+          "mean": 11.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 8.666666666666666,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p4": {
+        "B": {
+          "mean": 9.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 4.666666666666667,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p5": {
+        "B": {
+          "mean": 3.3333333333333335,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 2.0,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "wall_clock_seconds": {
+      "p1": {
+        "B": {
+          "mean": 13.037430333333333,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 11.545654999999998,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p2": {
+        "B": {
+          "mean": 17.239726333333333,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 20.057861666666668,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p3": {
+        "B": {
+          "mean": 40.932678333333335,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 47.04587133333333,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p4": {
+        "B": {
+          "mean": 29.786596333333335,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 23.642681666666665,
+          "missing": 0,
+          "n": 3
+        }
+      },
+      "p5": {
+        "B": {
+          "mean": 15.341333666666666,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 16.898532,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    }
+  },
+  "spend": {
+    "attempts_with_unknown_cost": 0,
+    "cap_usd": 9.0,
+    "reported_usd_claude_code_estimate": 3.798733
+  },
+  "study_id": "pilot-02",
+  "study_kind": "pilot",
+  "weighting": "equal task weighting over included attempts; comparisons use tasks with a value in every arm"
+}
