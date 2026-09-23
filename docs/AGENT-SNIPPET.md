@@ -1,6 +1,6 @@
 # Agent Snippet
 
-This managed block is exactly what `rivet snippet` prints (including markers and a final newline). `snippet --json` wraps it in a versioned object. `init --write-snippet` installs or updates one block idempotently; text outside it is preserved. The benchmark's treatment uses exactly this text. Changes require a new recorded snippet hash.
+This managed block is exactly what `rivet snippet` prints (including markers and a final newline). `snippet --json` wraps it in a versioned object. `init --write-snippet` installs or updates one block idempotently; text outside it is preserved. The benchmark's treatment uses exactly this text. Changes require a new recorded snippet hash. Since 2026-09-23 (SN1) the shipped block's SHA-256 is `1819530610c1418d4b0d9bce84363504d99f5029d628558185ede35a82d3b5f7`; pilot-01 used the previous block, `0d5a7d0a2195199ecdefd96a23da4ba6e4653d15830b0109f76c1d096be6119f`, which recommended `--json`.
 
 ```markdown
 <!-- rivet:start -->
@@ -16,7 +16,7 @@ Choose the command that answers the current question; these commands are not a r
 
 Names can be short, dotted, or repository-relative `file:line`. Ambiguity returns candidate IDs; rerun with a quoted canonical ID. Lists default to 50 results; check totals and use `--offset` to page references/call lists. Use `rivet symbol` to page ambiguity candidates for a context query.
 
-Add `--json` for structured results. Queries refresh automatically; no routine `rivet index` call is needed. Check coverage/skipped files and resolution tiers before relying on an empty result. Use text tools for unsupported syntax/languages, comments, strings, dynamic references, or missing context. Results describe the indexed snapshot; verify live source before editing.
+The default text output is compact and meant for you to read; `--json` emits the full machine contract at several times the size, so reserve it for scripts that parse the result. Queries refresh automatically; no routine `rivet index` call is needed. Check coverage/skipped files and resolution tiers before relying on an empty result. Use text tools for unsupported syntax/languages, comments, strings, dynamic references, or missing context. Results describe the indexed snapshot; verify live source before editing.
 <!-- rivet:end -->
 ```
 
