@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T37 |
-| Next task | T38 |
+| Last completed task | T40 |
+| Next task | User decision on the pilot result: fix and retest is recommended (benchmark/results/pilot-01/RESULT.md) |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T38: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 648 passed, 0 failed, 1 ignored; `python3 tests/gold/check_gold.py` verified 51 authored entries. Pilot tasks and gold are private, outside the repository; no paid model calls. Then T38a–T38c: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 648 passed, 0 failed, 1 ignored; `python3 tests/gold/check_gold.py` verified 51 authored entries; `python3 benchmark/runner/test_runner.py` 49 tests OK (fake agent under sandbox-exec, no model calls). |
+| Last checks | T39/T40: paid pilot pilot-01 ran 10 runs (5 tasks x arms B and C, 1 trial) on Claude Code 2.1.280 with claude-opus-5-5; all 10 passed, 0 contaminated, 0 isolation violations; C/B mean input tokens 0.802 (per-task ratio mean 0.90); total spend $1.45 (Claude Code estimate) of $25 approved. T33c: adoption observed in 4 of 5 pilot C runs and snippet delivery verified; the explicit-request check and a Codex host remain untested. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -169,8 +169,8 @@ Read: BENCHMARK pilot, isolation, collected metrics, and decision rules; IMPLEME
 |---|---|---|---|
 | [x] | T37 | Measure the local PHP slice on the pinned repository without an agent benchmark. | Record cold index, no-change query, one-file edit plus query, common-name refs, context output bytes, and index size with environment details. Separate content hashing from resolution costs. |
 | [x] | T38 | Define 4–6 objective B/C pilot tasks and their checks using available harness access. Estimate model usage/cost from available evidence. | Starting states and gold solutions pass their checks; prompts, run caps, and artifacts are defined. No paid runs are launched as part of planning. |
-| [ ] | T39 | Run the agreed small pilot, retaining successes, failures, token usage, wall time, and transcripts. | Both arms run under comparable limits, including indexing cost. If credentials, access, or an explicit run/spend budget are missing, record the blocker instead of consuming unspecified usage. |
-| [ ] | T40 | Write a short pilot result and choose the next smallest change. | Report reference usefulness, adoption, tokens, latency, and limitations. Choose fix/retest, proceed to TypeScript, or re-scope; do not label the pilot a passed confirmatory benchmark. |
+| [x] | T39 | Run the agreed small pilot, retaining successes, failures, token usage, wall time, and transcripts. | Both arms run under comparable limits, including indexing cost. If credentials, access, or an explicit run/spend budget are missing, record the blocker instead of consuming unspecified usage. |
+| [x] | T40 | Write a short pilot result and choose the next smallest change. | Report reference usefulness, adoption, tokens, latency, and limitations. Choose fix/retest, proceed to TypeScript, or re-scope; do not label the pilot a passed confirmatory benchmark. |
 
 **Gate G:** T41 onward stays deferred until the pilot supports spending further effort. No full 300+ run benchmark is implied by completing this queue's PHP tasks.
 
