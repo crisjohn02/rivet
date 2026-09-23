@@ -16,7 +16,9 @@
 //!   --signature-only` are byte-identical to the pre-SY1 binary. The goldens
 //!   under `tests/golden/sy1-head/` were captured from the binary built at
 //!   commit bf8541c, with the same arguments, against a fresh copy of the
-//!   authored fixture;
+//!   authored fixture. CV1 rewrote one line in each text golden, the coverage
+//!   line, to its shorter form; every other byte is as captured, and the JSON
+//!   goldens are untouched;
 //! - a receiver spanning source lines renders on one line in text and keeps
 //!   its exact text in JSON;
 //! - output is identical across an `index --force` rebuild.
@@ -43,7 +45,7 @@ const ALL_TIERS: [&str; 2] = ["--min-resolution", "name_match"];
 
 /// The authored fixture's one skipped file makes its coverage incomplete.
 const COVERAGE: &str =
-    "coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics\n";
+    "coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics\n";
 
 /// `Mix\Service::hub` calls one function (`exact`), one method through
 /// `$this` (`scoped`), and two methods on untyped receivers (`name_match`).

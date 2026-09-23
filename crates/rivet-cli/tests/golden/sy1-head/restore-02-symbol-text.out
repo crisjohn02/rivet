@@ -19,5 +19,5 @@ called by:
   boot.php:17:7            (file scope)                             scoped
   boot.php:22:17           (file scope)                             scoped
 
-coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics
 --- stderr

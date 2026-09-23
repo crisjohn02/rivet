@@ -5,7 +5,8 @@
 //! and `context`; the `?` mark on `name_match`; pagination and coverage lines;
 //! human errors; every help text's size, layout, and runnable examples; and
 //! byte-identical `--json` output against goldens captured from the pre-T34
-//! binary (commit df58b42).
+//! binary (commit df58b42) and, for a repository with diagnostics, from the
+//! pre-CV1 binary (commit 2581e00).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,7 +26,7 @@ const RELAUNCH: &str = "SurveyService.php#App\\Services\\SurveyService::relaunch
 /// The fixture's one skipped file (`README.md`, unsupported) makes its
 /// coverage incomplete.
 const COVERAGE: &str =
-    "coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics\n";
+    "coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics\n";
 
 /// Every command with its own help text.
 const COMMANDS: [&str; 6] = ["init", "index", "symbol", "refs", "context", "snippet"];
@@ -590,6 +591,188 @@ fn index_human_follows_the_spec_shape() {
              Deleted: 0\n\n{elapsed}\n\n{COVERAGE}"
         )
     );
+}
+
+/// The fixture plus three files that fail to index: two parse errors and one
+/// binary file. Their contract sort order (file bytes: `B.php` < `a.php` <
+/// `z/Broken.php`) is unlike their write order and unlike the by-code order.
+fn diagnostics_repo(label: &str) -> TempDir {
+    let temp = fixture_repo(label);
+    fs::create_dir_all(temp.path().join("z")).expect("create z/");
+    fs::write(
+        temp.path().join("z/Broken.php"),
+        "<?php\nclass {{{ broken\n",
+    )
+    .expect("write");
+    fs::write(temp.path().join("a.php"), "<?php\nclass A {{{\n").expect("write");
+    fs::write(temp.path().join("B.php"), b"<?php\n\0\0binary\n").expect("write");
+    temp
+}
+
+/// The commands whose human output ends with the coverage line.
+const COVERED_COMMANDS: [&[&str]; 4] = [
+    &["index"],
+    &["symbol", LAUNCH],
+    &["refs", LAUNCH],
+    &["context", LAUNCH],
+];
+
+/// Asserts every covered command, and an index-dependent error, ends with
+/// `line` and never points to `--json`.
+fn assert_coverage_line(dir: &Path, line: &str) {
+    for args in COVERED_COMMANDS {
+        let text = human(dir, args);
+        assert!(text.ends_with(line), "{args:?}: {text}");
+        assert!(!text.contains("--json"), "{args:?}: {text}");
+    }
+    let output = run(dir, &["symbol", "nosuch"]);
+    assert_eq!(output.status.code(), Some(4));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.ends_with(line), "{stderr}");
+    assert!(!stderr.contains("--json"), "{stderr}");
+}
+
+#[test]
+fn coverage_line_names_one_diagnostic_inline() {
+    let temp = fixture_repo("coverage-one");
+    fs::write(temp.path().join("Broken.php"), "<?php\nclass {{{ broken\n").expect("write");
+    assert_coverage_line(
+        temp.path(),
+        "coverage incomplete: 9/11 files indexed; skipped 1 unsupported, 1 parse_error; \
+         1 diagnostic: Broken.php (parse_error)\n",
+    );
+}
+
+#[test]
+fn coverage_line_names_two_diagnostics_in_sort_order() {
+    // Written in the reverse of the contract's order (`B.php` < `z/...`).
+    let temp = fixture_repo("coverage-two");
+    fs::create_dir_all(temp.path().join("z")).expect("create z/");
+    fs::write(
+        temp.path().join("z/Broken.php"),
+        "<?php\nclass {{{ broken\n",
+    )
+    .expect("write");
+    fs::write(temp.path().join("B.php"), b"<?php\n\0\0binary\n").expect("write");
+    assert_coverage_line(
+        temp.path(),
+        "coverage incomplete: 9/12 files indexed; skipped 1 unsupported, 1 binary, \
+         1 parse_error; 2 diagnostics: B.php (binary_file), z/Broken.php (parse_error)\n",
+    );
+}
+
+#[test]
+fn coverage_line_counts_more_than_two_diagnostics_by_code() {
+    let temp = diagnostics_repo("coverage-three");
+    let line = "coverage incomplete: 9/13 files indexed; skipped 1 unsupported, 1 binary, \
+                2 parse_error; 3 diagnostics (2 parse_error, 1 binary_file)\n";
+    assert_coverage_line(temp.path(), line);
+    // Addressing a failed file directly is exit 6; its error ends the same way.
+    let output = run(temp.path(), &["symbol", "a.php:2"]);
+    assert_eq!(output.status.code(), Some(6));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.ends_with(line), "{stderr}");
+}
+
+#[test]
+fn a_capped_diagnostic_list_counts_only_its_first_items() {
+    // 55 TypeScript files (`unsupported_language`) sort before 5 broken PHP
+    // files, so the 50 listed items are all TypeScript; the parse errors stay
+    // in the skip counts and the total.
+    let temp = fixture_repo("coverage-capped");
+    fs::create_dir_all(temp.path().join("a")).expect("create a/");
+    fs::create_dir_all(temp.path().join("z")).expect("create z/");
+    for index in 0..55 {
+        fs::write(
+            temp.path().join(format!("a/f{index:02}.ts")),
+            "export const x = 1;\n",
+        )
+        .expect("write");
+    }
+    for index in 0..5 {
+        fs::write(
+            temp.path().join(format!("z/Broken{index}.php")),
+            "<?php\nclass {{{\n",
+        )
+        .expect("write");
+    }
+    let output = run(temp.path(), &["index", "--json"]);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(value["index"]["diagnostics"]["total"], 60);
+    assert_eq!(value["index"]["diagnostics"]["truncated"], true);
+    assert_coverage_line(
+        temp.path(),
+        "coverage incomplete: 9/70 files indexed; skipped 56 unsupported, 5 parse_error; \
+         60 diagnostics (first 50: 50 unsupported_language)\n",
+    );
+}
+
+#[test]
+fn coverage_line_names_diagnostics_when_only_unsupported_files_are_skipped() {
+    // A TypeScript file is counted as unsupported while no adapter extracts
+    // it, and it also has a diagnostic; README.md is an ordinary unsupported
+    // file, counted and never named.
+    let temp = fixture_repo("coverage-unsupported");
+    fs::create_dir_all(temp.path().join("src")).expect("create src/");
+    fs::write(temp.path().join("src/ok.ts"), "export const x = 1;\n").expect("write");
+    assert_coverage_line(
+        temp.path(),
+        "coverage incomplete: 9/11 files indexed; skipped 2 unsupported; \
+         1 diagnostic: src/ok.ts (unsupported_language)\n",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn coverage_line_keeps_a_non_utf8_path_escaped() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = fixture_repo("coverage-non-utf8");
+    let bad = temp.path().join(OsStr::from_bytes(b"bad-\xff.php"));
+    if fs::write(&bad, "<?php\n").is_err() {
+        // APFS (macOS) rejects a filename that is not valid UTF-8; the unit
+        // test in `human.rs` covers the rendering there.
+        return;
+    }
+    // The path is outside the scan domain: in no count, yet incomplete.
+    assert_coverage_line(
+        temp.path(),
+        "coverage incomplete: 9/10 files indexed; skipped 1 unsupported; \
+         1 diagnostic: bad-\\xff.php (non_utf8_path)\n",
+    );
+}
+
+/// `--json` invocations against [`diagnostics_repo`], captured from the
+/// binary built at commit 2581e00 (before CV1 changed the human coverage
+/// line), in this order against one fresh copy. Each golden is `exit N`,
+/// then `--- stdout` and the stdout bytes, then `--- stderr` and the stderr
+/// bytes.
+const CV1_JSON_GOLDENS: [(&str, &[&str]); 6] = [
+    ("01-index", &["index", "--json"]),
+    ("02-symbol", &["symbol", LAUNCH, "--json"]),
+    ("03-refs", &["refs", LAUNCH, "--json"]),
+    ("04-context", &["context", LAUNCH, "--json"]),
+    ("05-symbol-not-found", &["symbol", "nosuch", "--json"]),
+    ("06-symbol-parse-failure", &["symbol", "a.php:2", "--json"]),
+];
+
+#[test]
+fn json_with_diagnostics_is_byte_identical_to_the_pre_cv1_binary() {
+    let temp = diagnostics_repo("coverage-json");
+    let goldens = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/cv1-head");
+    for (name, args) in CV1_JSON_GOLDENS {
+        let output = run(temp.path(), args);
+        let actual = format!(
+            "exit {}\n--- stdout\n{}--- stderr\n{}",
+            output.status.code().expect("exit code"),
+            String::from_utf8(output.stdout).expect("UTF-8"),
+            String::from_utf8(output.stderr).expect("UTF-8"),
+        );
+        let expected =
+            fs::read_to_string(goldens.join(format!("{name}.out"))).expect("read golden");
+        assert_eq!(actual, expected, "{name}: {args:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

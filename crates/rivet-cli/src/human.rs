@@ -146,10 +146,20 @@ pub(crate) fn page_line_of(list: &Value, shown: usize) -> Option<String> {
     )
 }
 
+/// The most diagnostics the coverage line names by file; with more, it
+/// counts them by code instead (CV1).
+const NAMED_DIAGNOSTICS: u64 = 2;
+
 /// The notes an `index` metadata object requires in human output: a line for
 /// a `cached` (`--no-refresh`) snapshot, and a coverage line whenever
 /// coverage is incomplete, any file was skipped, or any diagnostic exists.
 /// Empty when the snapshot is fresh and complete.
+///
+/// The coverage line's grammar is OUTPUT-CONTRACT "Common index metadata"
+/// (CV1): `coverage <complete|incomplete>: <indexed>/<seen> files indexed`,
+/// then `; skipped <count> <key>, ...` for the non-zero skip counts, then
+/// `; ` and [`diagnostics_clause`]. It states the diagnostics itself rather
+/// than pointing to `--json`.
 pub(crate) fn index_notes(index: &Value) -> String {
     let mut output = String::new();
     if index["freshness"] == "cached" {
@@ -178,7 +188,7 @@ pub(crate) fn index_notes(index: &Value) -> String {
         return output;
     }
     let mut line = format!(
-        "coverage: {}; {} of {} files indexed",
+        "coverage {}: {}/{} files indexed",
         if complete { "complete" } else { "incomplete" },
         coverage["files_indexed"].as_u64().unwrap_or(0),
         coverage["files_seen"].as_u64().unwrap_or(0),
@@ -186,13 +196,67 @@ pub(crate) fn index_notes(index: &Value) -> String {
     if !skipped_parts.is_empty() {
         line.push_str(&format!("; skipped {}", skipped_parts.join(", ")));
     }
-    line.push_str(&format!("; {diagnostics_total} diagnostics"));
-    if diagnostics_total > 0 {
-        line.push_str(" (listed with --json)");
-    }
+    line.push_str("; ");
+    line.push_str(&diagnostics_clause(diagnostics));
     output.push_str(&line);
     output.push('\n');
     output
+}
+
+/// The coverage line's diagnostics clause (OUTPUT-CONTRACT "Common index
+/// metadata"):
+///
+/// - `0 diagnostics` when `total` is 0;
+/// - `1 diagnostic: <file> (<code>)`, or `2 diagnostics: ` and both, when
+///   `total` is at most [`NAMED_DIAGNOSTICS`];
+/// - otherwise `<total> diagnostics (<count> <code>, ...)`, the listed items
+///   counted by code, by descending count and then code bytes, with no path.
+///   When the items are capped below `total`, the counts say so:
+///   `60 diagnostics (first 50: 50 parse_error)`.
+///
+/// Named items are taken in the JSON's order, which is already the contract's
+/// diagnostic sort order, and `file` is printed exactly as the JSON holds it:
+/// repository-relative, with a non-UTF-8 path's escaped bytes kept escaped.
+/// Ordinary `unsupported` files have no diagnostic, so they are only counted.
+fn diagnostics_clause(diagnostics: &Value) -> String {
+    let total = diagnostics["total"].as_u64().unwrap_or(0);
+    let noun = if total == 1 {
+        "diagnostic"
+    } else {
+        "diagnostics"
+    };
+    let items: &[Value] = diagnostics["items"].as_array().map_or(&[], Vec::as_slice);
+    if total == 0 || items.is_empty() {
+        // `items` holds min(total, 50) entries, so an empty list with a
+        // non-zero total is not produced; the count is still stated.
+        return format!("{total} {noun}");
+    }
+    if total <= NAMED_DIAGNOSTICS && items.len() as u64 >= total {
+        let named: Vec<String> = items
+            .iter()
+            .take(total as usize)
+            .map(|item| format!("{} ({})", text(&item["file"]), text(&item["code"])))
+            .collect();
+        return format!("{total} {noun}: {}", named.join(", "));
+    }
+    let mut by_code: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
+    for item in items {
+        *by_code.entry(text(&item["code"])).or_insert(0) += 1;
+    }
+    let mut counts: Vec<(&str, u64)> = by_code.into_iter().collect();
+    // Descending count, then code bytes (`str` ordering is bytewise).
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let counts: Vec<String> = counts
+        .iter()
+        .map(|(code, count)| format!("{count} {code}"))
+        .collect();
+    let listed = items.len() as u64;
+    let capped = diagnostics["truncated"].as_bool().unwrap_or(false) || listed < total;
+    if capped {
+        format!("{total} {noun} (first {listed}: {})", counts.join(", "))
+    } else {
+        format!("{total} {noun} ({})", counts.join(", "))
+    }
 }
 
 /// Appends `source` followed by exactly one line break.
@@ -361,13 +425,275 @@ mod tests {
             "freshness": "cached",
             "coverage": {"complete": false, "files_seen": 3, "files_indexed": 1,
                 "skipped": {"unsupported": 1, "parse_error": 1}},
-            "diagnostics": {"total": 2},
+            "diagnostics": {"total": 2, "truncated": false, "items": [
+                diagnostic("a.ts", "unsupported_language"),
+                diagnostic("b.php", "parse_error"),
+            ]},
         });
         assert_eq!(
             index_notes(&cached),
             "snapshot: cached (--no-refresh); it may not match the working tree\n\
-             coverage: incomplete; 1 of 3 files indexed; skipped 1 unsupported, 1 parse_error; \
-             2 diagnostics (listed with --json)\n"
+             coverage incomplete: 1/3 files indexed; skipped 1 unsupported, 1 parse_error; \
+             2 diagnostics: a.ts (unsupported_language), b.php (parse_error)\n"
+        );
+    }
+
+    /// One diagnostic item as the JSON holds it.
+    fn diagnostic(file: &str, code: &str) -> serde_json::Value {
+        json!({"file": file, "code": code, "detail": "detail text"})
+    }
+
+    /// The notes of a fresh (`content`) snapshot with this coverage.
+    fn fresh_notes(
+        complete: bool,
+        seen: u64,
+        indexed: u64,
+        skipped: serde_json::Value,
+        diagnostics: serde_json::Value,
+    ) -> String {
+        index_notes(&json!({
+            "freshness": "content",
+            "coverage": {"complete": complete, "files_seen": seen,
+                "files_indexed": indexed, "skipped": skipped},
+            "diagnostics": diagnostics,
+        }))
+    }
+
+    /// Every skip count at zero except those given.
+    fn skipped(counts: &[(&str, u64)]) -> serde_json::Value {
+        let mut object = json!({"unsupported": 0, "binary": 0, "size": 0,
+            "encoding": 0, "parse_error": 0, "resource_limit": 0});
+        for (key, count) in counts {
+            object[*key] = json!(count);
+        }
+        object
+    }
+
+    #[test]
+    fn coverage_line_without_diagnostics_states_the_zero_count() {
+        let line = fresh_notes(
+            false,
+            10,
+            9,
+            skipped(&[("unsupported", 1)]),
+            json!({"total": 0, "truncated": false, "items": []}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics\n"
+        );
+    }
+
+    #[test]
+    fn coverage_line_names_one_diagnostic_inline() {
+        let line = fresh_notes(
+            false,
+            2815,
+            1219,
+            skipped(&[("unsupported", 1595), ("parse_error", 1)]),
+            json!({"total": 1, "truncated": false,
+                "items": [diagnostic("app/X.php", "parse_error")]}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 1219/2815 files indexed; skipped 1595 unsupported, \
+             1 parse_error; 1 diagnostic: app/X.php (parse_error)\n"
+        );
+        assert!(!line.contains("--json"), "{line}");
+    }
+
+    #[test]
+    fn coverage_line_names_two_diagnostics() {
+        let line = fresh_notes(
+            false,
+            4,
+            2,
+            skipped(&[("binary", 1), ("parse_error", 1)]),
+            json!({"total": 2, "truncated": false,
+                "items": [diagnostic("B.php", "binary_file"), diagnostic("a.php", "parse_error")]}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 2/4 files indexed; skipped 1 binary, 1 parse_error; \
+             2 diagnostics: B.php (binary_file), a.php (parse_error)\n"
+        );
+    }
+
+    #[test]
+    fn more_than_two_diagnostics_are_counted_by_code_without_paths() {
+        // Three of mixed codes: descending count, then code bytes.
+        let items = json!([
+            diagnostic("B.php", "binary_file"),
+            diagnostic("a.php", "parse_error"),
+            diagnostic("z/Broken.php", "parse_error"),
+        ]);
+        let line = fresh_notes(
+            false,
+            13,
+            9,
+            skipped(&[("unsupported", 1), ("binary", 1), ("parse_error", 2)]),
+            json!({"total": 3, "truncated": false, "items": items}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 9/13 files indexed; skipped 1 unsupported, 1 binary, \
+             2 parse_error; 3 diagnostics (2 parse_error, 1 binary_file)\n"
+        );
+        assert!(!line.contains(".php"), "{line}");
+
+        // Equal counts are ordered by code bytes, not by item order.
+        let items = json!([
+            diagnostic("a.php", "parse_error"),
+            diagnostic("b.php", "file_too_large"),
+            diagnostic("c.php", "binary_file"),
+            diagnostic("d.php", "parse_error"),
+            diagnostic("e.php", "file_too_large"),
+        ]);
+        let line = fresh_notes(
+            false,
+            5,
+            0,
+            skipped(&[("binary", 1), ("size", 2), ("parse_error", 2)]),
+            json!({"total": 5, "truncated": false, "items": items}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 0/5 files indexed; skipped 1 binary, 2 size, 2 parse_error; \
+             5 diagnostics (2 file_too_large, 2 parse_error, 1 binary_file)\n"
+        );
+    }
+
+    #[test]
+    fn fifty_diagnostics_of_one_code_are_one_count() {
+        // The pilot project's shape: every diagnostic is a `.ts` file.
+        let items: Vec<serde_json::Value> = (0..50)
+            .map(|index| {
+                diagnostic(
+                    &format!("resources/js/components/f{index:02}.ts"),
+                    "unsupported_language",
+                )
+            })
+            .collect();
+        let line = fresh_notes(
+            false,
+            691,
+            250,
+            skipped(&[("unsupported", 441)]),
+            json!({"total": 50, "truncated": false, "items": items}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 250/691 files indexed; skipped 441 unsupported; \
+             50 diagnostics (50 unsupported_language)\n"
+        );
+    }
+
+    #[test]
+    fn a_truncated_list_says_its_counts_cover_the_first_items() {
+        // 60 diagnostics, capped at 50 items: the counts are of those 50.
+        let items: Vec<serde_json::Value> = (0..50)
+            .map(|index| diagnostic(&format!("f{index:02}.php"), "parse_error"))
+            .collect();
+        let line = fresh_notes(
+            false,
+            70,
+            10,
+            skipped(&[("parse_error", 60)]),
+            json!({"total": 60, "truncated": true, "items": items}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 10/70 files indexed; skipped 60 parse_error; \
+             60 diagnostics (first 50: 50 parse_error)\n"
+        );
+    }
+
+    #[test]
+    fn coverage_line_with_only_unsupported_skips_still_names_diagnostics() {
+        // An enabled language without an extractor is counted as unsupported
+        // and also has a diagnostic; the ordinary unsupported file is only
+        // counted.
+        let line = fresh_notes(
+            false,
+            11,
+            9,
+            skipped(&[("unsupported", 2)]),
+            json!({"total": 1, "truncated": false,
+                "items": [diagnostic("src/ok.ts", "unsupported_language")]}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 9/11 files indexed; skipped 2 unsupported; \
+             1 diagnostic: src/ok.ts (unsupported_language)\n"
+        );
+    }
+
+    #[test]
+    fn complete_coverage_with_a_diagnostic_prints_the_line() {
+        let line = fresh_notes(
+            true,
+            2,
+            2,
+            skipped(&[]),
+            json!({"total": 1, "truncated": false,
+                "items": [diagnostic("a.php", "resource_limit")]}),
+        );
+        assert_eq!(
+            line,
+            "coverage complete: 2/2 files indexed; 1 diagnostic: a.php (resource_limit)\n"
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_path_diagnostic_stays_escaped() {
+        // The JSON `file` holds `src/bad-\xff.php` with a literal backslash;
+        // the line prints those characters, never a decoded byte. The path is
+        // outside the scan domain, so it is in no count, yet it forces
+        // `complete: false`.
+        let line = fresh_notes(
+            false,
+            2,
+            2,
+            skipped(&[]),
+            json!({"total": 1, "truncated": false,
+                "items": [diagnostic("src/bad-\\xff.php", "non_utf8_path")]}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 2/2 files indexed; \
+             1 diagnostic: src/bad-\\xff.php (non_utf8_path)\n"
+        );
+        assert!(line.contains(r"src/bad-\xff.php"), "{line}");
+    }
+
+    #[test]
+    fn a_count_without_items_prints_only_the_count() {
+        // Not produced by the binary (items hold min(total, 50) entries); the
+        // line still states the count rather than naming nothing.
+        let line = fresh_notes(
+            false,
+            3,
+            1,
+            skipped(&[("parse_error", 2)]),
+            json!({"total": 2}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 1/3 files indexed; skipped 2 parse_error; 2 diagnostics\n"
+        );
+        // Fewer items than a small total: nothing is named as if it were all
+        // of them; the count says which items it covers.
+        let line = fresh_notes(
+            false,
+            3,
+            1,
+            skipped(&[("parse_error", 2)]),
+            json!({"total": 2, "items": [diagnostic("a.php", "parse_error")]}),
+        );
+        assert_eq!(
+            line,
+            "coverage incomplete: 1/3 files indexed; skipped 2 parse_error; \
+             2 diagnostics (first 1: 1 parse_error)\n"
         );
     }
 }
