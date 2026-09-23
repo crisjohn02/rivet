@@ -15,6 +15,10 @@
 //!   matches the target, reporting a use bound elsewhere as query-relative
 //!   `name_match` while preserving its real `resolved_target`.
 //!
+//! LR2: reference mode also excludes a same-name unresolved use whose form
+//! cannot name the target's kind or whose receiver class is unrelated to the
+//! target's class, and reports how many in `by_exclusion` (spec §11.5).
+//!
 //! The selection, resolution, ordering, dedupe, counting, and slicing live in
 //! [`crate::references`] so `rivet symbol`'s call lists (T24) reuse exactly the
 //! same machinery. `name_match` is computed at query time from the relationship
@@ -140,9 +144,11 @@ fn answer(
     // reference list is explicitly sorted.
     let bindings = references::bindings_by_use_id(store)?;
     let all = references::all_uses(store)?;
-    let matches = references::collect_matches(
+    let evidence = references::Evidence::load(store, &all, &bindings)?;
+    let references::Matches { matches, excluded } = references::collect_matches(
         &all,
         &bindings,
+        &evidence,
         &target,
         references::Selection::Query(mode),
         kinds.as_ref(),
@@ -185,6 +191,16 @@ fn answer(
     object.insert(
         "by_resolution".to_string(),
         json!({"exact": exact, "scoped": scoped, "name_match": name_match}),
+    );
+    // LR2: same-name unresolved uses reference mode left out by evidence,
+    // counted after filters and before pagination; always zero in candidate
+    // mode.
+    object.insert(
+        "by_exclusion".to_string(),
+        json!({
+            "incompatible_form": excluded.incompatible_form,
+            "unrelated_receiver": excluded.unrelated_receiver,
+        }),
     );
     object.insert("references".to_string(), Value::Array(references));
     Ok(Value::Object(object))
@@ -261,7 +277,8 @@ fn parse_kinds(value: Option<&str>) -> Result<Option<HashSet<RefKind>>, CliError
 
 /// The human rendering of a successful reference lookup (spec §15).
 ///
-/// The queried symbol, a count header with the non-zero tiers, one aligned
+/// The queried symbol, a count header with the non-zero tiers, a line naming
+/// how many name matches evidence excluded when any were (LR2), one aligned
 /// line per reference (`file:line:column`, containing symbol, kind, tier), the
 /// pagination line when the page is truncated, and the coverage notes. A
 /// `name_match` line ends in `?`; a candidate bound to another declaration
@@ -297,6 +314,22 @@ pub fn human(value: &Value) -> String {
     }
     output.push_str(&header);
     output.push('\n');
+    // LR2: say how many same-name uses evidence excluded, so a reader knows
+    // candidate mode would list more.
+    let excluded = ["incompatible_form", "unrelated_receiver"]
+        .iter()
+        .map(|reason| value["by_exclusion"][*reason].as_u64().unwrap_or(0))
+        .sum::<u64>();
+    if excluded > 0 {
+        let noun = if excluded == 1 {
+            "name match"
+        } else {
+            "name matches"
+        };
+        output.push_str(&format!(
+            "{excluded} {noun} excluded by evidence (see --mode candidates)\n"
+        ));
+    }
 
     let items = value["references"]
         .as_array()

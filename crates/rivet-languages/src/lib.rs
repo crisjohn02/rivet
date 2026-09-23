@@ -137,6 +137,8 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **11** — LR2: `ScopeFacts` gained `anonymous_supertypes`, the names in
+///   each anonymous class's `extends`/`implements` clauses.
 /// - **10** — T36d: the names in a class's `extends`/`implements` clauses, an
 ///   enum's `implements` clause, and an interface's `extends` list are recorded
 ///   as `type` uses (named and anonymous classes alike); an expression scope
@@ -185,13 +187,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=10";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=11";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=10";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=11";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=10";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=11";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

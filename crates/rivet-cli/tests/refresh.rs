@@ -420,6 +420,7 @@ fn stale_bindings_are_re_resolved_without_reparsing() {
                 uses,
                 scopes,
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })

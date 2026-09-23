@@ -526,7 +526,7 @@ fn newer_format_is_refused_untouched_without_force_and_rebuilt_by_force() {
     {
         let conn = open_db(root);
         conn.execute(
-            "UPDATE meta SET value = '2' WHERE key = 'index_format_version'",
+            "UPDATE meta SET value = '3' WHERE key = 'index_format_version'",
             [],
         )
         .expect("bump format");
@@ -565,7 +565,7 @@ fn newer_format_is_refused_untouched_without_force_and_rebuilt_by_force() {
             |row| row.get(0),
         )
         .expect("format version");
-    assert_eq!(version, "1");
+    assert_eq!(version, "2");
     assert_eq!(
         fs::read(root.join(".rivet/config.toml")).unwrap(),
         config_before
@@ -595,4 +595,52 @@ fn force_refuses_a_symlinked_database_without_touching_it() {
             .file_type()
             .is_symlink()
     );
+}
+
+/// RELEASING "Index format version": "supported older formats rebuild"
+/// (LR2). A version-1 cache, which predates `receiver_classes`, is rebuilt by
+/// an ordinary refresh with the same answers as a fresh index, while
+/// `--no-refresh`, which must not write, refuses it untouched with a hint.
+#[test]
+fn older_supported_format_is_rebuilt_by_a_normal_refresh() {
+    let temp = fixture_repo("older");
+    let root = temp.path();
+    let normal = parse_success(&run(root, &["refs", "App\\Boot\\launch", "--json"]));
+    {
+        let conn = open_db(root);
+        conn.execute_batch(
+            "DROP TABLE receiver_classes; \
+             UPDATE meta SET value = '1' WHERE key = 'index_format_version';",
+        )
+        .expect("downgrade to format 1");
+        conn.pragma_update(None, "journal_mode", "DELETE")
+            .expect("checkpoint");
+    }
+    let db_before = fs::read(db_path(root)).expect("read db");
+
+    let error = parse_error(
+        &run(
+            root,
+            &["refs", "App\\Boot\\launch", "--no-refresh", "--json"],
+        ),
+        3,
+    );
+    assert_eq!(error["error"], "repository_unavailable");
+    assert!(error.to_string().contains("rivet index"), "{error}");
+    assert_eq!(
+        fs::read(db_path(root)).expect("read db"),
+        db_before,
+        "--no-refresh must leave an older-format database unchanged"
+    );
+
+    let rebuilt = parse_success(&run(root, &["refs", "App\\Boot\\launch", "--json"]));
+    assert_eq!(rebuilt, normal);
+    let version: String = open_db(root)
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'index_format_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("format version");
+    assert_eq!(version, "2");
 }

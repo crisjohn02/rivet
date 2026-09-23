@@ -22,11 +22,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rivet_core::extract::SupertypeRelation;
-use rivet_core::{ImportKind, RefKind, Span, SymbolKind};
+use rivet_core::{RefKind, Span, SymbolKind};
 use rivet_store::{BindingRow, Error, ScopeRow, Store, SymbolRow, UseRow};
 use serde::Deserialize;
 
-use crate::resolve::{Resolver, ScopeFacts};
+use crate::resolve::Resolver;
+use crate::resolve::rules::php_qualified_name;
 
 /// One declared supertype of a class-like symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,11 +82,22 @@ struct PersistedSupertype {
     span: Span,
 }
 
+/// The persisted `anonymous_supertypes` entry of `scopes.facts_json` (LR2).
+#[derive(Deserialize)]
+struct PersistedAnonymousSupertype {
+    class_start: u32,
+    relation: SupertypeRelation,
+    spelling: String,
+    span: Span,
+}
+
 /// The only part of `scopes.facts_json` this module reads.
 #[derive(Deserialize, Default)]
 struct PersistedHierarchyFacts {
     #[serde(default)]
     supertypes: Vec<PersistedSupertype>,
+    #[serde(default)]
+    anonymous_supertypes: Vec<PersistedAnonymousSupertype>,
 }
 
 /// Every class-like's declared direct supertypes in one snapshot.
@@ -93,6 +105,10 @@ struct PersistedHierarchyFacts {
 pub struct Hierarchy {
     /// Canonical class-like ID -> sorted, deduplicated direct supertypes.
     direct: BTreeMap<String, Vec<Supertype>>,
+    /// Anonymous class key (`file@start_byte`) -> its sorted, deduplicated
+    /// direct supertypes (LR2). Anonymous classes are not symbols; they are
+    /// kept only as possible subtypes of what they name.
+    anonymous: BTreeMap<String, Vec<Supertype>>,
 }
 
 impl Hierarchy {
@@ -129,7 +145,30 @@ impl Hierarchy {
             .collect();
         let resolver = Resolver::new(symbols, uses, scopes);
 
+        // A supertype is resolved exactly when its `type` use (same file and
+        // span) is bound to an indexed class-like; otherwise it keeps PHP's
+        // compile-time qualified name of the spelling, when trustworthy.
+        let resolve_name = |file: &str, span: Span, spelling: &str| {
+            let use_row = type_uses
+                .get(&(file, span.start_byte(), span.end_byte()))
+                .copied();
+            let target = use_row
+                .and_then(|row| row.use_id)
+                .and_then(|use_id| bound.get(&use_id).copied())
+                .and_then(|id| class_like.get(id).copied());
+            match target {
+                Some(row) => (Some(row.qualified_name.clone()), Some(row.id.clone())),
+                None => {
+                    let qname = use_row.and_then(|row| {
+                        php_qualified_name(spelling, &resolver.scope_facts_for(row))
+                    });
+                    (qname, None)
+                }
+            }
+        };
+
         let mut direct: BTreeMap<String, Vec<Supertype>> = BTreeMap::new();
+        let mut anonymous: BTreeMap<String, Vec<Supertype>> = BTreeMap::new();
         for scope in scopes {
             let parsed = serde_json::from_str::<PersistedHierarchyFacts>(&scope.facts_json)
                 .unwrap_or_default();
@@ -142,26 +181,8 @@ impl Hierarchy {
                 {
                     continue;
                 }
-                let use_row = type_uses
-                    .get(&(
-                        scope.file.as_str(),
-                        fact.span.start_byte(),
-                        fact.span.end_byte(),
-                    ))
-                    .copied();
-                let target = use_row
-                    .and_then(|row| row.use_id)
-                    .and_then(|use_id| bound.get(&use_id).copied())
-                    .and_then(|id| class_like.get(id).copied());
-                let (qualified_name, resolved) = match target {
-                    Some(row) => (Some(row.qualified_name.clone()), Some(row.id.clone())),
-                    None => {
-                        let qname = use_row.and_then(|row| {
-                            php_qualified_name(&fact.spelling, &resolver.scope_facts_for(row))
-                        });
-                        (qname, None)
-                    }
-                };
+                let (qualified_name, resolved) =
+                    resolve_name(scope.file.as_str(), fact.span, &fact.spelling);
                 direct.entry(fact.symbol).or_default().push(Supertype {
                     relation: fact.relation,
                     spelling: fact.spelling,
@@ -169,11 +190,24 @@ impl Hierarchy {
                     resolved,
                 });
             }
+            for fact in parsed.anonymous_supertypes {
+                let (qualified_name, resolved) =
+                    resolve_name(scope.file.as_str(), fact.span, &fact.spelling);
+                anonymous
+                    .entry(format!("{}@{}", scope.file, fact.class_start))
+                    .or_default()
+                    .push(Supertype {
+                        relation: fact.relation,
+                        spelling: fact.spelling,
+                        qualified_name,
+                        resolved,
+                    });
+            }
         }
-        for list in direct.values_mut() {
+        for list in direct.values_mut().chain(anonymous.values_mut()) {
             sort_dedup(list);
         }
-        Hierarchy { direct }
+        Hierarchy { direct, anonymous }
     }
 
     /// Declared direct supertypes of `class`, each resolved to the indexed
@@ -194,33 +228,68 @@ impl Hierarchy {
     /// accepts) leads back to it. An unresolved ancestor is kept as a name
     /// and not traversed further.
     pub fn ancestors(&self, class: &str) -> Vec<Supertype> {
-        let start = Supertype {
-            relation: SupertypeRelation::Extends,
-            spelling: String::new(),
-            qualified_name: None,
-            resolved: Some(class.to_string()),
-        };
-        let mut seen: BTreeSet<(u8, String)> = BTreeSet::from([start.identity()]);
-        let mut expanded: BTreeSet<String> = BTreeSet::from([class.to_string()]);
+        self.closure(
+            Some(class),
+            self.direct.get(class).map_or(&[][..], Vec::as_slice),
+        )
+    }
+
+    /// The anonymous classes of the snapshot (LR2), each as its key
+    /// (`file@start_byte`, sorted) and its transitive supertypes, computed
+    /// like [`ancestors`](Self::ancestors) from its header.
+    pub fn anonymous_ancestors(&self) -> Vec<(String, Vec<Supertype>)> {
+        self.anonymous
+            .iter()
+            .map(|(key, direct)| (key.clone(), self.closure(None, direct)))
+            .collect()
+    }
+
+    /// Whether any declared supertype, of a named or an anonymous class, has
+    /// no qualified name (LR2): such a link could name any class.
+    pub fn has_unknown_link(&self) -> bool {
+        self.direct
+            .values()
+            .chain(self.anonymous.values())
+            .flatten()
+            .any(|entry| entry.qualified_name.is_none())
+    }
+
+    /// The transitive closure starting from `direct`, the direct supertypes
+    /// of `class` (`None` for an anonymous class), sorted, cycle-safe, and
+    /// never listing `class` itself.
+    fn closure(&self, class: Option<&str>, direct: &[Supertype]) -> Vec<Supertype> {
+        let mut seen: BTreeSet<(u8, String)> = BTreeSet::new();
+        let mut expanded: BTreeSet<String> = BTreeSet::new();
+        if let Some(class) = class {
+            let start = Supertype {
+                relation: SupertypeRelation::Extends,
+                spelling: String::new(),
+                qualified_name: None,
+                resolved: Some(class.to_string()),
+            };
+            seen.insert(start.identity());
+            expanded.insert(class.to_string());
+        }
         let mut result = Vec::new();
-        let mut frontier = vec![class.to_string()];
-        while !frontier.is_empty() {
+        let mut level: Vec<&Supertype> = direct.iter().collect();
+        while !level.is_empty() {
             let mut next = Vec::new();
-            for current in &frontier {
-                for supertype in self.direct.get(current).into_iter().flatten() {
-                    if !seen.insert(supertype.identity()) {
-                        continue;
-                    }
-                    if let Some(id) = &supertype.resolved
-                        && expanded.insert(id.clone())
-                    {
-                        next.push(id.clone());
-                    }
-                    result.push(supertype.clone());
+            for supertype in level {
+                if !seen.insert(supertype.identity()) {
+                    continue;
                 }
+                if let Some(id) = &supertype.resolved
+                    && expanded.insert(id.clone())
+                {
+                    next.push(id.clone());
+                }
+                result.push(supertype.clone());
             }
             next.sort();
-            frontier = next;
+            level = next
+                .iter()
+                .flat_map(|id| self.direct.get(id).into_iter().flatten())
+                .collect();
         }
         result.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
         result
@@ -254,68 +323,10 @@ fn is_class_like(kind: SymbolKind) -> bool {
     )
 }
 
-/// PHP's compile-time resolution of a class-name spelling (PHP manual,
-/// "Name resolution rules"), without a leading `\`.
-///
-/// - `\A\B` is already fully qualified.
-/// - `namespace\A` is relative to the current namespace.
-/// - Otherwise the first segment is looked up among the visible class
-///   imports (case-insensitively); a match replaces it with the import's
-///   target.
-/// - Otherwise the current namespace is prefixed.
-///
-/// `None` when the namespace cannot be attributed (AF1) or when imports with
-/// different targets claim the first segment, which PHP rejects and the index
-/// never guesses between.
-fn php_qualified_name(spelling: &str, facts: &ScopeFacts) -> Option<String> {
-    if facts.namespace_unattributed {
-        return None;
-    }
-    if let Some(rest) = spelling.strip_prefix('\\') {
-        return (!rest.is_empty()).then(|| rest.to_string());
-    }
-    let namespace = facts.namespace.as_deref().unwrap_or("");
-    let prefixed = |name: &str| {
-        if namespace.is_empty() {
-            name.to_string()
-        } else {
-            format!("{namespace}\\{name}")
-        }
-    };
-    if let Some((first, rest)) = spelling.split_once('\\')
-        && first.eq_ignore_ascii_case("namespace")
-    {
-        return (!rest.is_empty()).then(|| prefixed(rest));
-    }
-    let (first, rest) = match spelling.split_once('\\') {
-        Some((first, rest)) => (first, Some(rest)),
-        None => (spelling, None),
-    };
-    let targets: BTreeSet<&str> = facts
-        .imports
-        .iter()
-        .filter(|import| {
-            import.kind == ImportKind::Class && import.alias.eq_ignore_ascii_case(first)
-        })
-        .map(|import| import.target_qualified.trim_start_matches('\\'))
-        .collect();
-    match targets.len() {
-        0 => Some(prefixed(spelling)),
-        1 => {
-            let target = targets.into_iter().next()?;
-            Some(match rest {
-                Some(rest) => format!("{target}\\{rest}"),
-                None => target.to_string(),
-            })
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::php_qualified_name;
     use crate::resolve::ScopeFacts;
+    use crate::resolve::rules::php_qualified_name;
     use rivet_core::extract::ScopeImport;
     use rivet_core::{ImportKind, Span};
 

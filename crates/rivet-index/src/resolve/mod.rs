@@ -14,13 +14,15 @@
 //! refresh path builds a [`Resolver`] directly over the rows it is about to
 //! publish, so resolved links land in the same publication transaction.
 
-mod rules;
+pub(crate) mod rules;
 
 use std::collections::{HashMap, HashSet};
 
 use rivet_core::extract::{CallArg, NewBinding, ScopeImport};
 use rivet_core::{ParseStatus, RefKind, Resolution, Span, SymbolKind};
-use rivet_store::{BindingRow, Error, FileRow, ScopeRow, Store, SymbolRow, UseRow};
+use rivet_store::{
+    BindingRow, Error, FileRow, ReceiverClassRow, ScopeRow, Store, SymbolRow, UseRow,
+};
 use serde::Deserialize;
 
 /// The canonical ID of the one declaration a rule selected.
@@ -380,6 +382,16 @@ fn member_name_matches(kind: SymbolKind, name: &str, spelling: &str) -> bool {
     }
 }
 
+/// The resolver's output for one snapshot (LR2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedLinks {
+    /// Every binding, in use order.
+    pub bindings: Vec<BindingRow>,
+    /// Every determined receiver class of an unbound member or scoped use,
+    /// in use order.
+    pub receiver_classes: Vec<ReceiverClassRow>,
+}
+
 /// Resolves every persisted use for one snapshot.
 pub struct Resolver<'a> {
     ctx: RuleCtx<'a>,
@@ -447,11 +459,27 @@ impl<'a> Resolver<'a> {
 
     /// Applies the ordered rules to every use and returns the bindings.
     ///
+    /// Equivalent to [`Resolver::resolve_links`] without its receiver classes.
+    pub fn resolve(&self) -> Vec<BindingRow> {
+        self.resolve_links().bindings
+    }
+
+    /// Applies the ordered rules to every use and returns the bindings plus,
+    /// for each member or scoped use no rule bound, the receiver class a
+    /// receiver rule determined for it (LR2).
+    ///
     /// Uses are visited in `(file bytes, start_byte, end_byte, ref_kind)` order
     /// so the result is deterministic and independent of input order. A use
     /// with no SQLite ID is skipped: it is not a committed row and cannot be
     /// the target of a foreign key.
-    pub fn resolve(&self) -> Vec<BindingRow> {
+    ///
+    /// A receiver class is recorded under the same conditions the receiver
+    /// rules apply before binding (the enclosing class of `$this`/`self`, a
+    /// trusted `new` or typed receiver, a class named before `::`), never for
+    /// a use in an unattributed namespace, and never for a bound use. It is
+    /// evidence about the receiver, not a link: it names no member and carries
+    /// no tier.
+    pub fn resolve_links(&self) -> ResolvedLinks {
         let mut ordered: Vec<&UseRow> = self.uses.iter().collect();
         ordered.sort_by(|a, b| {
             a.file
@@ -463,6 +491,7 @@ impl<'a> Resolver<'a> {
         });
 
         let mut bindings = Vec::new();
+        let mut receiver_classes = Vec::new();
         for use_row in ordered {
             let Some(use_id) = use_row.use_id else {
                 continue;
@@ -473,18 +502,41 @@ impl<'a> Resolver<'a> {
             if facts.namespace_unattributed {
                 continue;
             }
-            for rule in RULES {
-                if let Some((target_id, resolution)) = rule(&self.ctx, use_row, &facts) {
-                    bindings.push(BindingRow {
-                        use_id,
-                        target_id,
-                        resolution,
-                    });
-                    break;
-                }
+            let bound = RULES
+                .iter()
+                .find_map(|rule| rule(&self.ctx, use_row, &facts));
+            if let Some((target_id, resolution)) = bound {
+                bindings.push(BindingRow {
+                    use_id,
+                    target_id,
+                    resolution,
+                });
+                continue;
+            }
+            // Only a use naming a member kind has a receiver class (AF2).
+            if MemberUse::of(use_row, &facts).is_none() {
+                continue;
+            }
+            let evidence = rules::receivers::receiver_class(&self.ctx, use_row, &facts)
+                .or_else(|| rules::new_expr::receiver_class(&self.ctx, use_row, &facts));
+            if let Some(evidence) = evidence {
+                let (class_qname, class_id) = match evidence {
+                    rules::ClassEvidence::Indexed(row) => {
+                        (row.qualified_name.clone(), Some(row.id.clone()))
+                    }
+                    rules::ClassEvidence::Named(qname) => (qname, None),
+                };
+                receiver_classes.push(ReceiverClassRow {
+                    use_id,
+                    class_qname,
+                    class_id,
+                });
             }
         }
-        bindings
+        ResolvedLinks {
+            bindings,
+            receiver_classes,
+        }
     }
 
     /// Gathers the lexical facts visible from `use_row`.
@@ -558,6 +610,11 @@ pub fn unindexed_php_files(files: &[FileRow]) -> bool {
 
 /// Loads one committed snapshot and resolves every persisted use.
 pub fn resolve_all(store: &Store) -> Result<Vec<BindingRow>, Error> {
+    Ok(resolve_all_links(store)?.bindings)
+}
+
+/// [`resolve_all`] with the determined receiver classes (LR2).
+pub fn resolve_all_links(store: &Store) -> Result<ResolvedLinks, Error> {
     let symbols = store.list_symbols()?;
     let files = store.list_files()?;
     let mut uses = Vec::new();
@@ -568,7 +625,7 @@ pub fn resolve_all(store: &Store) -> Result<Vec<BindingRow>, Error> {
     }
     let resolver = Resolver::new(&symbols, &uses, &scopes)
         .with_unindexed_php_files(unindexed_php_files(&files));
-    Ok(resolver.resolve())
+    Ok(resolver.resolve_links())
 }
 
 #[cfg(test)]
@@ -697,6 +754,7 @@ mod tests {
                 uses,
                 scopes,
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
@@ -1249,6 +1307,7 @@ mod tests {
                 uses,
                 scopes,
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })

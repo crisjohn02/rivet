@@ -398,11 +398,41 @@ Apply the following only within supported lexical scopes:
 4. A direct import with a supported module/export lookup and no shadowing → `exact` for the imported declaration; member access still requires receiver evidence.
 5. Unique spelling across the index → `name_match`, never an automatic tier upgrade.
 
-Reject conflicting hints and multiple candidates. No inferred types, inheritance traversal, interface-to-implementation mapping, PHP late-static dispatch resolution, or TypeScript path-alias/re-export/package resolution in v0.1. Unsupported forms stay visible as candidates; the language support matrix in [ADDING-A-LANGUAGE](docs/ADDING-A-LANGUAGE.md) defines the boundary.
+Reject conflicting hints and multiple candidates. No inferred types, inheritance traversal for binding, interface-to-implementation mapping, PHP late-static dispatch resolution, or TypeScript path-alias/re-export/package resolution in v0.1. Declared supertypes are stored, but only reference-mode exclusion (§11.5) reads them; they never bind a use or change a tier. Unsupported forms stay visible as candidates; the language support matrix in [ADDING-A-LANGUAGE](docs/ADDING-A-LANGUAGE.md) defines the boundary.
 
 ## 11.5 Coverage and Reference Modes
 
 `refs` defaults to `--mode references`: include uses linked to the target and unresolved uses with the same name; exclude uses confidently linked to another declaration. Aliased imports contribute references through their binding, even when their spelling differs from the target name.
+
+**Evidence-based exclusion (LR2).** In `--mode references`, an unresolved use whose name matches the target is also excluded when evidence shows it cannot refer to the target. There are exactly two kinds of evidence:
+
+1. *Use form incompatible with the target kind.* The table below is derived from the forms the PHP extractor records (a "receiver" is `->`, `?->`, or `::`):
+
+   | Target | Compatible unresolved use forms |
+   |---|---|
+   | method | `call` or `read` with a receiver (`__get` can dispatch a property read to a method; a `write` stays excluded, since `__set` never invokes a same-named method) |
+   | function | `call` without a receiver; `import` |
+   | property | `read` or `write` with a receiver |
+   | class constant or enum case | `read` with a receiver |
+   | global constant | `import` |
+   | class, interface, enum, trait | `type` (including `new`, `instanceof`, `extends`/`implements`, the class before `::`); `import` |
+   | namespace | every form |
+
+   Any other form is excluded. `unknown` is never excluded: the extractor records bare constant names, qualified constant names, and a trait `use` inside a class body that way. `assignment` is never recorded by the PHP extractor and is never excluded. Rule 1 does not tell a class-constant read from an instance-property read with a receiver (both are `read`), so neither excludes the other. The extractor records no callable strings or callable arrays (single-quoted strings and literal string portions are not code), so no such form exists to keep or exclude.
+
+2. *Receiver class known, with no possible common instance.* A member or scoped use whose receiver class R was determined by a receiver rule (§11.4: `$this` or `self` inside a class body, a trusted `new` assignment, an explicit typed receiver, or a class named before `::`), under exactly the trust conditions that rule applies before binding, is excluded only when no object could be an instance of both R and the target's declaring class-like T. Rationale: exclusion must be sound; an excluded use cannot dispatch to the target under the stated assumption.
+
+   Let `up(X)` be X plus its transitive declared supertypes (`extends`/`implements`, from the stored hierarchy), and let the *subtypes of T* be every class-like X with T in `up(X)`: indexed classes, interfaces, and enums, including T itself, and every anonymous class, whose header supertypes are recorded for this purpose although it is not a symbol. Two names are the same class when they share an indexed declaration or their qualified names are equal under ASCII case-insensitive comparison. R need not be indexed: a spelling no indexed class-like has keeps the qualified name PHP's compile-time name resolution gives it. R and T are related, and the use is kept, when:
+   - (a) R is in `up(X)` for some subtype X of T; or
+   - (b) R is not indexed and some subtype X of T has an unindexed link in its ancestor closure, since the unknown part of X's chain might contain R (so `Model $m; $m->save()` is kept for `App\User::save` when `User` reaches a vendor class).
+
+   Assumption: an unindexed (vendor) class never extends or implements an indexed class, so an indexed T is in `up(X)` only for an indexed or anonymous X. Never exclude, in addition, when:
+   - T is, or may be, a trait (a trait is class-kind; only a declaration header that starts with `class`, `final`, `abstract`, or `readonly` after its attributes proves a class), or R is an indexed declaration that may be a trait: trait use is not tracked;
+   - the receiver rule refuses to determine a class (conflicting or rebound hints, a union type, `static::`, `parent::`, `self` as a declared type, an anonymous class, an unattributed namespace);
+   - R's name has no qualified name (two imports claim its alias, or its namespace is unattributed), or an indexed class-like with that qualified name exists that the rule could not select uniquely;
+   - any declared supertype in the snapshot, of a named or an anonymous class, has no qualified name: it could name any class, so rule 2 excludes nothing in that snapshot.
+
+Exclusion is not resolution: an excluded use stays unresolved, is never bound, and keeps its tier; `--mode candidates` lists it exactly as before. A use bound to the target is never excluded. Exclusion applies after the kind and resolution filters and before pagination; `refs` reports the per-evidence counts as `by_exclusion` (OUTPUT-CONTRACT). `context` callers and `symbol.called_by` use reference-mode matching and inherit the rule; `symbol.calls` (containment) is unaffected.
 
 `--mode candidates` is the lexical audit mode: also include every extracted identifier use with the target's normalized unqualified name, including those bound elsewhere. Such unrelated candidates are reported as `name_match` relative to the queried symbol, with their actual `resolved_target` retained for inspection. Apply kind/tier filters before pagination; a call site appears once, with kind `call`.
 
@@ -430,7 +460,7 @@ Interpolated expressions inside strings/templates are code and must be extracted
 
 **Symbols:** id, name, qualified name, kind, file, start and end byte, start and end line, parent symbol, language, signature text.
 
-**Relationships:** `defines`, `references`, `calls`, `imports`, `extends`, `implements`, `contains`, `tested_by`. Reference and call links carry a `resolution` tier (§11.3). The MVP stores named symbols, their containment, import bindings, and identifier uses (including calls and type positions). Parent relationships and reference-based test context are derived from these records; inheritance and a separate `tested_by` graph are deferred. Top-level uses have a nullable containing symbol and are never discarded.
+**Relationships:** `defines`, `references`, `calls`, `imports`, `extends`, `implements`, `contains`, `tested_by`. Reference and call links carry a `resolution` tier (§11.3). The MVP stores named symbols, their containment, import bindings, and identifier uses (including calls and type positions). Parent relationships and reference-based test context are derived from these records. Declared `extends`/`implements` supertypes are stored (T36d) and read only by reference-mode exclusion (§11.5), never to resolve or bind a use; inheritance traversal for binding and a separate `tested_by` graph are deferred. Top-level uses have a nullable containing symbol and are never discarded.
 
 ## 12.3 Incremental Indexing
 
