@@ -171,6 +171,7 @@ Read: BENCHMARK pilot, isolation, collected metrics, and decision rules; IMPLEME
 | [x] | T38 | Define 4–6 objective B/C pilot tasks and their checks using available harness access. Estimate model usage/cost from available evidence. | Starting states and gold solutions pass their checks; prompts, run caps, and artifacts are defined. No paid runs are launched as part of planning. |
 | [x] | T39 | Run the agreed small pilot, retaining successes, failures, token usage, wall time, and transcripts. | Both arms run under comparable limits, including indexing cost. If credentials, access, or an explicit run/spend budget are missing, record the blocker instead of consuming unspecified usage. |
 | [x] | T40 | Write a short pilot result and choose the next smallest change. | Report reference usefulness, adoption, tokens, latency, and limitations. Choose fix/retest, proceed to TypeScript, or re-scope; do not label the pilot a passed confirmatory benchmark. |
+| [ ] | SN1 | Change the managed snippet to recommend the compact text output instead of `--json`, which pilot-01 agents never used. User-approved treatment change. | `rivet snippet` and docs/AGENT-SNIPPET.md agree byte for byte with only the one sentence changed; the new snippet hash is recorded. |
 
 **Gate G:** T41 onward stays deferred until the pilot supports spending further effort. No full 300+ run benchmark is implied by completing this queue's PHP tasks.
 
