@@ -1,0 +1,9 @@
+id = "demo-locate"
+project = "demo"
+category = "locate"
+check = "exact_symbol"
+
+[limits]
+max_budget_usd = 1.0
+max_turns = 10
+wall_seconds = 20

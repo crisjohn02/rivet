@@ -1,0 +1,7 @@
+# Synthetic corpus manifest for runner tests only.
+schema_version = 1
+
+[[project]]
+name = "demo"
+commit = "0000000000000000000000000000000000000000"
+languages = ["php"]

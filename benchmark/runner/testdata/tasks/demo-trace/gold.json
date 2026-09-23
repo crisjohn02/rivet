@@ -1,0 +1,20 @@
+{
+  "accepted_paths": [
+    [
+      {
+        "file": "src/Billing/Invoice.php",
+        "symbol": "App\\Billing\\Invoice::total"
+      },
+      {
+        "file": "src/Billing/Invoice.php",
+        "symbol": "App\\Billing\\Invoice::sum"
+      }
+    ],
+    [
+      {
+        "file": "src/Billing/Invoice.php",
+        "symbol": "App\\Billing\\Invoice::total"
+      }
+    ]
+  ]
+}

@@ -1,0 +1,59 @@
+# Pilot study manifest (T38a format; see benchmark/runner/TASK-FORMAT.md).
+# Public-safe: opaque task IDs and harness settings only. Tasks, prompts and
+# gold answers live in $RIVET_PILOT_TASKS_DIR; run artifacts in
+# $RIVET_PILOT_RUNS_DIR. Both are private and outside this repository.
+schema_version = 1
+study_id = "demo-study"
+kind = "pilot"
+
+# Synthetic study for runner tests.
+tasks = ["demo-locate"]
+
+arms = ["B", "C"]
+trials = 1
+seed = 7
+retry_rule = "rerun_block_once"
+
+# Hard cap across the whole study, including retries. Before each block and
+# each run the runner requires charged + max_budget_usd + reserve <= cap.
+budget_cap_usd = 25.0
+# Claude Code checks --max-budget-usd between turns, so one run can end a
+# little above its own budget; the reserve is that allowance.
+per_run_reserve_usd = 0.25
+
+[harness]
+model = "claude-opus-5-5"
+settings = '{"effortLevel":"high"}'
+flags = [
+  "-p",
+  "--setting-sources", "project",
+  "--strict-mcp-config",
+  "--disable-slash-commands",
+  "--no-session-persistence",
+  "--output-format", "stream-json",
+  "--verbose",
+  "--permission-prompts", "none",
+]
+# Built-in tools that exist in the session at all (--tools).
+tools = ["Read", "Grep", "Glob", "Bash"]
+# docs/BENCHMARK.md "Config B prompt, verbatim"; both arms. The runner
+# refuses the manifest if this ever differs from that document.
+append_system_prompt = """
+When searching code, prefer `rg -n <pattern> <dir>` scoped to a likely directory over repository-wide searches. Read specific line ranges rather than whole files. Before reading a file, search for the symbol's definition and read only the enclosing function or class."""
+
+[arms_config.B]
+rivet = false
+allowed_tools = ["Read", "Grep", "Glob", "Bash(rg:*)", "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)"]
+disallowed_tools = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Bash(rivet:*)"]
+
+[arms_config.C]
+rivet = true
+snippet_file = "CLAUDE.md"
+allowed_tools = ["Read", "Grep", "Glob", "Bash(rg:*)", "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)", "Bash(rivet:*)"]
+disallowed_tools = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task"]
+
+[sandbox]
+# The runner always adds the tasks, corpus and runs directories.
+deny_read_paths = []
+deny_read_regexes = []
+deny_rivet_exec_in_b = true

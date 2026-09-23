@@ -1,0 +1,3 @@
+{"apiKeySource": "none", "cwd": "{{WORKSPACE}}", "mcp_servers": [], "model": "claude-opus-5-5", "session_id": "s", "subtype": "init", "tools": ["Read", "Grep", "Glob", "Bash"], "type": "system"}
+{"message": {"content": [{"text": "Found it.\n```json\n{\"file\": \"./src/Billing/Invoice.php\", \"symbol\": \"App\\\\Billing\\\\Invoice::total\"}\n```\n", "type": "text"}], "id": "msg_1", "model": "claude-opus-5-5", "role": "assistant"}, "type": "assistant"}
+{"duration_ms": 4200, "is_error": false, "num_turns": 1, "result": "Found it.\n```json\n{\"file\": \"./src/Billing/Invoice.php\", \"symbol\": \"App\\\\Billing\\\\Invoice::total\"}\n```\n", "subtype": "success", "type": "result"}

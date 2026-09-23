@@ -23,3 +23,6 @@ Thumbs.db
 
 # Local scratch
 /tmp/
+
+# Python bytecode (benchmark runner)
+__pycache__/
