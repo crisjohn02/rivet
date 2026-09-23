@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T40 |
+| Last completed task | T36d |
 | Next task | User decision on the pilot result: fix and retest is recommended (benchmark/results/pilot-01/RESULT.md) |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | SN1: the snippet's `--json` sentence now recommends the compact text output; only that sentence changed (reverting it reproduces the pilot-01 bytes, sha256 0d5a7d0a...119f); new snippet sha256 1819530610c1418d4b0d9bce84363504d99f5029d628558185ede35a82d3b5f7. fmt, clippy -D warnings, 649 workspace tests (1 ignored, T36a), and 51 gold entries pass. |
+| Last checks | T36d: class/interface/enum `extends`/`implements` names (named and anonymous classes) are `type` uses resolved by the existing import/namespace rules; expression scopes before `::` are walked; `ScopeFacts.supertypes` persists each named class-like's declared supertypes in `scopes.facts_json`, read by `rivet_index::Hierarchy` (`direct_supertypes`, `ancestors`). fact-schema 9 -> 10 (resolver fingerprint unchanged; no store schema change). The 12 t34-json goldens changed only in `index.snapshot` (fingerprint bump). fmt, clippy -D warnings, 661 workspace tests (1 ignored, T36a), and 51 gold entries pass. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -147,7 +147,7 @@ Read: ARCHITECTURE concurrency/parse policy; spec §§25–27; AGENT-SNIPPET; OU
 | [ ] | T36a | Make valid `$x->1` interpolation parse. The pinned tree-sitter-php 0.24.2 scanner treats a digit after `->` in a double-quoted string or heredoc as a property name, so valid PHP (for example a heredoc template containing `<?php` and `$v->1`) is reported as `parse_error`. Found by T36. | `parse_failures::interpolated_arrow_before_a_digit_is_valid_php` passes un-ignored through a grammar patch or pin bump, or the limitation is documented and that test is replaced by the honest-report test. |
 | [ ] | T36b | Decide whether the default dependency/build exclusions apply at any depth or only at the root. Today every `vendor/` is excluded, which drops customised package templates such as `resources/views/vendor/`. Spec §26 is silent. Found in the T35 corpus, carried by T36. | Spec §26 states the rule; the walker and `default_excludes_apply_at_any_depth` agree with it. |
 | [ ] | T36c | Settle Git ignore sources outside the root: a worktree does not read the shared `info/exclude` in its common Git directory (its main checkout does), and a symlinked `.gitignore` is followed, possibly outside the root, where Git 2.32+ refuses. Found by T36. | A worktree and its main checkout of the same tree exclude the same files, and a symlinked ignore file is handled by a stated rule, each with a regression test. |
-| [ ] | T36d | Record `extends`/`implements` clauses, and the scope expression of `$expr::$prop`, as uses, so `refs` on a base class lists its subclasses. Audit follow-up, re-confirmed by T36. | Each form appears in `refs` with an honest tier; gold and existing outputs are otherwise unchanged. |
+| [x] | T36d | Record `extends`/`implements` clauses, and the scope expression of `$expr::$prop`, as uses, so `refs` on a base class lists its subclasses. Audit follow-up, re-confirmed by T36. | Each form appears in `refs` with an honest tier; gold and existing outputs are otherwise unchanged. |
 
 **Checkpoint F:** run the complete PHP workspace checks once. The pilot requires a real working slice, not all future platform/release infrastructure. An unresolved correctness gap blocks pilot interpretation.
 

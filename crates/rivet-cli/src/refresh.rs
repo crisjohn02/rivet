@@ -1285,7 +1285,7 @@ fn use_rows(
 #[cfg(feature = "lang-php")]
 fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String]) -> Vec<ScopeRow> {
     use rivet_core::Span;
-    use rivet_core::extract::{CallArg, NewBinding, ScopeImport, TypedBinding};
+    use rivet_core::extract::{CallArg, NewBinding, ScopeImport, SupertypeRelation, TypedBinding};
 
     /// One declaration's by-reference parameter flags, keyed by canonical ID
     /// (AF3).
@@ -1293,6 +1293,15 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
     struct PersistedParameterList<'a> {
         symbol: &'a str,
         by_ref: &'a [bool],
+    }
+
+    /// One declared supertype of a class-like, keyed by canonical ID (T36d).
+    #[derive(serde::Serialize)]
+    struct PersistedSupertype<'a> {
+        symbol: &'a str,
+        relation: SupertypeRelation,
+        spelling: &'a str,
+        span: Span,
     }
 
     /// The exact persisted `scopes.facts_json` shape.
@@ -1311,6 +1320,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         global_names: &'a [String],
         dynamic_global_write: bool,
         parameter_lists: Vec<PersistedParameterList<'a>>,
+        supertypes: Vec<PersistedSupertype<'a>>,
         declares: Vec<&'a str>,
     }
 
@@ -1335,6 +1345,19 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                     })
                 })
                 .collect();
+            let supertypes: Vec<PersistedSupertype> = scope
+                .facts
+                .supertypes
+                .iter()
+                .filter_map(|supertype| {
+                    ids.get(supertype.symbol).map(|id| PersistedSupertype {
+                        symbol: id.as_str(),
+                        relation: supertype.relation,
+                        spelling: &supertype.spelling,
+                        span: supertype.span,
+                    })
+                })
+                .collect();
             let facts = PersistedScopeFacts {
                 imports: &scope.facts.imports,
                 typed_bindings: &scope.facts.typed_bindings,
@@ -1349,6 +1372,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                 global_names: &scope.facts.global_names,
                 dynamic_global_write: scope.facts.dynamic_global_write,
                 parameter_lists,
+                supertypes,
                 declares,
             };
             ScopeRow {

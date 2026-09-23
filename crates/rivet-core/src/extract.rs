@@ -368,12 +368,54 @@ pub struct ParameterList {
     pub by_ref: Vec<bool>,
 }
 
+/// How a class-like declaration names one supertype (T36d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupertypeRelation {
+    /// A class's `extends` parent, or one name of an interface's `extends`
+    /// list.
+    Extends,
+    /// One name of a class's or enum's `implements` list.
+    Implements,
+}
+
+impl SupertypeRelation {
+    /// The snake_case form used in persisted facts.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SupertypeRelation::Extends => "extends",
+            SupertypeRelation::Implements => "implements",
+        }
+    }
+}
+
+/// One supertype a named class-like declaration names in its header (T36d).
+///
+/// The name is kept exactly as written. Its lexical context (namespace and
+/// imports) is not duplicated: the same name is also recorded as a
+/// [`RefKind::Type`] use with span [`span`](Self::span), whose scope chain
+/// carries it, and whose binding (if any) is the resolved supertype.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredSupertype {
+    /// Index of the declaring class-like symbol in the owning
+    /// [`ExtractedFile::symbols`]; persistence rewrites it to the canonical
+    /// symbol ID, as for [`ScopeFacts::declares`].
+    pub symbol: usize,
+    /// Whether the name appears in an `extends` or an `implements` clause.
+    pub relation: SupertypeRelation,
+    /// The name as written (`Base`, `Lib\Base`, `\Vendor\Base`).
+    pub spelling: String,
+    /// The span of the name, identical to its type use's span.
+    pub span: Span,
+}
+
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
 /// `new_bindings`, `call_args`, `unanalysable`, `namespace_unattributed`,
 /// `class_constant_accesses`, `global_scope`, `call_sites`, `goto_present`,
-/// `global_names`, `dynamic_global_write`, `parameter_lists`, and `declares`.
+/// `global_names`, `dynamic_global_write`, `parameter_lists`, `supertypes`, and
+/// `declares`.
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -447,6 +489,10 @@ pub struct ScopeFacts {
     /// directly in this scope (AF3), in symbol order.
     #[serde(default)]
     pub parameter_lists: Vec<ParameterList>,
+    /// Declared supertypes of each named class, interface, and enum declared
+    /// directly in this scope (T36d), in symbol order, then source order.
+    #[serde(default)]
+    pub supertypes: Vec<DeclaredSupertype>,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,
 }

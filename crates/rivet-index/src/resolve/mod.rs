@@ -488,7 +488,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// Gathers the lexical facts visible from `use_row`.
-    fn scope_facts_for(&self, use_row: &UseRow) -> ScopeFacts {
+    pub(crate) fn scope_facts_for(&self, use_row: &UseRow) -> ScopeFacts {
         let mut facts = ScopeFacts {
             imports: Vec::new(),
             declares: Vec::new(),
