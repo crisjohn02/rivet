@@ -33,5 +33,5 @@ public function runTyped(SurveyService $svc): void
     }
 
 estimated_tokens: 152 / 4000  (tokenizer: utf8-bytes-v1; budget_scope: source)
-coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics
 --- stderr

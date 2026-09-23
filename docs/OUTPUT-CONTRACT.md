@@ -92,6 +92,24 @@ Every successful `index`, `symbol`, `refs`, or `context` response contains `inde
 
 Diagnostics exclude ordinary `unsupported` files (counted above) but include other skipped files and unsupported paths. Sort by `(file bytes, code, start_byte or 0, detail bytes)` and cap at 50 independently of `--limit`. Counts are exhaustive; `truncated` indicates omitted diagnostic items. `code` is an open string. Optional `start_byte` locates a source diagnostic.
 
+Human output ends with one coverage line (CV1) whenever `complete` is false, any `skipped` count is non-zero, or `diagnostics.total` is non-zero; a complete snapshot with no diagnostics prints none. It is the last line of `index`, `symbol`, `refs` and `context` output (after a blank line, except in `context`) and of an index-dependent error on stderr. A `cached` snapshot's `snapshot: cached (--no-refresh); it may not match the working tree` line comes directly before it. The grammar is exactly `coverage <state>: <files_indexed>/<files_seen> files indexed[; skipped <count> <key>[, <count> <key>]...]; <diagnostics>`:
+
+- `<state>` is `complete` or `incomplete`, from `complete`.
+- The `skipped` clause lists only the non-zero counts, each as `<count> <key>`, in the key order of `skipped` (`unsupported`, `binary`, `size`, `encoding`, `parse_error`, `resource_limit`); it is omitted when every count is 0.
+- `<diagnostics>` depends on `total`:
+  - 0: `0 diagnostics`.
+  - 1 or 2: `1 diagnostic: <file> (<code>)`, or `2 diagnostics: <file> (<code>), <file> (<code>)` in the sort order above. `<file>` is the item's `file` exactly: repository-relative, with a non-UTF-8 path's escaped bytes kept escaped.
+  - More than 2: `<total> diagnostics (<count> <code>[, <count> <code>]...)`, naming no path. The counts are of the listed `items`, by descending count and then code bytes. When `truncated` is true, they are prefixed `first <M>: `, where M is the number of items listed.
+- Ordinary `unsupported` files have no diagnostic, so they are counted and never named.
+
+The line never points to `--json`. For example:
+
+- `coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics`
+- `coverage incomplete: 1219/2815 files indexed; skipped 1595 unsupported, 1 parse_error; 1 diagnostic: app/X.php (parse_error)`
+- `coverage incomplete: 9/13 files indexed; skipped 1 unsupported, 1 binary, 2 parse_error; 3 diagnostics (2 parse_error, 1 binary_file)`
+- `coverage incomplete: 250/691 files indexed; skipped 441 unsupported; 50 diagnostics (50 unsupported_language)`
+- `coverage incomplete: 10/70 files indexed; skipped 60 parse_error; 60 diagnostics (first 50: 50 parse_error)`
+
 ## Pagination and resolution
 
 `--limit` is 1–1,000 (default 50). `--offset` is a nonnegative integer (default 0). Apply filters, then sort, count, and slice. `total` counts all matches after filters; `truncated` means some matches are outside the page, including earlier pages. `next_offset` is the next offset if later results exist, otherwise null. An offset beyond the end gives an empty page. `by_resolution` counts all filtered matches before pagination.

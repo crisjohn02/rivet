@@ -10,5 +10,5 @@ SurveyService.php:26:16  App\Services\SurveyService::relaunch     call  scoped
 boot.php:17:7            (file scope)                             call  scoped
 boot.php:22:17           (file scope)                             call  scoped
 
-coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics
 --- stderr

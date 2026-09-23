@@ -16,5 +16,5 @@ called by:
   SurveyService.php:26:16  App\Services\SurveyService::relaunch     scoped
   showing 3-4 of 6; next: --offset 4
 
-coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics
 --- stderr

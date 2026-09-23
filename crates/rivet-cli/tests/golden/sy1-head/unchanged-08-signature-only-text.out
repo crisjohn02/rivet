@@ -9,5 +9,5 @@ parent: SurveyService.php#App\Services\SurveyService
 signature:
   public function launch(): void
 
-coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics
 --- stderr

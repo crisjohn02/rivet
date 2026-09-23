@@ -11,5 +11,5 @@ boot.php:13:1            (file scope)                             call  name_mat
 boot.php:17:7            (file scope)                             call  scoped
 boot.php:22:17           (file scope)                             call  scoped
 
-coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+coverage incomplete: 9/10 files indexed; skipped 1 unsupported; 0 diagnostics
 --- stderr
