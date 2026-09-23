@@ -11,6 +11,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use ignore::WalkBuilder;
@@ -18,13 +19,17 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::Config;
 
-/// Directory names always excluded, as gitignore-style directory patterns.
+/// Names always excluded, as gitignore-style patterns.
 ///
 /// The first two are mandatory per spec §26; the rest are the built-in
 /// dependency/build defaults, which `respect_gitignore = false` does not
-/// disable.
+/// disable. `.git` has no trailing slash so it matches a `.git` *file* too: in
+/// a Git worktree or submodule checkout the root's `.git` is a regular file
+/// pointing at the real Git directory. It is Git metadata, not source, and
+/// admitting it made a worktree report one more unsupported file (and a
+/// different snapshot) than a plain clone of the same tree (T36).
 const MANDATORY_EXCLUDES: [&str; 8] = [
-    ".git/",
+    ".git",
     ".rivet/",
     "node_modules/",
     "vendor/",
@@ -116,6 +121,17 @@ impl std::error::Error for WalkError {
 /// only when `config.index.respect_gitignore` is true. Symlinks, special
 /// files, and nested repositories are never returned or descended into.
 pub fn walk_eligible(root: &Path, config: &Config) -> Result<WalkResult, WalkError> {
+    let respect_gitignore = config.index.respect_gitignore;
+    // The `ignore` crate opens each descended directory's Git ignore files for
+    // reading, and opening a FIFO blocks until a writer appears (spec §27:
+    // never open FIFOs/devices). The root's files are read when the walk
+    // starts, so they are checked here; every other directory is checked in
+    // the entry filter below, which the crate runs before it descends.
+    if respect_gitignore {
+        check_ignore_files(root)?;
+    }
+    let unsafe_ignore_file: Arc<Mutex<Option<WalkError>>> = Arc::new(Mutex::new(None));
+    let filter_unsafe = Arc::clone(&unsafe_ignore_file);
     let mandatory = build_gitignore(root, &MANDATORY_EXCLUDES)?;
     let configured_lines: Vec<&str> = config.index.exclude.iter().map(String::as_str).collect();
     let configured = build_gitignore(root, &configured_lines)?;
@@ -157,8 +173,22 @@ pub fn walk_eligible(root: &Path, config: &Config) -> Result<WalkResult, WalkErr
             return false;
         }
         let is_dir = file_type.is_dir();
-        !mandatory.matched(entry.path(), is_dir).is_ignore()
-            && !configured.matched(entry.path(), is_dir).is_ignore()
+        let eligible = !mandatory.matched(entry.path(), is_dir).is_ignore()
+            && !configured.matched(entry.path(), is_dir).is_ignore();
+        if eligible
+            && is_dir
+            && respect_gitignore
+            && let Err(error) = check_ignore_files(entry.path())
+        {
+            // Record the first failure and stop descending here; the walk
+            // then fails as a whole rather than silently dropping files.
+            let mut slot = filter_unsafe
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            slot.get_or_insert(error);
+            return false;
+        }
+        eligible
     });
 
     let mut files = Vec::new();
@@ -194,9 +224,40 @@ pub fn walk_eligible(root: &Path, config: &Config) -> Result<WalkResult, WalkErr
         });
     }
 
+    let unsafe_ignore_file = unsafe_ignore_file
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
+    if let Some(error) = unsafe_ignore_file {
+        return Err(error);
+    }
+
     files.sort_by(|a, b| a.rel_path.as_bytes().cmp(b.rel_path.as_bytes()));
     skipped.sort_by(|a, b| a.rel_escaped.as_bytes().cmp(b.rel_escaped.as_bytes()));
     Ok(WalkResult { files, skipped })
+}
+
+/// Fails when a Git ignore file the walker would read in `dir` exists but is
+/// not a regular file (after following symlinks, as the reader would).
+///
+/// A missing file is fine. A FIFO, socket, device, or directory is refused
+/// instead of opened, so a FIFO can never block the walk.
+fn check_ignore_files(dir: &Path) -> Result<(), WalkError> {
+    for path in [dir.join(".gitignore"), dir.join(".git/info/exclude")] {
+        match std::fs::metadata(&path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(WalkError::Io {
+                    path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Git ignore file is not a regular file; refusing to open it",
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Builds a gitignore-style matcher from `lines` rooted at `root`.
@@ -459,6 +520,68 @@ mod tests {
 
         let result = walk_eligible(root, &Config::default()).unwrap();
         assert_eq!(paths(&result), vec!["root.txt"]);
+    }
+
+    #[test]
+    fn worktree_git_file_at_the_root_is_not_eligible() {
+        let temp = TempDir::new("walk-worktree-file");
+        let root = temp.path();
+        write(&root.join(".git"), "gitdir: /elsewhere/.git/worktrees/wt\n");
+        write(&root.join("root.txt"), "keep");
+        write(&root.join("sub/.gitkeep"), "keep");
+
+        let result = walk_eligible(root, &Config::default()).unwrap();
+        assert_eq!(paths(&result), vec!["root.txt", "sub/.gitkeep"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_git_ignore_file_is_refused_without_being_opened() {
+        // Opening any of these FIFOs for reading would block forever with no
+        // writer, so returning at all proves none was opened.
+        for rel in [".gitignore", "sub/.gitignore", ".git/info/exclude"] {
+            let temp = TempDir::new("walk-fifo-ignore");
+            let root = temp.path();
+            fs::create_dir_all(root.join(".git/info")).unwrap();
+            write(&root.join("keep.txt"), "keep");
+            write(&root.join("sub/keep.txt"), "keep");
+            let fifo = root.join(rel);
+            let status = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("run mkfifo");
+            assert!(status.success(), "mkfifo {rel}");
+
+            // Guard against a regression that opens the FIFO: the walk runs on
+            // a thread, and if it has not returned in time a writer is opened,
+            // which releases a blocked reader, and the test fails.
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let walk_root = root.to_path_buf();
+            let worker = std::thread::spawn(move || {
+                let _ = sender.send(walk_eligible(&walk_root, &Config::default()));
+            });
+            let outcome = match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    let _ = fs::OpenOptions::new().write(true).open(&fifo);
+                    let _ = worker.join();
+                    panic!("{rel}: the walk blocked, so it opened the FIFO");
+                }
+            };
+            worker.join().expect("walk thread");
+            let error = outcome.expect_err(rel);
+            assert!(
+                error.to_string().contains("not a regular file"),
+                "{rel}: {error}"
+            );
+
+            // With Git ignore rules disabled the files are never read, and the
+            // FIFO itself is not an eligible file.
+            let mut config = Config::default();
+            config.index.respect_gitignore = false;
+            let result = walk_eligible(root, &config).expect(rel);
+            assert_eq!(paths(&result), vec!["keep.txt", "sub/keep.txt"], "{rel}");
+        }
     }
 
     #[test]
