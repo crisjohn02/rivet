@@ -313,15 +313,20 @@ fn resolve_file_line(store: &Store, path: &str, line: u32) -> Result<QueryOutcom
         });
     }
 
-    // "Innermost" is the smallest `(end_byte - start_byte)`; several symbols
-    // sharing the minimal span are all returned so the caller can report
-    // ambiguity rather than guess.
-    let smallest = enclosing
-        .iter()
-        .map(|row| row.end_byte - row.start_byte)
-        .min()
-        .expect("enclosing is non-empty");
-    enclosing.retain(|row| row.end_byte - row.start_byte == smallest);
+    // "Innermost" means minimal by containment: a symbol is dropped only when
+    // another enclosing symbol lies strictly inside its span. Every remaining
+    // symbol is returned so the caller reports ambiguity rather than guessing.
+    // Comparing span lengths alone would silently pick the shorter of two
+    // unrelated declarations that share the line, such as `function a() {}
+    // function bb() {}` (T36).
+    let snapshot = enclosing.clone();
+    enclosing.retain(|row| {
+        !snapshot.iter().any(|other| {
+            row.start_byte <= other.start_byte
+                && other.end_byte <= row.end_byte
+                && other.end_byte - other.start_byte < row.end_byte - row.start_byte
+        })
+    });
     Ok(QueryOutcome::Symbols(sort_rows(enclosing)))
 }
 
@@ -704,6 +709,44 @@ mod tests {
         ]);
         let rows = symbols(resolve_query(&store, "a.php:3").unwrap());
         assert_eq!(rows.len(), 2, "same-line declarations must not be guessed");
+    }
+
+    #[test]
+    fn file_line_siblings_of_different_lengths_on_one_line_are_ambiguous() {
+        // `function a() {} function bb() { function c() {} }` on line 3:
+        // `a` and `c` are both innermost (neither contains the other), and
+        // `bb` contains `c`, so it is not.
+        let store = store_with(vec![
+            symbol("a.php", "a", "App\\a", SymbolKind::Function, 10, 25, 3, 3),
+            symbol("a.php", "bb", "App\\bb", SymbolKind::Function, 26, 70, 3, 3),
+            symbol("a.php", "c", "App\\c", SymbolKind::Function, 40, 68, 3, 3),
+        ]);
+        let rows = symbols(resolve_query(&store, "a.php:3").unwrap());
+        let names: Vec<&str> = rows.iter().map(|row| row.qualified_name.as_str()).collect();
+        assert_eq!(names, vec!["App\\a", "App\\c"]);
+    }
+
+    #[test]
+    fn paths_differing_only_in_case_are_distinct() {
+        // A case-sensitive filesystem can hold both; the store keeps each path's
+        // bytes, and neither the canonical ID nor `file:line` folds case.
+        let store = store_with(vec![
+            symbol("a.php", "f", "App\\f", SymbolKind::Function, 10, 20, 3, 3),
+            symbol("A.php", "f", "App\\f", SymbolKind::Function, 10, 20, 3, 3),
+        ]);
+        let lower = symbols(resolve_query(&store, "a.php#App\\f").unwrap());
+        assert_eq!(lower.len(), 1);
+        assert_eq!(lower[0].file, "a.php");
+        let upper = symbols(resolve_query(&store, "A.php#App\\f").unwrap());
+        assert_eq!(upper.len(), 1);
+        assert_eq!(upper[0].file, "A.php");
+        assert_ne!(lower[0].id, upper[0].id);
+        let line = symbols(resolve_query(&store, "A.php:3").unwrap());
+        assert_eq!(line.len(), 1);
+        assert_eq!(line[0].file, "A.php");
+        // The short name matches both and is ambiguous, never folded to one.
+        let both = symbols(resolve_query(&store, "f").unwrap());
+        assert_eq!(both.len(), 2);
     }
 
     #[test]

@@ -442,22 +442,25 @@ fn fail(json: bool, error: &CliError, command: &str) -> ! {
 }
 
 /// Renders clap parse failures, using the JSON error envelope when `--json` was
-/// present. `--help`/`--version` stay text-only.
+/// present.
+///
+/// `--help`/`--version` are text-only and cannot be combined with `--json`
+/// (OUTPUT-CONTRACT "Transport and common rules"), so the combination is an
+/// argument error like any other when `--json` is present. Without `--json`
+/// they print their text as usual.
 fn handle_parse_error(error: clap::Error) -> ! {
-    if !matches!(
-        error.kind(),
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-    ) && json_requested()
-    {
-        let message = error.to_string();
-        let message = message.trim();
-        emit_error(
-            "invalid_arguments",
-            2,
-            message,
-            "Run `rivet index --help` for usage.",
-            Map::new(),
-        );
+    if json_requested() {
+        let hint = usage_hint();
+        let message = match error.kind() {
+            ErrorKind::DisplayHelp => {
+                "`--help` is text-only and cannot be combined with `--json`".to_string()
+            }
+            ErrorKind::DisplayVersion => {
+                "`--version` is text-only and cannot be combined with `--json`".to_string()
+            }
+            _ => error.to_string().trim().to_string(),
+        };
+        emit_error("invalid_arguments", 2, &message, &hint, Map::new());
     }
     // Text mode, or the text-only help/version output.
     error.exit();
@@ -466,4 +469,22 @@ fn handle_parse_error(error: clap::Error) -> ! {
 /// Reports whether `--json` appeared anywhere on the command line.
 fn json_requested() -> bool {
     std::env::args_os().any(|argument| argument == "--json")
+}
+
+/// The usage hint for a parse failure, naming the subcommand that was given.
+///
+/// The first argument naming an MVP command selects it; without one the hint
+/// points at the top-level help.
+fn usage_hint() -> String {
+    const COMMANDS: [&str; 6] = ["init", "index", "symbol", "refs", "context", "snippet"];
+    let command = std::env::args_os().skip(1).find_map(|argument| {
+        COMMANDS
+            .iter()
+            .find(|command| argument == **command)
+            .copied()
+    });
+    match command {
+        Some(command) => format!("Run `rivet {command} --help` for usage."),
+        None => "Run `rivet --help` for usage.".to_string(),
+    }
 }

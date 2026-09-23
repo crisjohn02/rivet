@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T35 |
-| Next task | T36 |
+| Last completed task | T36 |
+| Next task | T37 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | PF1: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 618 passed, 0 failed; `python3 tests/gold/check_gold.py` verified 51 authored entries and skipped the private sample without env, and verified 51 + 28 private `fluent` entries with `RIVET_PRIVATE_GOLD_DIR`/`RIVET_CORPUS_DIR` set. |
+| Last checks | T36: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 648 passed, 0 failed, 1 ignored (T36a); `python3 tests/gold/check_gold.py` verified 51 authored entries. Acceptance map: `crates/rivet-cli/tests/ACCEPTANCE.md`. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -143,7 +143,11 @@ Read: ARCHITECTURE concurrency/parse policy; spec §§25–27; AGENT-SNIPPET; OU
 | [ ] | T33 | Implement idempotent `init` and `snippet`, including JSON, managed blocks, and guarded text writes. | Repeated init preserves config/text, both-instruction-file ambiguity is explicit, and symlinked write targets are rejected. |
 | [x] | T34 | Add compact human output/help for the implemented commands. | Resolution marks, pagination, coverage, and context forms remain visible; help fits the spec's limit and uses real supported examples. |
 | [x] | T35 | Select and pin licensed real PHP/TS benchmark repositories; add a small PHP gold sample outside the fixture checkout. Do not execute arbitrary setup scripts during selection. | Repository commits/license attribution are recorded, the PHP fixture exercises common method names, and future held-out tasks remain separate from pilot cases. |
-| [ ] | T36 | Audit the CLI contract and the existing acceptance matrix; close omissions with focused regression cases. | Flags/errors/stream behavior, worktrees, symlink/FIFO handling, rebuild equivalence, Unicode, and partial coverage agree with the docs. Record any remaining gap as a subtask before proceeding. |
+| [x] | T36 | Audit the CLI contract and the existing acceptance matrix; close omissions with focused regression cases. | Flags/errors/stream behavior, worktrees, symlink/FIFO handling, rebuild equivalence, Unicode, and partial coverage agree with the docs. Record any remaining gap as a subtask before proceeding. |
+| [ ] | T36a | Make valid `$x->1` interpolation parse. The pinned tree-sitter-php 0.24.2 scanner treats a digit after `->` in a double-quoted string or heredoc as a property name, so valid PHP (for example a heredoc template containing `<?php` and `$v->1`) is reported as `parse_error`. Found by T36. | `parse_failures::interpolated_arrow_before_a_digit_is_valid_php` passes un-ignored through a grammar patch or pin bump, or the limitation is documented and that test is replaced by the honest-report test. |
+| [ ] | T36b | Decide whether the default dependency/build exclusions apply at any depth or only at the root. Today every `vendor/` is excluded, which drops customised package templates such as `resources/views/vendor/`. Spec §26 is silent. Found in the T35 corpus, carried by T36. | Spec §26 states the rule; the walker and `default_excludes_apply_at_any_depth` agree with it. |
+| [ ] | T36c | Settle Git ignore sources outside the root: a worktree does not read the shared `info/exclude` in its common Git directory (its main checkout does), and a symlinked `.gitignore` is followed, possibly outside the root, where Git 2.32+ refuses. Found by T36. | A worktree and its main checkout of the same tree exclude the same files, and a symlinked ignore file is handled by a stated rule, each with a regression test. |
+| [ ] | T36d | Record `extends`/`implements` clauses, and the scope expression of `$expr::$prop`, as uses, so `refs` on a base class lists its subclasses. Audit follow-up, re-confirmed by T36. | Each form appears in `refs` with an honest tier; gold and existing outputs are otherwise unchanged. |
 
 **Checkpoint F:** run the complete PHP workspace checks once. The pilot requires a real working slice, not all future platform/release infrastructure. An unresolved correctness gap blocks pilot interpretation.
 
