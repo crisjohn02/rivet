@@ -19,7 +19,7 @@ Symbols and source are snapshot data. Navigation commands are byte-identical for
 | `--no-refresh` | symbol, refs, context | Off; conflicts with freshness; requires compatible cache |
 | `--limit N` | symbol, refs, context | 50; context counts segments, others bound each list/candidate page |
 | `--offset N` | symbol, refs | 0; context rejects it |
-| `--min-resolution` | symbol, refs | name_match |
+| `--min-resolution` | symbol, refs | refs: name_match; symbol call lists: scoped (SY1) |
 | `--mode references\|candidates` | refs | references |
 | `--kind` | refs | All; comma-separated supported `ref_kind` values |
 | `--source`, `--signature-only` | symbol | Both off; mutually exclusive |
@@ -145,12 +145,18 @@ Default `mode` is `references`; `--mode candidates` also includes extracted same
   "signature": "launch(): void",
   "doc_comment": null,
   "parent": "src/survey.ts#Survey",
-  "calls": {"total": 0, "truncated": false, "next_offset": null, "items": []},
-  "called_by": {"total": 0, "truncated": false, "next_offset": null, "items": []}
+  "calls": {"total": 0, "truncated": false, "next_offset": null, "hidden_name_match": 0, "items": []},
+  "called_by": {"total": 0, "truncated": false, "next_offset": null, "hidden_name_match": 0, "items": []}
 }
 ```
 
 `signature`, `doc_comment`, and `parent` are required nullable fields. `--source` adds `source`, a string from stored bytes. `--signature-only` omits `calls` and `called_by` and conflicts with `--source`. Otherwise both call lists are present, independently paginated with the supplied limit/offset; each item is a reference object as above with `ref_kind: call`. `calls` selects use sites contained by the target; `called_by` applies default reference-mode matching to call sites targeting the symbol. Count call sites, not unique functions. `--min-resolution` is supported on both lists. Before relationship extraction is implemented, milestone builds must not claim final v0.1 support.
+
+Both call lists default to `--min-resolution scoped` (SY1), in text and `--json` alike: they list `exact` and `scoped` rows and leave out `name_match` rows. `--min-resolution name_match` lists every row, as before SY1; an explicit value always wins. `refs` and `context` keep `name_match` as their default. `total`, `truncated`, `next_offset`, and `items` describe the rows at or above the minimum tier.
+
+`hidden_name_match` (additive, SY1) is always present in each list, after `next_offset` and before `items`. It is the integer number of `name_match` rows the tier filter removed from that list, that is, exactly the rows `--min-resolution name_match` would add under the same other options. It counts `name_match` rows only: a `scoped` row that an explicit `--min-resolution exact` removes is in no count. It is 0 under `--min-resolution name_match`. It is computed before pagination, is not part of `total`, and does not depend on `--limit`/`--offset`. Uses reference mode excludes by evidence (LR2) are listed under no tier and are not counted. Like every count, it is a function of the snapshot and options, so it is byte-identical across repeated queries and rebuilds of the same snapshot.
+
+Human output adds the count to a list's heading line when it is non-zero: `calls: (+N name-only not listed)` and `called by: (+N name-only not listed)`, whether or not any row follows, with no command or flag pointer. A list with no rows at or above the minimum and N > 0 prints only that heading, never `none`; `calls: none` and `called by: none` mean no row is listed and no `name_match` row is hidden (under an explicit `exact`, uncounted `scoped` rows may still exist). In human `calls` rows, an unresolved call's receiver is shown with every whitespace run (line breaks and tabs included) collapsed to one space, so a receiver spanning several source lines stays on its row; JSON `receiver` keeps the exact source text.
 
 ## `rivet context <query> --tokens N --json`
 

@@ -380,7 +380,13 @@ fn empty_results_are_empty_lists_with_zero_counts() {
     assert_eq!(candidates["references"], json!([]));
 
     let symbol = success(&run(root, &["symbol", "App\\lone", "--json"]));
-    let empty_list = json!({"total": 0, "truncated": false, "next_offset": null, "items": []});
+    let empty_list = json!({
+        "total": 0,
+        "truncated": false,
+        "next_offset": null,
+        "hidden_name_match": 0,
+        "items": []
+    });
     assert_eq!(symbol["calls"], empty_list);
     assert_eq!(symbol["called_by"], empty_list);
     assert_eq!(symbol["doc_comment"], Value::Null);

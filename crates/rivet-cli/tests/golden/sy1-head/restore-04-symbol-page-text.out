@@ -1,0 +1,20 @@
+exit 0
+--- stdout
+App\Services\SurveyService::launch
+method
+SurveyService.php:18-21
+id: SurveyService.php#App\Services\SurveyService::launch
+parent: SurveyService.php#App\Services\SurveyService
+
+signature:
+  public function launch(): void
+
+calls: none
+
+called by:
+  ReportService.php:36:13  App\Reporting\ReportService::runUnknown  name_match ?
+  SurveyService.php:26:16  App\Services\SurveyService::relaunch     scoped
+  showing 3-4 of 6; next: --offset 4
+
+coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+--- stderr

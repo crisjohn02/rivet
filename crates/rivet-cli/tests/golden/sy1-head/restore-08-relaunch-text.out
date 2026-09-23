@@ -1,0 +1,18 @@
+exit 0
+--- stdout
+App\Services\SurveyService::relaunch
+method
+SurveyService.php:24-27
+id: SurveyService.php#App\Services\SurveyService::relaunch
+parent: SurveyService.php#App\Services\SurveyService
+
+signature:
+  public function relaunch(): void
+
+calls:
+  SurveyService.php:26:16  SurveyService.php#App\Services\SurveyService::launch  scoped
+
+called by: none
+
+coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+--- stderr

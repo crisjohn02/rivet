@@ -56,6 +56,27 @@ pub(crate) fn text(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }
 
+/// `source` with every run of whitespace (`char::is_whitespace`, so line
+/// breaks and tabs too) replaced by a single space, for a source excerpt shown
+/// inside one row (SY1). Nothing else changes: a run at either end also
+/// becomes one space rather than being trimmed.
+pub(crate) fn collapse_whitespace(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut in_run = false;
+    for character in source.chars() {
+        if character.is_whitespace() {
+            if !in_run {
+                output.push(' ');
+            }
+            in_run = true;
+        } else {
+            output.push(character);
+            in_run = false;
+        }
+    }
+    output
+}
+
 /// Renders `rows` as space-separated columns, each padded to its widest cell
 /// (by character count), with `indent` before every row. Trailing padding is
 /// never emitted.
@@ -268,8 +289,26 @@ pub fn error_text(command: &str, error: &CliError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{columns, index_notes, page_line, tier};
+    use super::{collapse_whitespace, columns, index_notes, page_line, tier};
     use serde_json::json;
+
+    #[test]
+    fn whitespace_runs_collapse_to_one_space() {
+        assert_eq!(collapse_whitespace("$x"), "$x");
+        assert_eq!(collapse_whitespace(""), "");
+        assert_eq!(
+            collapse_whitespace("$this->a\n        ->b()"),
+            "$this->a ->b()"
+        );
+        assert_eq!(
+            collapse_whitespace("$a\r\n\t \u{a0}->b( 1,  2 )"),
+            "$a ->b( 1, 2 )"
+        );
+        // A run at an end becomes one space; it is not trimmed.
+        assert_eq!(collapse_whitespace("\n$a\n"), " $a ");
+        // Non-ASCII text is kept as is.
+        assert_eq!(collapse_whitespace("$ü\n\n->ß"), "$ü ->ß");
+    }
 
     #[test]
     fn name_match_is_marked_and_scoped_is_distinct_from_exact() {

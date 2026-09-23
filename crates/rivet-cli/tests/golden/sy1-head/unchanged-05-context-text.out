@@ -1,0 +1,43 @@
+exit 0
+--- stdout
+── SurveyService.php:18-21  App\Services\SurveyService::launch  [target, full]
+public function launch(): void
+    {
+        $this->label = self::DEFAULT_LABEL;
+    }
+
+── ReportService.php:21-25  App\Reporting\ReportService::runAlias  [caller, full]
+public function runAlias(): void
+    {
+        $svc = new SurveySvc();
+        $svc->launch();
+    }
+
+── ReportService.php:28-31  App\Reporting\ReportService::runTyped  [caller, full]
+public function runTyped(SurveyService $svc): void
+    {
+        $svc->launch();
+    }
+
+── SurveyService.php:24-27  App\Services\SurveyService::relaunch  [caller, full]
+public function relaunch(): void
+    {
+        $this->launch();
+    }
+
+── ReportService.php:34-37  App\Reporting\ReportService::runUnknown  [caller, full] ?
+public function runUnknown(): void
+    {
+        $x->launch();
+    }
+
+── SurveyService.php:9-28  App\Services\SurveyService  [parent, signature]
+final class SurveyService
+{
+    public const DEFAULT_LABEL = 'survey';
+    private string $label = 'survey';
+}
+
+estimated_tokens: 175 / 4000  (tokenizer: utf8-bytes-v1; budget_scope: source)
+coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+--- stderr

@@ -1,0 +1,15 @@
+exit 0
+--- stdout
+App\Services\SurveyService::launch  method  SurveyService.php:18-21
+7 references  (5 scoped, 2 name_match)  mode: candidates
+
+ReportService.php:24:15  App\Reporting\ReportService::runAlias    call  scoped
+ReportService.php:30:15  App\Reporting\ReportService::runTyped    call  scoped
+ReportService.php:36:13  App\Reporting\ReportService::runUnknown  call  name_match ?
+SurveyService.php:26:16  App\Services\SurveyService::relaunch     call  scoped
+boot.php:13:1            (file scope)                             call  name_match ?  -> boot.php#App\Boot\launch
+boot.php:17:7            (file scope)                             call  scoped
+boot.php:22:17           (file scope)                             call  scoped
+
+coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+--- stderr

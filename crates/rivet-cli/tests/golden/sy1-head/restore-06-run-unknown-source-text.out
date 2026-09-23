@@ -1,0 +1,24 @@
+exit 0
+--- stdout
+App\Reporting\ReportService::runUnknown
+method
+ReportService.php:34-37
+id: ReportService.php#App\Reporting\ReportService::runUnknown
+parent: ReportService.php#App\Reporting\ReportService
+
+signature:
+  public function runUnknown(): void
+
+source:
+public function runUnknown(): void
+    {
+        $x->launch();
+    }
+
+calls:
+  ReportService.php:36:13  (unresolved; receiver $x)  name_match ?
+
+called by: none
+
+coverage: incomplete; 9 of 10 files indexed; skipped 1 unsupported; 0 diagnostics
+--- stderr

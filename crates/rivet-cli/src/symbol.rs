@@ -9,7 +9,8 @@
 //! paginated independently. T32 rejects a syntactically invalid `file:line`
 //! before any filesystem work and maps a directly addressed non-indexed file
 //! to the contract's code ([`outcome_error`]), shared with `refs` and
-//! `context`.
+//! `context`. SY1 makes both call lists default to `--min-resolution scoped`
+//! and report the name-only rows the tier filter hid as `hidden_name_match`.
 
 use std::collections::HashSet;
 
@@ -30,6 +31,10 @@ use crate::transport::CliError;
 const DEFAULT_LIMIT: u64 = 50;
 /// The largest accepted `--limit`.
 const MAX_LIMIT: u64 = 1000;
+/// The `--min-resolution` both call lists use when the flag is absent (SY1):
+/// `exact` and `scoped` rows are listed and name-only rows are counted. `refs`
+/// and `context` keep their `name_match` default.
+const DEFAULT_CALL_LIST_MINIMUM: Resolution = Resolution::Scoped;
 
 /// Options accepted by `rivet symbol`.
 #[derive(Debug, Clone, Default)]
@@ -82,8 +87,12 @@ pub fn run(query: &str, options: Options) -> Result<Value, CliError> {
     // any filesystem work (OUTPUT-CONTRACT "Errors").
     check_query(query)?;
     // `--min-resolution` filters both call lists (OUTPUT-CONTRACT "Pagination
-    // and resolution").
-    let minimum = references::parse_min_resolution(min_resolution.as_deref())?;
+    // and resolution"). An explicit value always wins; without one the lists
+    // default to `scoped` (SY1).
+    let minimum = match min_resolution.as_deref() {
+        None => DEFAULT_CALL_LIST_MINIMUM,
+        Some(value) => references::parse_min_resolution(Some(value))?,
+    };
     // Parse `--freshness` before any filesystem work (spec §27).
     let requested_freshness = index::parse_freshness(freshness.as_deref())?;
 
@@ -337,31 +346,40 @@ fn single(
         // default reference-mode matching restricted to call sites targeting
         // the symbol. The two lists are paginated independently with the same
         // supplied limit/offset (OUTPUT-CONTRACT "`rivet symbol`").
+        //
+        // Each list is collected at `name_match` and then filtered to the
+        // minimum, so the name-only rows the filter hides are counted (SY1).
         let bindings = references::bindings_by_use_id(store)?;
         let all = references::all_uses(store)?;
         let evidence = references::Evidence::load(store, &all, &bindings)?;
         let call_kinds: HashSet<RefKind> = HashSet::from([RefKind::Call]);
-        let calls = references::collect_matches(
-            &all,
-            &bindings,
-            &evidence,
-            row,
-            Selection::Contained,
-            Some(&call_kinds),
+        let calls = references::apply_call_list_minimum(
+            references::collect_matches(
+                &all,
+                &bindings,
+                &evidence,
+                row,
+                Selection::Contained,
+                Some(&call_kinds),
+                Resolution::NameMatch,
+            )
+            .matches,
             options.minimum,
-        )
-        .matches;
+        );
         // Reference-mode matching, so evidence-based exclusion applies (LR2).
-        let called_by = references::collect_matches(
-            &all,
-            &bindings,
-            &evidence,
-            row,
-            Selection::Query(Mode::References),
-            Some(&call_kinds),
+        let called_by = references::apply_call_list_minimum(
+            references::collect_matches(
+                &all,
+                &bindings,
+                &evidence,
+                row,
+                Selection::Query(Mode::References),
+                Some(&call_kinds),
+                Resolution::NameMatch,
+            )
+            .matches,
             options.minimum,
-        )
-        .matches;
+        );
         object.insert(
             "calls".to_string(),
             references::call_list_object(store, &calls, options.limit, options.offset)?,
@@ -499,6 +517,12 @@ pub(crate) fn parse_limit(limit: Option<u64>) -> Result<u64, CliError> {
 /// comment, the signature, the `--source` slice when requested, and the
 /// `calls:` / `called by:` lists (absent with `--signature-only`), each with
 /// its own pagination line. Coverage notes close the output.
+///
+/// SY1: a list whose `hidden_name_match` is N > 0 has the heading
+/// `<label>: (+N name-only not listed)`, whether or not any row follows, so a
+/// list with every row hidden never reads as `none`. A `calls` receiver is
+/// shown with each whitespace run collapsed to one space, so a receiver that
+/// spans source lines stays on its row and does not widen the padding.
 pub fn human(value: &Value) -> String {
     let symbol = &value["symbol"];
     let mut output = String::new();
@@ -531,12 +555,16 @@ pub fn human(value: &Value) -> String {
             continue;
         }
         let items = list["items"].as_array().map_or(&[][..], Vec::as_slice);
+        let hidden = list["hidden_name_match"].as_u64().unwrap_or(0);
         output.push('\n');
-        if items.is_empty() && list["total"].as_u64().unwrap_or(0) == 0 {
+        if hidden > 0 {
+            output.push_str(&format!("{label}: (+{hidden} name-only not listed)\n"));
+        } else if items.is_empty() && list["total"].as_u64().unwrap_or(0) == 0 {
             output.push_str(&format!("{label}: none\n"));
             continue;
+        } else {
+            output.push_str(&format!("{label}:\n"));
         }
-        output.push_str(&format!("{label}:\n"));
         let rows: Vec<Vec<String>> = items
             .iter()
             .map(|item| {
@@ -545,7 +573,10 @@ pub fn human(value: &Value) -> String {
                     // unbound call site names its receiver when it has one.
                     match (item["resolved_target"].as_str(), item["receiver"].as_str()) {
                         (Some(target), _) => target.to_string(),
-                        (None, Some(receiver)) => format!("(unresolved; receiver {receiver})"),
+                        (None, Some(receiver)) => format!(
+                            "(unresolved; receiver {})",
+                            human::collapse_whitespace(receiver)
+                        ),
                         (None, None) => "(unresolved)".to_string(),
                     }
                 } else {
