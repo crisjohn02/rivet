@@ -1,0 +1,4 @@
+{
+  "file": "src/Billing/Invoice.php",
+  "symbol": "App\\Billing\\Invoice::total"
+}

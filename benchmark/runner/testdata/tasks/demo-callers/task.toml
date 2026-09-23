@@ -1,0 +1,10 @@
+id = "demo-callers"
+project = "demo"
+category = "callers"
+check = "set_f1"
+f1_threshold = 0.8
+
+[limits]
+max_budget_usd = 1.0
+max_turns = 10
+wall_seconds = 20

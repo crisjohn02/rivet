@@ -1,0 +1,9 @@
+id = "demo-trace"
+project = "demo"
+category = "trace"
+check = "accepted_path"
+
+[limits]
+max_budget_usd = 1.0
+max_turns = 10
+wall_seconds = 20

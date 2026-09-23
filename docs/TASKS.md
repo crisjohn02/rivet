@@ -12,7 +12,7 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 | Next task | T38 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T37: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 648 passed, 0 failed, 1 ignored; `python3 tests/gold/check_gold.py` verified 51 authored entries. Results: `benchmark/results/T37-local/`. |
+| Last checks | T38a–T38c: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 648 passed, 0 failed, 1 ignored; `python3 tests/gold/check_gold.py` verified 51 authored entries; `python3 benchmark/runner/test_runner.py` 49 tests OK (fake agent under sandbox-exec, no model calls). |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -178,9 +178,9 @@ Benchmark reporting uses [REPORT-TEMPLATE](../benchmark/REPORT-TEMPLATE.md). Spl
 
 | Done | ID | Small task | Done when |
 |---|---|---|---|
-| [ ] | T38a | Define the study manifest and record/replay one run's usage, transcript, and evaluator outcome. | A synthetic run round-trips with IDs, versions, limits, and failure accounting; no model call required. |
-| [ ] | T38b | Implement artifact extraction to per-attempt CSV. | Fixtures prove token totals, missing-usage handling, failures, and retry inclusion rules; originals remain traceable. |
-| [ ] | T38c | Implement task-weighted aggregates and Markdown report generation. | Known synthetic ratios/counts reproduce; pilot reports mark confirmatory gates unevaluated; tables link to evidence. |
+| [x] | T38a | Define the study manifest and record/replay one run's usage, transcript, and evaluator outcome. | A synthetic run round-trips with IDs, versions, limits, and failure accounting; no model call required. |
+| [x] | T38b | Implement artifact extraction to per-attempt CSV. | Fixtures prove token totals, missing-usage handling, failures, and retry inclusion rules; originals remain traceable. |
+| [x] | T38c | Implement task-weighted aggregates and Markdown report generation. | Known synthetic ratios/counts reproduce; pilot reports mark confirmatory gates unevaluated; tables link to evidence. |
 
 T40 produces `benchmark/results/<study-id>/report.md` from the template and computed artifacts. Before T49, add **T48a — implement and validate paired intervals and preregistered gate reporting** on synthetic fixtures, including incomplete blocks and degenerate cases. Reuse the pilot reporting pipeline. Run analysis locally before considering more model trials.
 

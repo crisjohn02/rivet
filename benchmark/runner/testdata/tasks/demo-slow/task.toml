@@ -1,0 +1,9 @@
+id = "demo-slow"
+project = "demo"
+category = "locate"
+check = "exact_symbol"
+
+[limits]
+max_budget_usd = 0.5
+max_turns = 3
+wall_seconds = 1.5
