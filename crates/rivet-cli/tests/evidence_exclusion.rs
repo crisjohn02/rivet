@@ -18,7 +18,10 @@
 //!   bound to the target;
 //! - `by_exclusion` counts are page-independent and zero in candidate mode,
 //!   candidate mode still lists every excluded use, output is deterministic
-//!   across `--force`, and `context`/`symbol.called_by` inherit the rule.
+//!   across `--force`, and `context`/`symbol.called_by` inherit the rule;
+//! - EX1: the human line states each non-zero reason with the target's kind
+//!   word, never points at candidate mode, and is absent when nothing is
+//!   excluded; `refs --json` is byte-identical to the pre-EX1 binary.
 
 #![cfg(feature = "lang-php")]
 
@@ -302,6 +305,17 @@ fn set(markers: &[&str]) -> BTreeSet<String> {
     markers.iter().map(|marker| marker.to_string()).collect()
 }
 
+/// The human `refs` line that reports exclusions (EX1), which must directly
+/// follow the count header; `None` when no line reports any.
+fn exclusion_line(text: &str) -> Option<&str> {
+    let (index, line) = text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("ruled out"))?;
+    assert_eq!(index, 2, "the line follows the count header: {text}");
+    Some(line)
+}
+
 const SAVE_SITES: &[&str] = &[
     "SELF_BOUND",
     "SELF_STATIC",
@@ -380,12 +394,16 @@ fn reference_mode_excludes_uses_by_form_and_unrelated_receiver() {
         assert_eq!(item["resolution"], expected, "{item}");
     }
 
-    // The human rendering names the excluded count.
+    // The human rendering states the excluded count and why (EX1).
     let text = String::from_utf8(ok(temp.path(), &["refs", "App\\M::save"])).unwrap();
-    assert!(
-        text.contains("2 name matches excluded by evidence (see --mode candidates)\n"),
+    assert_eq!(
+        exclusion_line(&text),
+        Some(
+            "2 same-name uses ruled out (unrelated receiver class: 1; form cannot reference a method: 1)"
+        ),
         "{text}"
     );
+    assert!(!text.contains("--mode candidates"), "{text}");
 }
 
 #[test]
@@ -420,7 +438,7 @@ fn candidate_mode_still_lists_every_excluded_use_unchanged() {
         &["refs", "App\\M::save", "--mode", "candidates"],
     ))
     .unwrap();
-    assert!(!text.contains("excluded by evidence"), "{text}");
+    assert!(!text.contains("ruled out"), "{text}");
 }
 
 #[test]
@@ -746,4 +764,99 @@ function f(Model $m, Plain $p): void
         &["refs", "App\\User::save", "--json", "--mode", "candidates"],
     );
     assert_eq!(candidates["total"], 2);
+}
+
+/// Same-name uses an interface target excludes by form: a receiver call and
+/// a bare call.
+const IFACE: &str = "<?php
+declare(strict_types=1);
+
+namespace App;
+
+function z($x): void { $x->Savable(); Savable(); }
+";
+
+/// Asserts the human rendering of `refs query` in `root` reports exactly
+/// `expected` as its exclusion line, and never points at candidate mode.
+fn assert_line(root: &Path, query: &str, expected: Option<&str>) {
+    let text = String::from_utf8(ok(root, &["refs", query])).expect("stdout is UTF-8");
+    assert_eq!(exclusion_line(&text), expected, "{query}: {text}");
+    assert!(!text.contains("--mode candidates"), "{query}: {text}");
+}
+
+#[test]
+fn the_exclusion_line_states_each_nonzero_reason_in_a_fixed_order() {
+    let temp = repo_with(
+        "line",
+        &[
+            ("Model.php", MODEL),
+            ("Uses.php", USES),
+            ("Iface.php", IFACE),
+        ],
+    );
+    let root = temp.path();
+    // Form only, singular; the kind word is the header's, not hard-coded.
+    assert_line(
+        root,
+        "App\\M::posts",
+        Some("1 same-name use ruled out (form cannot reference a method: 1)"),
+    );
+    assert_line(
+        root,
+        "App\\helper",
+        Some("1 same-name use ruled out (form cannot reference a function: 1)"),
+    );
+    assert_line(
+        root,
+        "App\\M::$items",
+        Some("1 same-name use ruled out (form cannot reference a property: 1)"),
+    );
+    // A kind word starting with a vowel takes `an`.
+    assert_line(
+        root,
+        "App\\Savable",
+        Some("2 same-name uses ruled out (form cannot reference an interface: 2)"),
+    );
+    // Nothing excluded: no line at all.
+    assert_line(root, "App\\Tr::persist", None);
+
+    // Receiver only, plural and singular.
+    let temp = repo_with("line-poly", &[("Poly.php", POLY)]);
+    let root = temp.path();
+    assert_line(
+        root,
+        "P\\T::m",
+        Some("2 same-name uses ruled out (unrelated receiver class: 2)"),
+    );
+    assert_line(
+        root,
+        "P\\K::kick",
+        Some("1 same-name use ruled out (unrelated receiver class: 1)"),
+    );
+    // Both, receiver first: a bare call adds a form exclusion.
+    fs::write(root.join("Bare.php"), "<?php\nnamespace P;\n\nm();\n").expect("write Bare.php");
+    assert_line(
+        root,
+        "P\\T::m",
+        Some(
+            "3 same-name uses ruled out (unrelated receiver class: 2; form cannot reference a method: 1)",
+        ),
+    );
+}
+
+#[test]
+fn refs_json_is_byte_identical_to_the_pre_ex1_binary() {
+    // Captured from a build of 82879eb, before EX1 changed the human line,
+    // for a query with both kinds of exclusion (counts are page-independent).
+    let golden =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/ex1-json/refs-save-page.json");
+    let expected = fs::read_to_string(golden).expect("read golden");
+    let temp = repo("json-identity");
+    let output = run(
+        temp.path(),
+        &["refs", "App\\M::save", "--json", "--limit", "1"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
 }

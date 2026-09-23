@@ -278,9 +278,10 @@ fn parse_kinds(value: Option<&str>) -> Result<Option<HashSet<RefKind>>, CliError
 /// The human rendering of a successful reference lookup (spec §15).
 ///
 /// The queried symbol, a count header with the non-zero tiers, a line naming
-/// how many name matches evidence excluded when any were (LR2), one aligned
-/// line per reference (`file:line:column`, containing symbol, kind, tier), the
-/// pagination line when the page is truncated, and the coverage notes. A
+/// how many same-name uses evidence ruled out, and why, when any were (LR2,
+/// EX1), one aligned line per reference (`file:line:column`, containing
+/// symbol, kind, tier), the pagination line when the page is truncated, and
+/// the coverage notes. A
 /// `name_match` line ends in `?`; a candidate bound to another declaration
 /// also names that `resolved_target`.
 pub fn human(value: &Value) -> String {
@@ -314,20 +315,33 @@ pub fn human(value: &Value) -> String {
     }
     output.push_str(&header);
     output.push('\n');
-    // LR2: say how many same-name uses evidence excluded, so a reader knows
-    // candidate mode would list more.
-    let excluded = ["incompatible_form", "unrelated_receiver"]
-        .iter()
-        .map(|reason| value["by_exclusion"][*reason].as_u64().unwrap_or(0))
-        .sum::<u64>();
+    // LR2/EX1: say how many same-name uses evidence ruled out and why, so the
+    // list is honest about what it omits without prompting an audit.
+    let receiver = value["by_exclusion"]["unrelated_receiver"]
+        .as_u64()
+        .unwrap_or(0);
+    let form = value["by_exclusion"]["incompatible_form"]
+        .as_u64()
+        .unwrap_or(0);
+    let excluded = receiver.saturating_add(form);
     if excluded > 0 {
-        let noun = if excluded == 1 {
-            "name match"
-        } else {
-            "name matches"
-        };
+        let mut reasons = Vec::new();
+        if receiver > 0 {
+            reasons.push(format!("unrelated receiver class: {receiver}"));
+        }
+        if form > 0 {
+            let kind = human::text(&symbol["kind"]);
+            let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            reasons.push(format!("form cannot reference {article} {kind}: {form}"));
+        }
+        let noun = if excluded == 1 { "use" } else { "uses" };
         output.push_str(&format!(
-            "{excluded} {noun} excluded by evidence (see --mode candidates)\n"
+            "{excluded} same-name {noun} ruled out ({})\n",
+            reasons.join("; ")
         ));
     }
 

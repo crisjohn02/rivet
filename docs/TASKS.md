@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | LR2 |
-| Next task | User decision on the pilot result: fix and retest is recommended (benchmark/results/pilot-01/RESULT.md) |
+| Last completed task | EX1 |
+| Next task | Retest the callers task with EX1 before any further pilot (benchmark/results/pilot-03/RESULT.md, "Next change"); needs a user-approved run |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | LR2: reference mode excludes a same-name unresolved use by use form (spec §11.5 table) or by a receiver class with no possible common subtype with the target's class (indexed and anonymous subtypes; unindexed links keep unindexed receivers); `refs` reports `by_exclusion`. New `receiver_classes` table (index format 1 -> 2; format 1 rebuilds on a writable open, `--no-refresh` refuses it); resolver `php-rules-v2` -> `php-rules-v3`; fact-schema 10 -> 11 (`anonymous_supertypes`). t34-json goldens changed only in `index.snapshot` and the new `by_exclusion` field; two tests updated for genuinely excluded receiver calls against functions. fmt, clippy -D warnings, 673 workspace tests (1 ignored, T36a), and 51 gold entries pass. |
+| Last checks | EX1: `refs` human output replaces `N name matches excluded by evidence (see --mode candidates)` with `N same-name use(s) ruled out (unrelated receiver class: a; form cannot reference a <kind>: b)`, listing only non-zero reasons; OUTPUT-CONTRACT gives the grammar. `refs --json` matches a golden captured from the 82879eb build; candidate mode, `symbol`, `context`, and the snippet hash (`1819530610c1418d4b0d9bce84363504d99f5029d628558185ede35a82d3b5f7`) are unchanged. fmt, clippy -D warnings, 675 workspace tests (1 ignored, T36a), and 51 gold entries pass. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -173,6 +173,7 @@ Read: BENCHMARK pilot, isolation, collected metrics, and decision rules; IMPLEME
 | [x] | T40 | Write a short pilot result and choose the next smallest change. | Report reference usefulness, adoption, tokens, latency, and limitations. Choose fix/retest, proceed to TypeScript, or re-scope; do not label the pilot a passed confirmatory benchmark. |
 | [x] | SN1 | Change the managed snippet to recommend the compact text output instead of `--json`, which pilot-01 agents never used. User-approved treatment change. | `rivet snippet` and docs/AGENT-SNIPPET.md agree byte for byte with only the one sentence changed; the new snippet hash is recorded. |
 | [x] | LR2 | Evidence-based exclusion in `refs --mode references`: leave out a same-name unresolved use whose form cannot name the target kind, or whose receiver class (determined by a receiver rule, indexed or not) shares no possible subtype with the target's class (review fix: common-subtype rule, anonymous-class headers recorded); report `by_exclusion`. On a real Laravel application about 93% of call uses are unbound. | The spec §11.5 rule table is implemented exactly; candidate mode is byte-identical; bound uses, trait targets, refused hints and unknown ancestry are never excluded; counts are page-independent; `context` inherits the rule. |
+| [x] | EX1 | State the reason in the `refs` human exclusion line instead of pointing at `--mode candidates`, which pilot-03 agents followed into a needless audit: `N same-name use(s) ruled out (unrelated receiver class: a; form cannot reference a <kind>: b)`, non-zero reasons only, receiver first. | The line appears only when a count is non-zero, in the same position, with the header's kind word and `a`/`an`; `refs --json`, candidate mode, `symbol`, `context`, and the snippet hash are unchanged. |
 
 **Gate G:** T41 onward stays deferred until the pilot supports spending further effort. No full 300+ run benchmark is implied by completing this queue's PHP tasks.
 
