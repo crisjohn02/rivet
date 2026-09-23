@@ -46,7 +46,7 @@ use rivet_core::{Resolution, SymbolKind};
 use rivet_store::{SymbolRow, UseRow};
 
 use crate::resolve::rules::rebinding::local_untrustworthy;
-use crate::resolve::rules::resolve_class_spelling;
+use crate::resolve::rules::{ClassEvidence, class_evidence};
 use crate::resolve::{MemberUse, RuleCtx, ScopeFacts, SymbolId};
 
 /// Resolves a `$this`/`self`/`static` member or an explicitly typed receiver.
@@ -55,16 +55,38 @@ pub(crate) fn resolve(
     use_row: &UseRow,
     facts: &ScopeFacts,
 ) -> Option<(SymbolId, Resolution)> {
-    let hint: UseHint = serde_json::from_str(&use_row.hint_json).ok()?;
     // A method call binds only a method, a property access only a property,
     // and a class-constant read only a constant (AF2).
     let member = MemberUse::of(use_row, facts)?;
-    let class = match hint {
+    // Only an indexed class can declare the member.
+    let ClassEvidence::Indexed(class) = receiver_class(ctx, use_row, facts)? else {
+        return None;
+    };
+    ctx.unique_member(&class.id, &use_row.spelling, member)
+        .map(|member| (member.id.clone(), Resolution::Scoped))
+}
+
+/// The receiver class this rule determines for `use_row`, under exactly the
+/// trust conditions [`resolve`] applies before binding (LR2).
+///
+/// `$this` and `self` name the enclosing class; a typed receiver names its
+/// declared type (a parameter only while it is never rebound); a class named
+/// before `::` names that class. The class need not be indexed: a spelling no
+/// indexed class-like has yields [`ClassEvidence::Named`], which binds nothing
+/// but lets reference mode exclude a use on an unrelated class. `None` when the
+/// rule would refuse to determine a class.
+pub(crate) fn receiver_class<'a>(
+    ctx: &RuleCtx<'a>,
+    use_row: &UseRow,
+    facts: &ScopeFacts,
+) -> Option<ClassEvidence<'a>> {
+    let hint: UseHint = serde_json::from_str(&use_row.hint_json).ok()?;
+    match hint {
         UseHint::This | UseHint::SelfOrStatic => {
             if !names_enclosing_class(use_row, &hint) {
                 return None;
             }
-            enclosing_class(ctx, use_row)?
+            enclosing_class(ctx, use_row).map(ClassEvidence::Indexed)
         }
         UseHint::Typed {
             type_spelling,
@@ -79,15 +101,11 @@ pub(crate) fn resolve(
                     return None;
                 }
             }
-            resolve_class_spelling(ctx, &type_spelling, facts)?
+            class_evidence(ctx, &type_spelling, facts)
         }
-        UseHint::NamedClass { class_spelling } => {
-            resolve_class_spelling(ctx, &class_spelling, facts)?
-        }
-        _ => return None,
-    };
-    ctx.unique_member(&class.id, &use_row.spelling, member)
-        .map(|member| (member.id.clone(), Resolution::Scoped))
+        UseHint::NamedClass { class_spelling } => class_evidence(ctx, &class_spelling, facts),
+        _ => None,
+    }
 }
 
 /// Whether a receiver text is one plain variable (`$svc`), the only form a
@@ -290,6 +308,7 @@ mod tests {
                 uses,
                 scopes,
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })

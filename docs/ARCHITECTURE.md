@@ -99,6 +99,14 @@ CREATE TABLE bindings (
 );
 CREATE INDEX bindings_target ON bindings(target_id);
 
+CREATE TABLE receiver_classes (
+  use_id INTEGER PRIMARY KEY REFERENCES uses(use_id) ON DELETE CASCADE,
+  class_qname TEXT NOT NULL,
+  class_id TEXT REFERENCES symbols(id) ON DELETE CASCADE
+); -- LR2: receiver class determined for an unbound member/scoped use;
+   -- replaced with bindings; evidence for exclusion, never a binding
+CREATE INDEX receiver_classes_class ON receiver_classes(class_id);
+
 CREATE TABLE scopes (
   file TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
   scope_key TEXT NOT NULL,

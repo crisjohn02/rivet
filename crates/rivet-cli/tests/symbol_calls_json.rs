@@ -379,12 +379,13 @@ fn repeated_call_sites_are_counted_individually() {
 fn top_level_calls_are_retained_in_called_by() {
     let temp = fixture_repo("top-level");
 
-    // The `boot.php` function is called once at file scope. Reference mode also
-    // keeps the unresolved same-name `$x->launch()` use, so the list is two
-    // items; the top-level one is retained with a null containing symbol.
+    // The `boot.php` function is called once at file scope, and that call is
+    // retained with a null containing symbol. The unresolved same-name
+    // `$x->launch()` use is a method call, which cannot name a function, so
+    // reference mode excludes it by its form (LR2).
     let value = symbol(temp.path(), "App\\Boot\\launch", &[]);
     assert_eq!(value["symbol"]["id"], BOOT_LAUNCH_TARGET);
-    assert_eq!(value["called_by"]["total"], 2);
+    assert_eq!(value["called_by"]["total"], 1);
     let top_level = value["called_by"]["items"]
         .as_array()
         .unwrap()

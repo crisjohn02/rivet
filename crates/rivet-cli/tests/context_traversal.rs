@@ -528,22 +528,24 @@ function target(): void
     mid();
 }
 function mid(): void {}
-function unknownCaller($x): void
+function unknownCaller(): void
 {
-    $x->target();
+    \\Elsewhere\\target();
     onlyFromUnknown();
 }
 function onlyFromUnknown(): void {}
-function nameOnlyMidCaller($y): void
+function nameOnlyMidCaller(): void
 {
-    $y->mid();
+    \\Elsewhere\\mid();
 }
 ",
         )],
     );
 
     // The links exist: `unknownCaller` calls `onlyFromUnknown` exactly, and
-    // `nameOnlyMidCaller` is a name-only caller of `mid`.
+    // `nameOnlyMidCaller` is a name-only caller of `mid`. The name-only calls
+    // are unresolved qualified function calls: since LR2 a receiver call
+    // (`$y->mid()`) cannot name a function and is excluded from reference mode.
     assert_eq!(
         sequence(&collect(&store, "N.php#N\\unknownCaller", &at_depth(1))),
         expect(&[

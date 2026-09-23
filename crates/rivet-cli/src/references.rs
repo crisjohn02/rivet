@@ -7,12 +7,16 @@
 //! `(file bytes, start_byte, end_byte, ref_kind, resolved_target or empty)`,
 //! count, and slice. Keeping one copy here stops the two commands from
 //! drifting.
+//!
+//! LR2: in reference mode an unresolved same-name use is excluded when
+//! [`Evidence`] shows it cannot refer to the target (spec §11.5); the counts
+//! of excluded uses are returned with the matches.
 
 use std::collections::{HashMap, HashSet};
 
 use rivet_core::{RefKind, Resolution};
-use rivet_index::lookup_name_matches;
-use rivet_store::{BindingRow, Store, SymbolRow, UseRow};
+use rivet_index::{ClassRelation, Hierarchy, SubtypeIndex, form_compatible, lookup_name_matches};
+use rivet_store::{BindingRow, ReceiverClassRow, Store, SymbolRow, UseRow};
 use serde_json::{Map, Value, json};
 
 use crate::index;
@@ -103,6 +107,79 @@ pub(crate) fn bindings_by_use_id(store: &Store) -> Result<HashMap<i64, BindingRo
     Ok(by_use)
 }
 
+/// Snapshot facts reference mode reads to exclude uses by evidence (LR2).
+pub(crate) struct Evidence {
+    /// Determined receiver classes of unbound uses, keyed by `use_id`.
+    receivers: HashMap<i64, ReceiverClassRow>,
+    /// Every class-like declaration (traits included), keyed by canonical ID.
+    class_like: HashMap<String, SymbolRow>,
+    /// Every class-like's up-set, built once per query from the declared
+    /// hierarchy. Built from the real hierarchy only when some receiver class
+    /// was recorded, since only rule 2 reads it.
+    subtypes: SubtypeIndex,
+}
+
+impl Evidence {
+    /// Loads the evidence of the acquired snapshot. `uses` and `bindings`
+    /// must be the snapshot's complete use and binding rows.
+    pub(crate) fn load(
+        store: &Store,
+        uses: &[UseRow],
+        bindings: &HashMap<i64, BindingRow>,
+    ) -> Result<Evidence, CliError> {
+        let symbols = store.list_symbols().map_err(index::store_error)?;
+        let receivers: HashMap<i64, ReceiverClassRow> = store
+            .list_receiver_classes()
+            .map_err(index::store_error)?
+            .into_iter()
+            .map(|row| (row.use_id, row))
+            .collect();
+        let hierarchy = if receivers.is_empty() {
+            Hierarchy::default()
+        } else {
+            let scopes = store.list_scopes().map_err(index::store_error)?;
+            // `Hierarchy::from_rows` does not depend on input order.
+            let binding_rows: Vec<BindingRow> = bindings.values().cloned().collect();
+            Hierarchy::from_rows(&symbols, uses, &scopes, &binding_rows)
+        };
+        let class_like: HashMap<String, SymbolRow> = symbols
+            .into_iter()
+            .filter(|row| {
+                matches!(
+                    row.kind,
+                    rivet_core::SymbolKind::Class
+                        | rivet_core::SymbolKind::Interface
+                        | rivet_core::SymbolKind::Enum
+                )
+            })
+            .map(|row| (row.id.clone(), row))
+            .collect();
+        let subtypes = SubtypeIndex::new(&hierarchy, class_like.values());
+        Ok(Evidence {
+            receivers,
+            class_like,
+            subtypes,
+        })
+    }
+}
+
+/// How many same-name unresolved uses reference mode excluded, by the
+/// evidence that excluded them (OUTPUT-CONTRACT `by_exclusion`). A use both
+/// kinds of evidence exclude counts once, as `incompatible_form`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ExclusionCounts {
+    /// Excluded by rule 1: the use form cannot name the target's kind.
+    pub(crate) incompatible_form: u64,
+    /// Excluded by rule 2: the receiver class is unrelated to the target's.
+    pub(crate) unrelated_receiver: u64,
+}
+
+/// The sorted matches of one query plus the uses excluded by evidence.
+pub(crate) struct Matches {
+    pub(crate) matches: Vec<ReferenceMatch>,
+    pub(crate) excluded: ExclusionCounts,
+}
+
 /// Selects, filters, and sorts the reference matches for one query.
 ///
 /// `Selection::Query` is the T23 `refs` rule: a use bound to the target keeps
@@ -111,19 +188,40 @@ pub(crate) fn bindings_by_use_id(store: &Store) -> Result<HashMap<i64, BindingRo
 /// use is `name_match`. `Selection::Contained` is the `symbol.calls` rule: a
 /// use contained by the target is kept, with the resolution of its own store
 /// binding (the call-to-callee evidence), or `name_match` when unresolved.
+///
+/// LR2: under `Selection::Query(Mode::References)` only, a same-name
+/// unresolved use that survives the kind and resolution filters is excluded
+/// when its form cannot name the target's kind
+/// ([`rivet_index::form_compatible`]) or its determined receiver class is
+/// unrelated to the target's class ([`ClassRelation::unrelated`]), and counted
+/// in [`Matches::excluded`]. A bound use is never excluded, and exclusion
+/// changes no tier. Candidate mode and `Selection::Contained` are unchanged.
 pub(crate) fn collect_matches(
     uses: &[UseRow],
     bindings: &HashMap<i64, BindingRow>,
+    evidence: &Evidence,
     target: &SymbolRow,
     selection: Selection,
     kinds: Option<&HashSet<RefKind>>,
     minimum: Resolution,
-) -> Vec<ReferenceMatch> {
+) -> Matches {
     // Dedupe by the contract key. The `uses` table already enforces the same
     // uniqueness, so this is a safety net; the first row for a key wins, and
     // `uses` is iterated in a deterministic order.
     let mut seen: HashSet<(String, u32, u32, RefKind)> = HashSet::new();
     let mut matches = Vec::new();
+    let mut excluded = ExclusionCounts::default();
+
+    let excluding = matches!(selection, Selection::Query(Mode::References));
+    let target_parent = target
+        .parent_id
+        .as_deref()
+        .and_then(|id| evidence.class_like.get(id));
+    let relation = if excluding {
+        ClassRelation::for_target(&evidence.subtypes, target, target_parent)
+    } else {
+        None
+    };
 
     for row in uses {
         let Some(use_id) = row.use_id else {
@@ -131,7 +229,7 @@ pub(crate) fn collect_matches(
         };
         let binding = bindings.get(&use_id);
 
-        let (resolution, resolved_target, include) = match selection {
+        let (resolution, resolved_target, include, unbound) = match selection {
             Selection::Query(mode) => {
                 // Folded by the target declaration's kind, exactly as the
                 // `rivet symbol` short-name lookup folds (AF4).
@@ -145,27 +243,38 @@ pub(crate) fn collect_matches(
                 // use follows its normalized unqualified name in both modes.
                 if bound_to_target {
                     let binding = binding.expect("bound_to_target requires a binding");
-                    (binding.resolution, Some(binding.target_id.clone()), true)
+                    (
+                        binding.resolution,
+                        Some(binding.target_id.clone()),
+                        true,
+                        false,
+                    )
                 } else if let Some(binding) = binding {
                     (
                         Resolution::NameMatch,
                         Some(binding.target_id.clone()),
                         mode == Mode::Candidates && name_matches,
+                        false,
                     )
                 } else {
-                    (Resolution::NameMatch, None, name_matches)
+                    (Resolution::NameMatch, None, name_matches, true)
                 }
             }
             Selection::Contained => {
                 if row.containing_symbol.as_deref() != Some(target.id.as_str()) {
-                    (Resolution::NameMatch, None, false)
+                    (Resolution::NameMatch, None, false, false)
                 } else if let Some(binding) = binding {
                     // The call is contained by the target; its resolution
                     // describes the link to the callee, exactly the stored
                     // binding `refs` reports for a use bound to that callee.
-                    (binding.resolution, Some(binding.target_id.clone()), true)
+                    (
+                        binding.resolution,
+                        Some(binding.target_id.clone()),
+                        true,
+                        false,
+                    )
                 } else {
-                    (Resolution::NameMatch, None, true)
+                    (Resolution::NameMatch, None, true, false)
                 }
             }
         };
@@ -186,6 +295,29 @@ pub(crate) fn collect_matches(
         if !seen.insert(key) {
             continue;
         }
+
+        // Evidence-based exclusion (LR2): only an unresolved same-name use in
+        // reference mode, after every filter, so each counted use is one the
+        // page would otherwise have listed under the same filters.
+        if excluding && unbound {
+            if !form_compatible(target, target_parent, row) {
+                excluded.incompatible_form += 1;
+                continue;
+            }
+            if let Some(relation) = relation.as_ref()
+                && let Some(receiver) = evidence.receivers.get(&use_id)
+            {
+                let receiver_row = receiver
+                    .class_id
+                    .as_deref()
+                    .and_then(|id| evidence.class_like.get(id));
+                if relation.unrelated(receiver, receiver_row) {
+                    excluded.unrelated_receiver += 1;
+                    continue;
+                }
+            }
+        }
+
         matches.push(ReferenceMatch {
             file: row.file.clone(),
             start_byte: row.start_byte,
@@ -222,7 +354,7 @@ pub(crate) fn collect_matches(
                     .cmp(b.resolved_target.as_deref().unwrap_or("").as_bytes())
             })
     });
-    matches
+    Matches { matches, excluded }
 }
 
 /// Counts and slices a sorted match list (OUTPUT-CONTRACT "Pagination and

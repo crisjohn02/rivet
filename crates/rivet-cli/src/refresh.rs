@@ -165,7 +165,7 @@ pub(crate) fn open_cached_store(root: &rivet_core::RootInfo) -> Result<Store, Cl
             ));
         }
     }
-    let store = Store::open(&rivet_dir).map_err(cached_store_error)?;
+    let store = Store::open_cached(&rivet_dir).map_err(cached_store_error)?;
     // Pin one committed snapshot before the first fact is read, so the
     // compatibility check, the reconstructed report, and every query read agree
     // on one snapshot (spec §12.4 step 4).
@@ -275,6 +275,11 @@ impl RefreshMode {
 ///
 /// History, newest first:
 ///
+/// - **php-rules-v3** — LR2: the resolver also records, for each member or
+///   scoped use no rule bound, the receiver class a receiver rule determined
+///   for it (`receiver_classes`), including a class that is not indexed.
+///   No binding or tier changes; reference mode reads the new rows to exclude
+///   same-name uses whose receiver class is unrelated to the target's.
 /// - **php-rules-v2** — records the resolution changes of AF1 through AF4,
 ///   which had shipped under v1: per-namespace-block top-level scopes (AF1);
 ///   kind-aware lookup, ASCII-only case folding, and the global function
@@ -286,7 +291,7 @@ impl RefreshMode {
 ///   binding nothing (AF4).
 /// - **php-rules-v1** — T19: the first real binding rules (imports and
 ///   functions), later extended by T20/T21 receivers under the same value.
-const RESOLVER_FINGERPRINT: &str = "php-rules-v2";
+const RESOLVER_FINGERPRINT: &str = "php-rules-v3";
 
 /// The `meta` key recording whether the committed bindings were resolved with
 /// the global function fallback suppressed because an enabled PHP file was not
@@ -843,16 +848,17 @@ fn refresh_inventory(
             next_use_id = next_use_id.saturating_add(1);
         }
     }
-    let (bindings, binding_count) = if resolve_needed {
-        let bindings = rivet_index::Resolver::new(&symbols, &uses, &scopes)
+    let (links, binding_count) = if resolve_needed {
+        let links = rivet_index::Resolver::new(&symbols, &uses, &scopes)
             .with_unindexed_php_files(php_unindexed)
-            .resolve();
-        let count = bindings.len() as u64;
-        (bindings, count)
+            .resolve_links();
+        let count = links.bindings.len() as u64;
+        (links, count)
     } else {
-        // Nothing the bindings depend on changed: keep the stored rows.
+        // Nothing the bindings depend on changed: keep the stored rows, and
+        // the receiver classes resolved with them (LR2).
         (
-            Vec::new(),
+            rivet_index::ResolvedLinks::default(),
             txn.store().count_bindings().map_err(store_error)?,
         )
     };
@@ -898,7 +904,8 @@ fn refresh_inventory(
                 symbols,
                 uses,
                 scopes,
-                bindings,
+                bindings: links.bindings,
+                receiver_classes: links.receiver_classes,
                 force,
                 regenerated,
             },
@@ -1321,6 +1328,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         dynamic_global_write: bool,
         parameter_lists: Vec<PersistedParameterList<'a>>,
         supertypes: Vec<PersistedSupertype<'a>>,
+        anonymous_supertypes: &'a [rivet_core::extract::AnonymousSupertype],
         declares: Vec<&'a str>,
     }
 
@@ -1373,6 +1381,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
                 dynamic_global_write: scope.facts.dynamic_global_write,
                 parameter_lists,
                 supertypes,
+                anonymous_supertypes: &scope.facts.anonymous_supertypes,
                 declares,
             };
             ScopeRow {
@@ -1582,6 +1591,7 @@ mod tests {
                 uses: Vec::new(),
                 scopes: Vec::new(),
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })

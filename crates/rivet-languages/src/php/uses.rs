@@ -61,13 +61,17 @@
 //! - an expression scope before `::` (`$obj::$p`, `$obj::C`,
 //!   `$this->f()::$p`) walked as code, so the uses inside it are recorded;
 //!   the expression itself is never a type use.
+//!
+//! LR2 adds one [`AnonymousSupertype`] fact per name in an anonymous class's
+//! `extends`/`implements` clauses, in the scope of that name's type use, so
+//! reference-mode exclusion sees anonymous classes as possible subtypes.
 
 use std::collections::{BTreeMap, HashMap};
 
 use rivet_core::extract::{
-    CallArg, CallArgKind, CallReceiver, DeclaredSupertype, ExtractedImport, ExtractedScope,
-    ExtractedUse, ImportKind, NewBinding, ParameterList, ReceiverEvidence, ScopeFacts, ScopeImport,
-    SupertypeRelation, TypedBinding, TypedOrigin, UseHint,
+    AnonymousSupertype, CallArg, CallArgKind, CallReceiver, DeclaredSupertype, ExtractedImport,
+    ExtractedScope, ExtractedUse, ImportKind, NewBinding, ParameterList, ReceiverEvidence,
+    ScopeFacts, ScopeImport, SupertypeRelation, TypedBinding, TypedOrigin, UseHint,
 };
 use rivet_core::{ExtractedSymbol, RefKind, Span, SymbolKind};
 use tree_sitter::Node;
@@ -487,8 +491,9 @@ impl Walker<'_> {
     /// Each name is pushed exactly as [`record_scope_class`](Self::record_scope_class)
     /// pushes an explicit class scope, so it resolves through the same import
     /// and namespace rules. A named class, interface, or enum also records one
-    /// [`DeclaredSupertype`] per name; an anonymous class is not a symbol and
-    /// a trait has no supertypes, so neither records the fact.
+    /// [`DeclaredSupertype`] per name. An anonymous class is not a symbol, so
+    /// it records one [`AnonymousSupertype`] per name instead (LR2); a trait
+    /// has no supertypes.
     fn visit_supertype_clauses(&mut self, node: Node<'_>) {
         let declared = match node.kind() {
             "class_declaration" | "interface_declaration" | "enum_declaration" => {
@@ -503,7 +508,28 @@ impl Walker<'_> {
                 _ => continue,
             };
             for name in named_children(clause) {
+                let before = self.uses.len();
                 if !self.record_scope_class(name) {
+                    continue;
+                }
+                // An anonymous class's header names are hierarchy candidates
+                // too (LR2), kept in the scope of their recorded type use.
+                if node.kind() == "anonymous_class"
+                    && self.uses.len() > before
+                    && let Some(recorded) = self.uses.last()
+                {
+                    let (scope_key, span) = (recorded.scope_key.clone(), recorded.span);
+                    let fact = AnonymousSupertype {
+                        class_start: node.start_byte() as u32,
+                        relation,
+                        spelling: self.text(name),
+                        span,
+                    };
+                    self.scope_facts
+                        .entry(scope_key)
+                        .or_default()
+                        .anonymous_supertypes
+                        .push(fact);
                     continue;
                 }
                 let (Some(symbol), Ok(span)) = (

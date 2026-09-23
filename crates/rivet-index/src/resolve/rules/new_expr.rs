@@ -63,7 +63,7 @@ use rivet_core::extract::UseHint;
 use rivet_store::UseRow;
 
 use crate::resolve::rules::rebinding::{ReadPoint, new_receiver_trusted};
-use crate::resolve::rules::resolve_class_spelling;
+use crate::resolve::rules::{ClassEvidence, class_evidence};
 use crate::resolve::{MemberUse, RuleCtx, ScopeFacts, SymbolId};
 
 /// Resolves a `new`-receiver member use conservatively.
@@ -72,6 +72,25 @@ pub(crate) fn resolve(
     use_row: &UseRow,
     facts: &ScopeFacts,
 ) -> Option<(SymbolId, Resolution)> {
+    // Only an indexed class can declare the member.
+    let ClassEvidence::Indexed(class) = receiver_class(ctx, use_row, facts)? else {
+        return None;
+    };
+    // The member must be of the kind the use names (AF2).
+    let member = MemberUse::of(use_row, facts)?;
+    ctx.unique_member(&class.id, &use_row.spelling, member)
+        .map(|member| (member.id.clone(), Resolution::Scoped))
+}
+
+/// The class of the trusted `new` assignment behind `use_row`'s receiver,
+/// under exactly the conditions [`resolve`] applies before binding (LR2). An
+/// unindexed class yields [`ClassEvidence::Named`]; `None` when the rule would
+/// refuse to determine a class.
+pub(crate) fn receiver_class<'a>(
+    ctx: &RuleCtx<'a>,
+    use_row: &UseRow,
+    facts: &ScopeFacts,
+) -> Option<ClassEvidence<'a>> {
     let hint: UseHint = serde_json::from_str(&use_row.hint_json).ok()?;
     let UseHint::NewExpr {
         class_spelling,
@@ -90,11 +109,7 @@ pub(crate) fn resolve(
     if !new_receiver_trusted(ctx, use_row, facts, variable, at) {
         return None;
     }
-    let class = resolve_class_spelling(ctx, &class_spelling, facts)?;
-    // The member must be of the kind the use names (AF2).
-    let member = MemberUse::of(use_row, facts)?;
-    ctx.unique_member(&class.id, &use_row.spelling, member)
-        .map(|member| (member.id.clone(), Resolution::Scoped))
+    class_evidence(ctx, &class_spelling, facts)
 }
 
 #[cfg(test)]
@@ -314,6 +329,7 @@ mod tests {
                 uses,
                 scopes,
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })

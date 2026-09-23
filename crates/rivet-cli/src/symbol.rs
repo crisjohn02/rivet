@@ -339,23 +339,29 @@ fn single(
         // supplied limit/offset (OUTPUT-CONTRACT "`rivet symbol`").
         let bindings = references::bindings_by_use_id(store)?;
         let all = references::all_uses(store)?;
+        let evidence = references::Evidence::load(store, &all, &bindings)?;
         let call_kinds: HashSet<RefKind> = HashSet::from([RefKind::Call]);
         let calls = references::collect_matches(
             &all,
             &bindings,
+            &evidence,
             row,
             Selection::Contained,
             Some(&call_kinds),
             options.minimum,
-        );
+        )
+        .matches;
+        // Reference-mode matching, so evidence-based exclusion applies (LR2).
         let called_by = references::collect_matches(
             &all,
             &bindings,
+            &evidence,
             row,
             Selection::Query(Mode::References),
             Some(&call_kinds),
             options.minimum,
-        );
+        )
+        .matches;
         object.insert(
             "calls".to_string(),
             references::call_list_object(store, &calls, options.limit, options.offset)?,

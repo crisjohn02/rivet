@@ -409,13 +409,33 @@ pub struct DeclaredSupertype {
     pub span: Span,
 }
 
+/// One supertype an anonymous class names in its header (LR2).
+///
+/// An anonymous class is not a symbol, but an object of it is an instance of
+/// every supertype it names, so reference-mode exclusion must count it as a
+/// possible common subtype. Like [`DeclaredSupertype`], the name is also a
+/// [`RefKind::Type`] use with span [`span`](Self::span) in the same scope, so
+/// it resolves through that use's binding and scope chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnonymousSupertype {
+    /// The start byte of the `anonymous_class` node, which identifies the
+    /// anonymous class within its file.
+    pub class_start: u32,
+    /// Whether the name appears in an `extends` or an `implements` clause.
+    pub relation: SupertypeRelation,
+    /// The name as written.
+    pub spelling: String,
+    /// The span of the name, identical to its type use's span.
+    pub span: Span,
+}
+
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
 /// `new_bindings`, `call_args`, `unanalysable`, `namespace_unattributed`,
 /// `class_constant_accesses`, `global_scope`, `call_sites`, `goto_present`,
-/// `global_names`, `dynamic_global_write`, `parameter_lists`, `supertypes`, and
-/// `declares`.
+/// `global_names`, `dynamic_global_write`, `parameter_lists`, `supertypes`,
+/// `anonymous_supertypes`, and `declares`.
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -493,6 +513,10 @@ pub struct ScopeFacts {
     /// directly in this scope (T36d), in symbol order, then source order.
     #[serde(default)]
     pub supertypes: Vec<DeclaredSupertype>,
+    /// Supertypes named by the headers of anonymous classes whose header
+    /// uses belong to this scope (LR2), in source order.
+    #[serde(default)]
+    pub anonymous_supertypes: Vec<AnonymousSupertype>,
     /// Indices of declarations introduced directly in this scope.
     pub declares: Vec<usize>,
 }

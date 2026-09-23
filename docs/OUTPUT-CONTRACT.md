@@ -110,6 +110,7 @@ Resolution values are `exact`, `scoped`, `name_match`; they describe evidence fo
   "truncated": false,
   "next_offset": null,
   "by_resolution": {"exact": 0, "scoped": 1, "name_match": 0},
+  "by_exclusion": {"incompatible_form": 0, "unrelated_receiver": 0},
   "references": [
     {
       "file": "src/main.ts",
@@ -131,6 +132,8 @@ Resolution values are `exact`, `scoped`, `name_match`; they describe evidence fo
 Here and in subsequent shape examples, `{}` at `index` or `symbol` means the complete common object defined above, not an empty object allowed in actual output. `containing_symbol` is a full symbol object or null for top-level uses; uses inside anonymous functions inherit the nearest named container. `receiver` is source text or null. `resolved_target` is a canonical ID or null. `ref_kind`: `call`, `type`, `import`, `assignment`, `read`, `write`, `unknown`; v0.1 may use `unknown` where finer classification is unsupported.
 
 Default `mode` is `references`; `--mode candidates` also includes extracted same-name uses bound elsewhere. Both include alias uses bound to the queried declaration. Declarations and literal text are excluded. Dedupe by `(file, start_byte, end_byte, ref_kind)`; a call is never repeated as `unknown`.
+
+`by_exclusion` (additive, LR2) is always present, with keys in the order shown. It counts the same-name unresolved uses reference mode left out by evidence (spec §11.5): `incompatible_form` when the use form cannot name the target's kind, `unrelated_receiver` when no object could be an instance of both the use's determined receiver class and the target's class. A use both kinds of evidence exclude counts once, as `incompatible_form`. Counts cover uses that pass the kind and resolution filters, are computed before pagination, and do not depend on `--limit`/`--offset`; excluded uses are not in `total` or `by_resolution`. Both are always 0 in `--mode candidates`, which excludes nothing by evidence. Human output adds one line, `N name matches excluded by evidence (see --mode candidates)`, when their sum is non-zero. `symbol.called_by` and `context` callers apply the same exclusion without reporting counts.
 
 ## `rivet symbol <query> --json`
 

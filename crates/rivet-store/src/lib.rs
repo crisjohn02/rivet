@@ -3,8 +3,9 @@
 //!
 //! This crate owns the disposable index cache. [`Store::open`] validates the
 //! `.rivet/` destination before touching the database, opens `index.db` with
-//! foreign keys enabled, and either creates the version-1 schema or refuses a
-//! database whose `meta.index_format_version` differs. Minimal row operations
+//! foreign keys enabled, and either creates the current schema, rebuilds a
+//! supported older format, or refuses a database whose
+//! `meta.index_format_version` is otherwise different. Minimal row operations
 //! run inside explicit transactions. [`Store::publish_inventory`] atomically
 //! replaces the complete file inventory and writes the configuration
 //! fingerprints plus the deterministic snapshot digest. [`Store::begin_write`]
@@ -35,10 +36,23 @@ pub const WRITER_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// default for every statement on a connection.
 const DEFAULT_BUSY_TIMEOUT_MS: i64 = 5_000;
 
-/// The only supported value of `meta.index_format_version`.
-pub const INDEX_FORMAT_VERSION: &str = "1";
+/// The current value of `meta.index_format_version`.
+///
+/// History, newest first (RELEASING "Index format version": it increments when
+/// the SQLite schema changes; supported older formats rebuild, unknown ones
+/// are refused):
+///
+/// - **2** — LR2: the `receiver_classes` table.
+/// - **1** — T08: the first schema.
+pub const INDEX_FORMAT_VERSION: &str = "2";
 
-/// The complete version-1 schema from ARCHITECTURE "Minimal logical schema".
+/// Older `meta.index_format_version` values this build recognizes. A writable
+/// open drops and recreates such a disposable cache, because nothing in it
+/// can be migrated more cheaply than it can be rebuilt; a read-only
+/// (`--no-refresh`) open refuses it like any other incompatible format.
+const SUPPORTED_OLDER_FORMAT_VERSIONS: &[&str] = &["1"];
+
+/// The complete current schema from ARCHITECTURE "Minimal logical schema".
 ///
 /// `PRAGMA foreign_keys = ON` is applied per connection in
 /// [`configure_connection`] rather than here.
@@ -108,6 +122,14 @@ CREATE TABLE bindings (
   resolution TEXT NOT NULL CHECK(resolution IN ('exact', 'scoped'))
 );
 CREATE INDEX bindings_target ON bindings(target_id);
+
+CREATE TABLE receiver_classes (
+  use_id INTEGER PRIMARY KEY REFERENCES uses(use_id) ON DELETE CASCADE,
+  class_qname TEXT NOT NULL,
+  class_id TEXT REFERENCES symbols(id) ON DELETE CASCADE
+); -- LR2: the receiver class a receiver rule determined for an unbound
+   -- member/scoped use; class_id is set only for an indexed class-like
+CREATE INDEX receiver_classes_class ON receiver_classes(class_id);
 
 CREATE TABLE scopes (
   file TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
@@ -298,6 +320,24 @@ pub struct BindingRow {
     pub resolution: Resolution,
 }
 
+/// One row of the `receiver_classes` table (LR2).
+///
+/// For a use that no rule bound, the class a receiver rule determined for its
+/// member or scoped receiver (`$this`, `self`, a trusted `new` or typed
+/// receiver, or a class named before `::`), under the same trust conditions
+/// the rule applies before binding. It is never a binding: it links no use to
+/// a declaration and carries no tier. Reference mode reads it only to exclude
+/// a same-name use whose receiver class is unrelated to the target's class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverClassRow {
+    /// SQLite row ID of the unbound use.
+    pub use_id: i64,
+    /// The receiver class's fully qualified name, without a leading `\`.
+    pub class_qname: String,
+    /// The canonical ID of that class when it is indexed, else `None`.
+    pub class_id: Option<String>,
+}
+
 /// The four fingerprint inputs that identify an indexed snapshot's
 /// configuration (ARCHITECTURE "Refresh and invalidation").
 ///
@@ -340,6 +380,9 @@ pub struct InventoryInput {
     /// replaced (spec §12.3; always, unless a [`StagePlan`] keeps them). Each
     /// `use_id` must name a use in `uses`.
     pub bindings: Vec<BindingRow>,
+    /// Every determined receiver class of an unbound use (LR2). Replaced
+    /// together with [`InventoryInput::bindings`], under the same rules.
+    pub receiver_classes: Vec<ReceiverClassRow>,
     /// `--force`: delete every stored fact and rebuild it in this same
     /// transaction, so all current file rows count as `updated`.
     pub force: bool,
@@ -522,6 +565,28 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
+/// Which existing databases of another format an open may drop and recreate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rebuild {
+    /// None: every other format is refused unmodified.
+    Never,
+    /// Only [`SUPPORTED_OLDER_FORMAT_VERSIONS`].
+    Older,
+    /// Any other format (`index --force`).
+    Any,
+}
+
+impl Rebuild {
+    /// Whether a database whose stored format is `found` may be rebuilt.
+    fn allows(self, found: &str) -> bool {
+        match self {
+            Rebuild::Never => false,
+            Rebuild::Older => SUPPORTED_OLDER_FORMAT_VERSIONS.contains(&found),
+            Rebuild::Any => true,
+        }
+    }
+}
+
 /// An open index cache.
 #[derive(Debug)]
 pub struct Store {
@@ -536,12 +601,22 @@ impl Store {
     /// The destination is validated before any write: `rivet_dir` must exist
     /// and be a real directory, and `index.db` (if present) must be a regular
     /// file, never a symlink. The connection enables foreign keys and a five
-    /// second busy timeout. An empty database receives the version-1 schema; an
-    /// existing database with a different `meta.index_format_version` is
-    /// refused without modifying it. WAL journaling is enabled only after the
-    /// format is known to be compatible.
+    /// second busy timeout. An empty database receives the current schema. An
+    /// existing database in a supported older format (LR2: version `1`) is a
+    /// disposable cache and is dropped and recreated under the writer lock
+    /// (RELEASING "Index format version": "supported older formats rebuild");
+    /// any other different `meta.index_format_version` is refused without
+    /// modifying it. WAL journaling is enabled only after the format is known
+    /// to be compatible.
     pub fn open(rivet_dir: &Path) -> Result<Store, Error> {
-        Store::open_with_rebuild(rivet_dir, false)
+        Store::open_with_rebuild(rivet_dir, Rebuild::Older)
+    }
+
+    /// Opens an existing index cache for a read-only answer (`--no-refresh`):
+    /// like [`Store::open`], but a database in any other format, older ones
+    /// included, is refused unmodified, because this path must not write.
+    pub fn open_cached(rivet_dir: &Path) -> Result<Store, Error> {
+        Store::open_with_rebuild(rivet_dir, Rebuild::Never)
     }
 
     /// Opens the index cache, dropping and recreating the schema when an
@@ -549,20 +624,20 @@ impl Store {
     ///
     /// This is the `index --force` path: the cache is disposable, so after
     /// [`validate_destination`] accepts the destination an incompatible
-    /// database is torn down and the version-1 schema recreated (spec §13;
+    /// database is torn down and the current schema recreated (spec §13;
     /// ARCHITECTURE "Concurrency and source consistency"). User source and
     /// configuration are never touched.
     pub fn open_rebuildable(rivet_dir: &Path) -> Result<Store, Error> {
-        Store::open_with_rebuild(rivet_dir, true)
+        Store::open_with_rebuild(rivet_dir, Rebuild::Any)
     }
 
-    /// Shared implementation of [`Store::open`] and [`Store::open_rebuildable`].
-    fn open_with_rebuild(rivet_dir: &Path, allow_rebuild: bool) -> Result<Store, Error> {
+    /// Shared implementation of the three file-backed opens.
+    fn open_with_rebuild(rivet_dir: &Path, rebuild: Rebuild) -> Result<Store, Error> {
         validate_destination(rivet_dir)?;
         let path = rivet_dir.join(INDEX_DB_FILE);
         let conn = Connection::open(&path)?;
         configure_connection(&conn)?;
-        initialize(&conn, allow_rebuild)?;
+        initialize(&conn, rebuild)?;
         // Set WAL only after the format is accepted so a refused database is
         // left byte-for-byte unchanged (spec §27).
         enable_wal(&conn)?;
@@ -572,14 +647,14 @@ impl Store {
         })
     }
 
-    /// Opens a fresh in-memory index cache with the version-1 schema.
+    /// Opens a fresh in-memory index cache with the current schema.
     ///
     /// Intended for tests: no filesystem destination is touched and WAL is not
     /// applicable.
     pub fn open_in_memory() -> Result<Store, Error> {
         let conn = Connection::open_in_memory()?;
         configure_connection(&conn)?;
-        initialize(&conn, false)?;
+        initialize(&conn, Rebuild::Never)?;
         Ok(Store {
             conn,
             db_path: None,
@@ -969,6 +1044,23 @@ impl Store {
         })
     }
 
+    /// Returns every persisted receiver class ordered by `use_id` (LR2).
+    pub fn list_receiver_classes(&self) -> Result<Vec<ReceiverClassRow>, Error> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT use_id, class_qname, class_id FROM receiver_classes ORDER BY use_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ReceiverClassRow {
+                    use_id: row.get(0)?,
+                    class_qname: row.get(1)?,
+                    class_id: row.get(2)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<ReceiverClassRow>>>()?)
+        })
+    }
+
     /// Returns every persisted use ordered by `(file bytes, start_byte,
     /// end_byte, ref_kind, use_id)`: per file, the same order as
     /// [`Store::list_uses_for_file`], in one query.
@@ -1109,11 +1201,12 @@ impl WriteTxn<'_> {
             uses,
             scopes,
             bindings,
+            receiver_classes,
             force,
             regenerated,
         } = input;
         let plan = if force { StagePlan::full() } else { plan };
-        if !plan.replace_bindings && !bindings.is_empty() {
+        if !plan.replace_bindings && !(bindings.is_empty() && receiver_classes.is_empty()) {
             return Err(Error::TransactionState {
                 detail: "bindings were supplied but the plan keeps the stored bindings".to_string(),
             });
@@ -1181,6 +1274,7 @@ impl WriteTxn<'_> {
         // exist (spec §12.3).
         if plan.replace_bindings {
             tx.execute("DELETE FROM bindings", [])?;
+            tx.execute("DELETE FROM receiver_classes", [])?;
         }
 
         // A forced rebuild discards every stored fact before writing the new
@@ -1308,6 +1402,7 @@ impl WriteTxn<'_> {
         }
         if plan.replace_bindings {
             insert_bindings_in_tx(tx, &bindings)?;
+            insert_receiver_classes_in_tx(tx, &receiver_classes)?;
         }
 
         let digest_files = sorted
@@ -1581,6 +1676,22 @@ fn insert_bindings_in_tx(tx: &Connection, bindings: &[BindingRow]) -> Result<(),
     Ok(())
 }
 
+/// Inserts every determined receiver class inside the caller's transaction
+/// (LR2), after every use exists. A duplicate `use_id` aborts the
+/// transaction.
+fn insert_receiver_classes_in_tx(tx: &Connection, rows: &[ReceiverClassRow]) -> Result<(), Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut insert = tx.prepare(
+        "INSERT INTO receiver_classes (use_id, class_qname, class_id) VALUES (?1, ?2, ?3)",
+    )?;
+    for row in rows {
+        insert.execute(params![row.use_id, row.class_qname, row.class_id])?;
+    }
+    Ok(())
+}
+
 /// Maps a `bindings` row to a [`BindingRow`].
 fn binding_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<BindingRow> {
     let use_id: i64 = row.get("use_id")?;
@@ -1713,14 +1824,16 @@ fn enable_wal(conn: &Connection) -> Result<(), Error> {
 
 /// Creates the schema when empty, or validates an existing format version.
 ///
-/// When `allow_rebuild` is set and the stored version differs, the disposable
-/// cache is torn down and recreated instead of being refused.
-fn initialize(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
+/// When `rebuild` allows the stored version, the disposable cache is torn down
+/// and recreated instead of being refused.
+fn initialize(conn: &Connection, rebuild: Rebuild) -> Result<(), Error> {
     // Fast path without a lock: a current database needs no write, and an
     // incompatible one is refused without being modified (spec §27).
     match read_existing_version(conn)? {
         Some(found) if found == INDEX_FORMAT_VERSION => return ensure_additive_indexes(conn),
-        Some(found) if !allow_rebuild => return Err(Error::IncompatibleIndexFormat { found }),
+        Some(found) if !rebuild.allows(&found) => {
+            return Err(Error::IncompatibleIndexFormat { found });
+        }
         _ => {}
     }
 
@@ -1731,10 +1844,11 @@ fn initialize(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
     // source consistency": an index-format mismatch "rebuilds the disposable
     // cache under the writer lock"). `PRAGMA foreign_keys` is a no-op inside a
     // transaction, so a rebuild disables it before `BEGIN IMMEDIATE`.
+    let allow_rebuild = rebuild != Rebuild::Never;
     if allow_rebuild {
         conn.pragma_update(None, "foreign_keys", "OFF")?;
     }
-    let result = initialize_locked(conn, allow_rebuild);
+    let result = initialize_locked(conn, rebuild);
     if allow_rebuild {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         if !pragma_foreign_keys(conn)? {
@@ -1748,7 +1862,7 @@ fn initialize(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
 
 /// Creates or rebuilds the schema inside one `BEGIN IMMEDIATE` transaction,
 /// deciding from the format version read under the lock.
-fn initialize_locked(conn: &Connection, allow_rebuild: bool) -> Result<(), Error> {
+fn initialize_locked(conn: &Connection, rebuild: Rebuild) -> Result<(), Error> {
     if let Err(error) = conn.execute_batch("BEGIN IMMEDIATE") {
         return Err(if is_busy(&error) {
             Error::WriterLocked {
@@ -1764,7 +1878,7 @@ fn initialize_locked(conn: &Connection, allow_rebuild: bool) -> Result<(), Error
         Ok(Some(found)) if found == INDEX_FORMAT_VERSION => {
             conn.execute_batch(PARENT_INDEX_SQL).map_err(Error::from)
         }
-        Ok(Some(_)) if allow_rebuild => rebuild_schema(conn),
+        Ok(Some(found)) if rebuild.allows(&found) => rebuild_schema(conn),
         Ok(Some(found)) => Err(Error::IncompatibleIndexFormat { found }),
         Err(error) => Err(error),
     };
@@ -1815,7 +1929,7 @@ fn is_read_only(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Drops every user table and recreates the version-1 schema inside the
+/// Drops every user table and recreates the current schema inside the
 /// caller's transaction.
 ///
 /// The caller has disabled foreign keys so tables can be dropped in any order.
@@ -1864,7 +1978,7 @@ fn read_existing_version(conn: &Connection) -> Result<Option<String>, Error> {
     Ok(Some(value.unwrap_or_default()))
 }
 
-/// Creates the full version-1 schema and records the format version inside
+/// Creates the full current schema and records the format version inside
 /// the caller's transaction.
 fn create_schema(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(SCHEMA_SQL)?;
@@ -2093,6 +2207,7 @@ mod tests {
             uses: Vec::new(),
             scopes: Vec::new(),
             bindings: Vec::new(),
+            receiver_classes: Vec::new(),
             force: false,
             regenerated: Vec::new(),
         }
@@ -2238,6 +2353,7 @@ mod tests {
                 uses: Vec::new(),
                 scopes: Vec::new(),
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: true,
                 regenerated: Vec::new(),
             })
@@ -2517,6 +2633,7 @@ mod tests {
                 "diagnostics",
                 "files",
                 "meta",
+                "receiver_classes",
                 "scopes",
                 "symbols",
                 "uses"
@@ -2753,6 +2870,7 @@ mod tests {
                 uses: Vec::new(),
                 scopes: Vec::new(),
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
@@ -2787,6 +2905,7 @@ mod tests {
                 uses: Vec::new(),
                 scopes: Vec::new(),
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
@@ -2804,6 +2923,7 @@ mod tests {
                 uses: Vec::new(),
                 scopes: Vec::new(),
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
@@ -2873,6 +2993,7 @@ mod tests {
                     target_id: symbol.id.clone(),
                     resolution: Resolution::Exact,
                 }],
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
@@ -2894,11 +3015,70 @@ mod tests {
                 uses: Vec::new(),
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
             .unwrap();
         assert!(store.list_bindings().unwrap().is_empty());
+    }
+
+    #[test]
+    fn receiver_classes_round_trip_and_are_replaced_with_bindings() {
+        let mut store = Store::open_in_memory().unwrap();
+        let facts_json =
+            "{\"imports\":[],\"typed_bindings\":[],\"new_bindings\":[],\"declares\":[]}";
+        let class = sample_symbol("a.php", "a.php#App\\K", "K", 0);
+        let mut indexed = sample_use("a.php", "save", "save", RefKind::Call, 10, 14);
+        indexed.use_id = Some(3);
+        let mut vendor = sample_use("a.php", "save", "save", RefKind::Call, 20, 24);
+        vendor.use_id = Some(4);
+        use super::ReceiverClassRow;
+        let rows = vec![
+            ReceiverClassRow {
+                use_id: 3,
+                class_qname: "App\\K".to_string(),
+                class_id: Some(class.id.clone()),
+            },
+            ReceiverClassRow {
+                use_id: 4,
+                class_qname: "Vendor\\Request".to_string(),
+                class_id: None,
+            },
+        ];
+        let input = |uses: Vec<UseRow>, receiver_classes: Vec<ReceiverClassRow>| InventoryInput {
+            fingerprint: sample_fingerprint(),
+            files: vec![sample_file("a.php")],
+            symbols: vec![class.clone()],
+            uses,
+            scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
+            bindings: Vec::new(),
+            receiver_classes,
+            force: false,
+            regenerated: Vec::new(),
+        };
+        store
+            .publish_inventory(input(vec![indexed.clone(), vendor.clone()], rows.clone()))
+            .unwrap();
+        assert_eq!(store.list_receiver_classes().unwrap(), rows);
+
+        // Supplying rows with a plan that keeps the stored bindings is refused.
+        let keep = StagePlan {
+            reparsed: Some(std::collections::HashSet::new()),
+            replace_bindings: false,
+        };
+        let mut txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+        assert!(matches!(
+            txn.stage_refresh(input(vec![indexed, vendor], rows), keep),
+            Err(Error::TransactionState { .. })
+        ));
+        drop(txn);
+
+        // Every publish that replaces bindings replaces these rows too.
+        store
+            .publish_inventory(input(Vec::new(), Vec::new()))
+            .unwrap();
+        assert!(store.list_receiver_classes().unwrap().is_empty());
     }
 
     #[test]
@@ -2916,6 +3096,7 @@ mod tests {
                 uses: vec![use_row.clone()],
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
@@ -2960,6 +3141,7 @@ mod tests {
                 uses: rows,
                 scopes: Vec::new(),
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })
@@ -2996,6 +3178,7 @@ mod tests {
                 uses: vec![sample_use("a.php", "g", "g", RefKind::Call, 0, 1)],
                 scopes: vec![sample_scope("a.php", "top:file", None, facts_json)],
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })

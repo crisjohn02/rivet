@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T36d |
+| Last completed task | LR2 |
 | Next task | User decision on the pilot result: fix and retest is recommended (benchmark/results/pilot-01/RESULT.md) |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T36d: class/interface/enum `extends`/`implements` names (named and anonymous classes) are `type` uses resolved by the existing import/namespace rules; expression scopes before `::` are walked; `ScopeFacts.supertypes` persists each named class-like's declared supertypes in `scopes.facts_json`, read by `rivet_index::Hierarchy` (`direct_supertypes`, `ancestors`). fact-schema 9 -> 10 (resolver fingerprint unchanged; no store schema change). The 12 t34-json goldens changed only in `index.snapshot` (fingerprint bump). fmt, clippy -D warnings, 661 workspace tests (1 ignored, T36a), and 51 gold entries pass. |
+| Last checks | LR2: reference mode excludes a same-name unresolved use by use form (spec §11.5 table) or by a receiver class with no possible common subtype with the target's class (indexed and anonymous subtypes; unindexed links keep unindexed receivers); `refs` reports `by_exclusion`. New `receiver_classes` table (index format 1 -> 2; format 1 rebuilds on a writable open, `--no-refresh` refuses it); resolver `php-rules-v2` -> `php-rules-v3`; fact-schema 10 -> 11 (`anonymous_supertypes`). t34-json goldens changed only in `index.snapshot` and the new `by_exclusion` field; two tests updated for genuinely excluded receiver calls against functions. fmt, clippy -D warnings, 673 workspace tests (1 ignored, T36a), and 51 gold entries pass. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -172,6 +172,7 @@ Read: BENCHMARK pilot, isolation, collected metrics, and decision rules; IMPLEME
 | [x] | T39 | Run the agreed small pilot, retaining successes, failures, token usage, wall time, and transcripts. | Both arms run under comparable limits, including indexing cost. If credentials, access, or an explicit run/spend budget are missing, record the blocker instead of consuming unspecified usage. |
 | [x] | T40 | Write a short pilot result and choose the next smallest change. | Report reference usefulness, adoption, tokens, latency, and limitations. Choose fix/retest, proceed to TypeScript, or re-scope; do not label the pilot a passed confirmatory benchmark. |
 | [x] | SN1 | Change the managed snippet to recommend the compact text output instead of `--json`, which pilot-01 agents never used. User-approved treatment change. | `rivet snippet` and docs/AGENT-SNIPPET.md agree byte for byte with only the one sentence changed; the new snippet hash is recorded. |
+| [x] | LR2 | Evidence-based exclusion in `refs --mode references`: leave out a same-name unresolved use whose form cannot name the target kind, or whose receiver class (determined by a receiver rule, indexed or not) shares no possible subtype with the target's class (review fix: common-subtype rule, anonymous-class headers recorded); report `by_exclusion`. On a real Laravel application about 93% of call uses are unbound. | The spec §11.5 rule table is implemented exactly; candidate mode is byte-identical; bound uses, trait targets, refused hints and unknown ancestry are never excluded; counts are page-independent; `context` inherits the rule. |
 
 **Gate G:** T41 onward stays deferred until the pilot supports spending further effort. No full 300+ run benchmark is implied by completing this queue's PHP tasks.
 

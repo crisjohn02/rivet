@@ -617,6 +617,7 @@ fn old_fact_schema_snapshot_is_reparsed_and_conditional_stays_unbound() {
                 uses,
                 scopes,
                 bindings: Vec::new(),
+                receiver_classes: Vec::new(),
                 force: false,
                 regenerated: Vec::new(),
             })

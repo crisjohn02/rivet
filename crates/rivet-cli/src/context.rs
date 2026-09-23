@@ -167,6 +167,7 @@ pub fn collect_candidates(
     // reference pipeline so there is exactly one matcher.
     let uses = references::all_uses(store)?;
     let bindings = references::bindings_by_use_id(store)?;
+    let evidence = references::Evidence::load(store, &uses, &bindings)?;
 
     let call_kinds: HashSet<RefKind> = HashSet::from([RefKind::Call]);
     let type_kinds: HashSet<RefKind> = HashSet::from([RefKind::Type]);
@@ -184,11 +185,14 @@ pub fn collect_candidates(
     for reference in references::collect_matches(
         &uses,
         &bindings,
+        &evidence,
         target,
         Selection::Contained,
         Some(&call_kinds),
         Resolution::NameMatch,
-    ) {
+    )
+    .matches
+    {
         push_bound(
             &mut candidates,
             &by_id,
@@ -202,11 +206,14 @@ pub fn collect_candidates(
     for reference in references::collect_matches(
         &uses,
         &bindings,
+        &evidence,
         target,
         Selection::Contained,
         Some(&type_kinds),
         Resolution::NameMatch,
-    ) {
+    )
+    .matches
+    {
         push_bound(
             &mut candidates,
             &by_id,
@@ -223,11 +230,14 @@ pub fn collect_candidates(
     for reference in references::collect_matches(
         &uses,
         &bindings,
+        &evidence,
         target,
         Selection::Query(Mode::References),
         Some(&call_kinds),
         Resolution::NameMatch,
-    ) {
+    )
+    .matches
+    {
         let Some(container_id) = reference.containing_symbol.as_deref() else {
             continue;
         };
@@ -477,7 +487,8 @@ pub fn collect_ranked(
     let symbols = store.list_symbols().map_err(index::store_error)?;
     let uses = references::all_uses(store)?;
     let bindings = references::bindings_by_use_id(store)?;
-    let graph = UseGraph::new(&symbols, &uses, &bindings, config, options);
+    let evidence = references::Evidence::load(store, &uses, &bindings)?;
+    let graph = UseGraph::new(&symbols, &uses, &bindings, &evidence, config, options);
 
     let mut traversal = Traversal {
         found: HashMap::new(),
@@ -514,6 +525,8 @@ struct UseGraph<'a> {
     by_id: HashMap<&'a str, &'a SymbolRow>,
     uses: &'a [rivet_store::UseRow],
     bindings: &'a HashMap<i64, rivet_store::BindingRow>,
+    /// Reference-mode exclusion evidence (LR2).
+    evidence: &'a references::Evidence,
     /// Use indices by `containing_symbol`, ascending.
     contained: HashMap<&'a str, Vec<usize>>,
     /// Call-use indices by `lookup_name`, ascending.
@@ -534,6 +547,7 @@ impl<'a> UseGraph<'a> {
         symbols: &'a [SymbolRow],
         uses: &'a [rivet_store::UseRow],
         bindings: &'a HashMap<i64, rivet_store::BindingRow>,
+        evidence: &'a references::Evidence,
         config: &ContextConfig,
         options: &ContextOptions,
     ) -> UseGraph<'a> {
@@ -588,6 +602,7 @@ impl<'a> UseGraph<'a> {
             by_id,
             uses,
             bindings,
+            evidence,
             contained,
             calls_by_name,
             calls_by_target,
@@ -625,11 +640,14 @@ impl<'a> UseGraph<'a> {
         for reference in references::collect_matches(
             &contained_rows,
             self.bindings,
+            self.evidence,
             symbol,
             Selection::Contained,
             Some(&self.contained_kinds),
             Resolution::NameMatch,
-        ) {
+        )
+        .matches
+        {
             let mut links = Vec::new();
             if let Some(bound) = reference.resolved_target.as_deref()
                 && let Some(&declaration) = self.by_id.get(bound)
@@ -684,11 +702,14 @@ impl<'a> UseGraph<'a> {
             for reference in references::collect_matches(
                 &caller_rows,
                 self.bindings,
+                self.evidence,
                 symbol,
                 Selection::Query(Mode::References),
                 Some(&call_kinds),
                 Resolution::NameMatch,
-            ) {
+            )
+            .matches
+            {
                 let is_test_file = self.test_globs.matches(&reference.file);
                 if self.exclude_test_files && is_test_file {
                     continue;
