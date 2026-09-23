@@ -1,0 +1,1563 @@
+{
+  "task": "T37",
+  "schema": 1,
+  "started_utc": "2026-09-23T04:09:16Z",
+  "runs_per_measurement": 7,
+  "environment": {
+    "machine_model": "Mac15,6",
+    "cpu": "Apple M3 Pro",
+    "cpu_cores_physical": "12",
+    "memory_bytes": 19327352832,
+    "os": "macOS 27.0 (26A428)",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "rivet_version": "rivet 0.1.0",
+    "rivet_commit": "fa970207486a3e361a9c590f0f31f1a98d642407",
+    "rivet_sources_clean": true,
+    "build": "cargo build --release",
+    "load_average_at_start": "{ 2.20 2.28 2.31 }",
+    "os_file_cache": "warm: each project copied and indexed once, untimed, before timed runs; cache never purged",
+    "timing": "wall clock of one process via time.perf_counter_ns around /usr/bin/time -l; includes process start",
+    "python": "3.14.7",
+    "load_average_at_end": "{ 2.61 2.52 2.40 }"
+  },
+  "corpus_pins": {
+    "fluent": "fc96ad75ea658e60df52dbbb8543077b0b931d14",
+    "timesheet": "17c26bb26099ef24bf750da7cdec8a3445081a04"
+  },
+  "projects": {
+    "fluent": {
+      "name": "fluent",
+      "commit": "fc96ad75ea658e60df52dbbb8543077b0b931d14",
+      "corpus": {
+        "files_seen": 2815,
+        "files_indexed": 1219,
+        "skipped": {
+          "unsupported": 1595,
+          "binary": 0,
+          "size": 0,
+          "encoding": 0,
+          "parse_error": 1,
+          "resource_limit": 0
+        },
+        "symbols": 11336,
+        "uses": 125299,
+        "bindings": 30751,
+        "php_files_hashed_estimate": 1220,
+        "php_bytes_hashed_estimate": 11084083
+      },
+      "index_size": {
+        "rivet_dir_bytes": 107065344,
+        "index_db_bytes": 107065344,
+        "ratio_to_php_bytes": 9.66
+      },
+      "cold_index": {
+        "wall_ms": {
+          "median": 3166.67,
+          "min": 3068.8,
+          "max": 3294.84,
+          "runs": 7
+        },
+        "max_rss_mb": {
+          "median": 218.28,
+          "min": 217.55,
+          "max": 218.48,
+          "runs": 7
+        },
+        "json_stderr_empty": true,
+        "stdout_identical_across_runs": null
+      },
+      "selection": {
+        "rule": "Among GENERIC_NAMES, the common-name query uses the name with at least 5 declarations whose best single declaration has the most `refs` results (references mode); its target is that declaration. The ambiguous symbol query uses the name with the most declarations. The high-fanout context query uses, among each name's most-referenced declaration, the one whose depth-2 context explores the most unique candidates (segments plus omitted), preferring candidate_limit_reached. Ties go to earlier list order, then earlier candidate order.",
+        "per_name": [
+          {
+            "name": "handle",
+            "declarations": 110,
+            "best_refs": 46
+          },
+          {
+            "name": "get",
+            "declarations": 2,
+            "best_refs": 1511
+          },
+          {
+            "name": "save",
+            "declarations": 5,
+            "best_refs": 488
+          },
+          {
+            "name": "create",
+            "declarations": 30,
+            "best_refs": 922
+          },
+          {
+            "name": "update",
+            "declarations": 57,
+            "best_refs": 319
+          },
+          {
+            "name": "delete",
+            "declarations": 7,
+            "best_refs": 315
+          },
+          {
+            "name": "store",
+            "declarations": 64,
+            "best_refs": 60
+          },
+          {
+            "name": "show",
+            "declarations": 34,
+            "best_refs": 0
+          },
+          {
+            "name": "index",
+            "declarations": 68,
+            "best_refs": 94
+          },
+          {
+            "name": "find",
+            "declarations": 1,
+            "best_refs": 339
+          },
+          {
+            "name": "toArray",
+            "declarations": 31,
+            "best_refs": 802
+          },
+          {
+            "name": "execute",
+            "declarations": 44,
+            "best_refs": 147
+          }
+        ],
+        "common_name": "create",
+        "ambiguous_symbol_name": "handle",
+        "fanout_name": "get",
+        "fanout_target_is_common_target": false
+      },
+      "no_change_index": {
+        "content": {
+          "wall_ms": {
+            "median": 87.01,
+            "min": 86.72,
+            "max": 223.58,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 36.39,
+            "min": 36.31,
+            "max": 36.47,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "metadata": {
+          "wall_ms": {
+            "median": 55.02,
+            "min": 54.4,
+            "max": 55.47,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 26.92,
+            "min": 26.72,
+            "max": 27.07,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "force": {
+          "wall_ms": {
+            "median": 3626.6,
+            "min": 3555.12,
+            "max": 3730.53,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 221.95,
+            "min": 221.54,
+            "max": 222.1,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        }
+      },
+      "no_change_query": {
+        "symbol": {
+          "content": {
+            "wall_ms": {
+              "median": 274.55,
+              "min": 273.26,
+              "max": 276.99,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 102.55,
+              "min": 101.66,
+              "max": 103.14,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "metadata": {
+            "wall_ms": {
+              "median": 236.91,
+              "min": 234.29,
+              "max": 241.08,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 93.6,
+              "min": 93.09,
+              "max": 94.06,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "no_refresh": {
+            "wall_ms": {
+              "median": 378.18,
+              "min": 374.12,
+              "max": 380.98,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 90.6,
+              "min": 90.24,
+              "max": 91.75,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "refs": {
+          "content": {
+            "wall_ms": {
+              "median": 271.7,
+              "min": 266.73,
+              "max": 272.95,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 102.37,
+              "min": 102.02,
+              "max": 103.02,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "metadata": {
+            "wall_ms": {
+              "median": 238.61,
+              "min": 233.91,
+              "max": 240.47,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 93.86,
+              "min": 93.29,
+              "max": 93.9,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "no_refresh": {
+            "wall_ms": {
+              "median": 373.43,
+              "min": 370.35,
+              "max": 378.39,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 91.42,
+              "min": 90.14,
+              "max": 91.64,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "context": {
+          "content": {
+            "wall_ms": {
+              "median": 324.8,
+              "min": 321.34,
+              "max": 328.45,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 113.07,
+              "min": 112.64,
+              "max": 114.16,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "metadata": {
+            "wall_ms": {
+              "median": 294.77,
+              "min": 289.71,
+              "max": 298.44,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 105.04,
+              "min": 104.45,
+              "max": 105.19,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "no_refresh": {
+            "wall_ms": {
+              "median": 431.64,
+              "min": 428.35,
+              "max": 443.78,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 103.06,
+              "min": 102.89,
+              "max": 103.17,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        }
+      },
+      "common_name_refs": {
+        "name": "create",
+        "declarations_with_name": 30,
+        "references": {
+          "total": 922,
+          "by_resolution": {
+            "exact": 0,
+            "scoped": 2,
+            "name_match": 920
+          },
+          "page_items": 50,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 268.18,
+              "min": 265.31,
+              "max": 282.81,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 102.33,
+              "min": 102.09,
+              "max": 102.45,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "candidates": {
+          "total": 933,
+          "by_resolution": {
+            "exact": 0,
+            "scoped": 2,
+            "name_match": 931
+          },
+          "page_items": 50,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 268.57,
+              "min": 265.37,
+              "max": 284.13,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 102.43,
+              "min": 102.3,
+              "max": 102.5,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "rg_reference_point": {
+          "available": true,
+          "version": "ripgrep 15.2.0",
+          "all_files": {
+            "command": "rg -n -w <name> .",
+            "matched_lines": 2262,
+            "wall_ms": {
+              "median": 46.68,
+              "min": 44.93,
+              "max": 56.53,
+              "runs": 7
+            }
+          },
+          "php_type_only": {
+            "command": "rg -n -w <name> -t php .",
+            "matched_lines": 1602,
+            "wall_ms": {
+              "median": 26.77,
+              "min": 25.68,
+              "max": 28.99,
+              "runs": 7
+            }
+          }
+        }
+      },
+      "high_fanout": {
+        "ambiguous_symbol": {
+          "name": "handle",
+          "candidates_total": 110,
+          "candidates_returned": 110,
+          "exit_code": 5,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 90.18,
+              "min": 89.14,
+              "max": 93.8,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 36.96,
+              "min": 36.73,
+              "max": 37.54,
+              "runs": 7
+            },
+            "stdout_identical_across_runs": true
+          }
+        },
+        "context": {
+          "name": "get",
+          "segments": 11,
+          "omitted": {
+            "budget": 734,
+            "overlap": 0,
+            "limit": 0
+          },
+          "explored_candidates": 745,
+          "candidate_limit_reached": false,
+          "estimated_tokens": 3997,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 327.43,
+              "min": 325.27,
+              "max": 329.93,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 112.95,
+              "min": 112.67,
+              "max": 113.85,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "symbol": {
+          "name": "get",
+          "called_by_total": 1511,
+          "calls_total": 0,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 272.15,
+              "min": 270.04,
+              "max": 272.91,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 102.47,
+              "min": 102.22,
+              "max": 103.07,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        }
+      },
+      "context_sizes": [
+        {
+          "command": "context <target> --tokens 1000",
+          "json_bytes": 6323,
+          "text_bytes": 3806,
+          "text_as_share_of_json": 0.6019,
+          "source_bytes": 2995,
+          "json_envelope_share": 0.5263,
+          "text_non_source_share": 0.2131,
+          "rivet_estimate_json": 2108,
+          "rivet_estimate_text": 1269,
+          "rivet_estimate_source": 999,
+          "blake3_hashes_in_json": 6,
+          "estimated_tokens_reported": 999,
+          "segments": 4,
+          "target": "common",
+          "budget_tokens": 1000
+        },
+        {
+          "command": "context <target> --tokens 4000",
+          "json_bytes": 21463,
+          "text_bytes": 14258,
+          "text_as_share_of_json": 0.6643,
+          "source_bytes": 11983,
+          "json_envelope_share": 0.4417,
+          "text_non_source_share": 0.1596,
+          "rivet_estimate_json": 7155,
+          "rivet_estimate_text": 4753,
+          "rivet_estimate_source": 3995,
+          "blake3_hashes_in_json": 16,
+          "estimated_tokens_reported": 4000,
+          "segments": 14,
+          "target": "common",
+          "budget_tokens": 4000
+        },
+        {
+          "command": "context <target> --tokens 16000",
+          "json_bytes": 70230,
+          "text_bytes": 53071,
+          "text_as_share_of_json": 0.7557,
+          "source_bytes": 47962,
+          "json_envelope_share": 0.3171,
+          "text_non_source_share": 0.0963,
+          "rivet_estimate_json": 23410,
+          "rivet_estimate_text": 17691,
+          "rivet_estimate_source": 15988,
+          "blake3_hashes_in_json": 36,
+          "estimated_tokens_reported": 15998,
+          "segments": 34,
+          "target": "common",
+          "budget_tokens": 16000
+        },
+        {
+          "command": "context <target> --tokens 64000",
+          "json_bytes": 98248,
+          "text_bytes": 73585,
+          "text_as_share_of_json": 0.749,
+          "source_bytes": 66261,
+          "json_envelope_share": 0.3256,
+          "text_non_source_share": 0.0995,
+          "rivet_estimate_json": 32750,
+          "rivet_estimate_text": 24529,
+          "rivet_estimate_source": 22087,
+          "blake3_hashes_in_json": 52,
+          "estimated_tokens_reported": 22103,
+          "segments": 50,
+          "target": "common",
+          "budget_tokens": 64000
+        },
+        {
+          "command": "context <target> --tokens 1000",
+          "json_bytes": 9854,
+          "text_bytes": 4738,
+          "text_as_share_of_json": 0.4808,
+          "source_bytes": 2995,
+          "json_envelope_share": 0.6961,
+          "text_non_source_share": 0.3679,
+          "rivet_estimate_json": 3285,
+          "rivet_estimate_text": 1580,
+          "rivet_estimate_source": 999,
+          "blake3_hashes_in_json": 11,
+          "estimated_tokens_reported": 1000,
+          "segments": 9,
+          "target": "fanout",
+          "budget_tokens": 1000
+        },
+        {
+          "command": "context <target> --tokens 4000",
+          "json_bytes": 20370,
+          "text_bytes": 14022,
+          "text_as_share_of_json": 0.6884,
+          "source_bytes": 11983,
+          "json_envelope_share": 0.4117,
+          "text_non_source_share": 0.1454,
+          "rivet_estimate_json": 6790,
+          "rivet_estimate_text": 4674,
+          "rivet_estimate_source": 3995,
+          "blake3_hashes_in_json": 13,
+          "estimated_tokens_reported": 3997,
+          "segments": 11,
+          "target": "fanout",
+          "budget_tokens": 4000
+        },
+        {
+          "command": "context <target> --tokens 16000",
+          "json_bytes": 76518,
+          "text_bytes": 49548,
+          "text_as_share_of_json": 0.6475,
+          "source_bytes": 40538,
+          "json_envelope_share": 0.4702,
+          "text_non_source_share": 0.1818,
+          "rivet_estimate_json": 25506,
+          "rivet_estimate_text": 16516,
+          "rivet_estimate_source": 13513,
+          "blake3_hashes_in_json": 52,
+          "estimated_tokens_reported": 13530,
+          "segments": 50,
+          "target": "fanout",
+          "budget_tokens": 16000
+        },
+        {
+          "command": "context <target> --tokens 64000",
+          "json_bytes": 76518,
+          "text_bytes": 49548,
+          "text_as_share_of_json": 0.6475,
+          "source_bytes": 40538,
+          "json_envelope_share": 0.4702,
+          "text_non_source_share": 0.1818,
+          "rivet_estimate_json": 25506,
+          "rivet_estimate_text": 16516,
+          "rivet_estimate_source": 13513,
+          "blake3_hashes_in_json": 52,
+          "estimated_tokens_reported": 13530,
+          "segments": 50,
+          "target": "fanout",
+          "budget_tokens": 64000
+        }
+      ],
+      "output_formats": [
+        {
+          "command": "symbol <target>",
+          "json_bytes": 54383,
+          "text_bytes": 12629,
+          "text_as_share_of_json": 0.2322,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 18128,
+          "rivet_estimate_text": 4210,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 146,
+          "calls_page_items": 22,
+          "called_by_page_items": 50,
+          "target": "common"
+        },
+        {
+          "command": "symbol <target> --source",
+          "json_bytes": 60781,
+          "text_bytes": 18891,
+          "text_as_share_of_json": 0.3108,
+          "source_bytes": 6252,
+          "json_envelope_share": 0.8971,
+          "text_non_source_share": 0.669,
+          "rivet_estimate_json": 20261,
+          "rivet_estimate_text": 6297,
+          "rivet_estimate_source": 2084,
+          "blake3_hashes_in_json": 146,
+          "calls_page_items": 22,
+          "called_by_page_items": 50,
+          "target": "common"
+        },
+        {
+          "command": "refs <target>",
+          "json_bytes": 38180,
+          "text_bytes": 8325,
+          "text_as_share_of_json": 0.218,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 12727,
+          "rivet_estimate_text": 2775,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 102,
+          "page_items": 50,
+          "total": 922,
+          "target": "common"
+        },
+        {
+          "command": "refs <target> --limit 1000",
+          "json_bytes": 710010,
+          "text_bytes": 224370,
+          "text_as_share_of_json": 0.316,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 236670,
+          "rivet_estimate_text": 74790,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 1770,
+          "page_items": 922,
+          "total": 922,
+          "target": "common"
+        },
+        {
+          "command": "context <target> --tokens 4000",
+          "json_bytes": 21463,
+          "text_bytes": 14258,
+          "text_as_share_of_json": 0.6643,
+          "source_bytes": 11983,
+          "json_envelope_share": 0.4417,
+          "text_non_source_share": 0.1596,
+          "rivet_estimate_json": 7155,
+          "rivet_estimate_text": 4753,
+          "rivet_estimate_source": 3995,
+          "blake3_hashes_in_json": 16,
+          "estimated_tokens_reported": 4000,
+          "segments": 14,
+          "target": "common"
+        },
+        {
+          "command": "symbol <target>",
+          "json_bytes": 41897,
+          "text_bytes": 9014,
+          "text_as_share_of_json": 0.2151,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 13966,
+          "rivet_estimate_text": 3005,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 102,
+          "calls_page_items": 0,
+          "called_by_page_items": 50,
+          "target": "fanout"
+        },
+        {
+          "command": "symbol <target> --source",
+          "json_bytes": 42013,
+          "text_bytes": 9125,
+          "text_as_share_of_json": 0.2172,
+          "source_bytes": 101,
+          "json_envelope_share": 0.9976,
+          "text_non_source_share": 0.9889,
+          "rivet_estimate_json": 14005,
+          "rivet_estimate_text": 3042,
+          "rivet_estimate_source": 34,
+          "blake3_hashes_in_json": 102,
+          "calls_page_items": 0,
+          "called_by_page_items": 50,
+          "target": "fanout"
+        },
+        {
+          "command": "refs <target>",
+          "json_bytes": 41720,
+          "text_bytes": 8988,
+          "text_as_share_of_json": 0.2154,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 13907,
+          "rivet_estimate_text": 2996,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 102,
+          "page_items": 50,
+          "total": 1511,
+          "target": "fanout"
+        },
+        {
+          "command": "refs <target> --limit 1000",
+          "json_bytes": 726779,
+          "text_bytes": 187350,
+          "text_as_share_of_json": 0.2578,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 242260,
+          "rivet_estimate_text": 62450,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 1799,
+          "page_items": 1000,
+          "total": 1511,
+          "target": "fanout"
+        },
+        {
+          "command": "context <target> --tokens 4000",
+          "json_bytes": 20370,
+          "text_bytes": 14022,
+          "text_as_share_of_json": 0.6884,
+          "source_bytes": 11983,
+          "json_envelope_share": 0.4117,
+          "text_non_source_share": 0.1454,
+          "rivet_estimate_json": 6790,
+          "rivet_estimate_text": 4674,
+          "rivet_estimate_source": 3995,
+          "blake3_hashes_in_json": 13,
+          "estimated_tokens_reported": 3997,
+          "segments": 11,
+          "target": "fanout"
+        }
+      ],
+      "one_file_edit": {
+        "index_content": {
+          "wall_ms": {
+            "median": 1207.82,
+            "min": 1174.7,
+            "max": 1222.22,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 210.22,
+            "min": 208.65,
+            "max": 210.52,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "index_metadata": {
+          "wall_ms": {
+            "median": 1174.84,
+            "min": 1146.44,
+            "max": 1203.73,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 205.8,
+            "min": 205.54,
+            "max": 206.03,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "refs_query_content": {
+          "wall_ms": {
+            "median": 1389.27,
+            "min": 1355.69,
+            "max": 1403.31,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 208.81,
+            "min": 208.42,
+            "max": 209.83,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": false
+        },
+        "refs_query_metadata": {
+          "wall_ms": {
+            "median": 1338.72,
+            "min": 1326.36,
+            "max": 1358.4,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 205.8,
+            "min": 205.5,
+            "max": 206.03,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": false
+        },
+        "updated_files_per_edit": 1
+      },
+      "derived_split_ms": {
+        "method": "differences of medians of whole-process wall times; no phase timing was added",
+        "content_hashing": 31.99,
+        "reparse_one_file_plus_full_reresolution": 1120.81,
+        "reparse_one_file_plus_full_reresolution_metadata_mode": 1119.82,
+        "force_minus_cold": 459.93,
+        "refs_refresh_overhead_content": -101.73,
+        "refs_refresh_overhead_metadata": -134.82
+      }
+    },
+    "timesheet": {
+      "name": "timesheet",
+      "commit": "17c26bb26099ef24bf750da7cdec8a3445081a04",
+      "corpus": {
+        "files_seen": 691,
+        "files_indexed": 250,
+        "skipped": {
+          "unsupported": 441,
+          "binary": 0,
+          "size": 0,
+          "encoding": 0,
+          "parse_error": 0,
+          "resource_limit": 0
+        },
+        "symbols": 1177,
+        "uses": 15610,
+        "bindings": 2448,
+        "php_files_hashed_estimate": 250,
+        "php_bytes_hashed_estimate": 950116
+      },
+      "index_size": {
+        "rivet_dir_bytes": 9748480,
+        "index_db_bytes": 9748480,
+        "ratio_to_php_bytes": 10.26
+      },
+      "cold_index": {
+        "wall_ms": {
+          "median": 297.83,
+          "min": 294.69,
+          "max": 312.21,
+          "runs": 7
+        },
+        "max_rss_mb": {
+          "median": 35.67,
+          "min": 35.32,
+          "max": 35.8,
+          "runs": 7
+        },
+        "json_stderr_empty": true,
+        "stdout_identical_across_runs": null
+      },
+      "selection": {
+        "rule": "Among GENERIC_NAMES, the common-name query uses the name with at least 5 declarations whose best single declaration has the most `refs` results (references mode); its target is that declaration. The ambiguous symbol query uses the name with the most declarations. The high-fanout context query uses, among each name's most-referenced declaration, the one whose depth-2 context explores the most unique candidates (segments plus omitted), preferring candidate_limit_reached. Ties go to earlier list order, then earlier candidate order.",
+        "per_name": [
+          {
+            "name": "handle",
+            "declarations": 13,
+            "best_refs": 0
+          },
+          {
+            "name": "get",
+            "declarations": 0,
+            "best_refs": -1
+          },
+          {
+            "name": "save",
+            "declarations": 0,
+            "best_refs": -1
+          },
+          {
+            "name": "create",
+            "declarations": 0,
+            "best_refs": -1
+          },
+          {
+            "name": "update",
+            "declarations": 6,
+            "best_refs": 69
+          },
+          {
+            "name": "delete",
+            "declarations": 0,
+            "best_refs": -1
+          },
+          {
+            "name": "store",
+            "declarations": 6,
+            "best_refs": 0
+          },
+          {
+            "name": "show",
+            "declarations": 6,
+            "best_refs": 0
+          },
+          {
+            "name": "index",
+            "declarations": 12,
+            "best_refs": 55
+          },
+          {
+            "name": "find",
+            "declarations": 0,
+            "best_refs": -1
+          },
+          {
+            "name": "toArray",
+            "declarations": 0,
+            "best_refs": -1
+          },
+          {
+            "name": "execute",
+            "declarations": 0,
+            "best_refs": -1
+          }
+        ],
+        "common_name": "update",
+        "ambiguous_symbol_name": "handle",
+        "fanout_name": "update",
+        "fanout_target_is_common_target": true
+      },
+      "no_change_index": {
+        "content": {
+          "wall_ms": {
+            "median": 22.97,
+            "min": 22.72,
+            "max": 27.07,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 13.01,
+            "min": 12.86,
+            "max": 13.14,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "metadata": {
+          "wall_ms": {
+            "median": 17.78,
+            "min": 17.28,
+            "max": 17.98,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 11.99,
+            "min": 11.88,
+            "max": 12.03,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "force": {
+          "wall_ms": {
+            "median": 324.66,
+            "min": 323.48,
+            "max": 329.2,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 36.27,
+            "min": 36.21,
+            "max": 36.34,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        }
+      },
+      "no_change_query": {
+        "symbol": {
+          "content": {
+            "wall_ms": {
+              "median": 48.15,
+              "min": 47.71,
+              "max": 51.26,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 21.73,
+              "min": 21.63,
+              "max": 21.92,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "metadata": {
+            "wall_ms": {
+              "median": 42.92,
+              "min": 42.16,
+              "max": 43.33,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 20.68,
+              "min": 20.64,
+              "max": 20.79,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "no_refresh": {
+            "wall_ms": {
+              "median": 54.64,
+              "min": 54.54,
+              "max": 56.4,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 18.96,
+              "min": 18.79,
+              "max": 19.14,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "refs": {
+          "content": {
+            "wall_ms": {
+              "median": 48.14,
+              "min": 46.68,
+              "max": 49.93,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 21.58,
+              "min": 21.46,
+              "max": 21.84,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "metadata": {
+            "wall_ms": {
+              "median": 42.85,
+              "min": 41.7,
+              "max": 45.05,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 20.73,
+              "min": 20.64,
+              "max": 20.84,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "no_refresh": {
+            "wall_ms": {
+              "median": 55.12,
+              "min": 54.73,
+              "max": 56.34,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 18.89,
+              "min": 18.79,
+              "max": 19.04,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "context": {
+          "content": {
+            "wall_ms": {
+              "median": 52.86,
+              "min": 52.32,
+              "max": 55.78,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 22.95,
+              "min": 22.84,
+              "max": 22.99,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "metadata": {
+            "wall_ms": {
+              "median": 47.97,
+              "min": 46.54,
+              "max": 48.44,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 22.05,
+              "min": 21.97,
+              "max": 22.25,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          },
+          "no_refresh": {
+            "wall_ms": {
+              "median": 59.42,
+              "min": 58.32,
+              "max": 59.75,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 21.32,
+              "min": 21.2,
+              "max": 21.48,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        }
+      },
+      "common_name_refs": {
+        "name": "update",
+        "declarations_with_name": 6,
+        "references": {
+          "total": 69,
+          "by_resolution": {
+            "exact": 0,
+            "scoped": 0,
+            "name_match": 69
+          },
+          "page_items": 50,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 47.55,
+              "min": 46.84,
+              "max": 48.63,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 21.58,
+              "min": 21.5,
+              "max": 21.82,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "candidates": {
+          "total": 69,
+          "by_resolution": {
+            "exact": 0,
+            "scoped": 0,
+            "name_match": 69
+          },
+          "page_items": 50,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 47.77,
+              "min": 47.08,
+              "max": 48.4,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 21.61,
+              "min": 21.56,
+              "max": 21.82,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "rg_reference_point": {
+          "available": true,
+          "version": "ripgrep 15.2.0",
+          "all_files": {
+            "command": "rg -n -w <name> .",
+            "matched_lines": 276,
+            "wall_ms": {
+              "median": 18.59,
+              "min": 16.37,
+              "max": 24.96,
+              "runs": 7
+            }
+          },
+          "php_type_only": {
+            "command": "rg -n -w <name> -t php .",
+            "matched_lines": 151,
+            "wall_ms": {
+              "median": 11.12,
+              "min": 10.03,
+              "max": 12.33,
+              "runs": 7
+            }
+          }
+        }
+      },
+      "high_fanout": {
+        "ambiguous_symbol": {
+          "name": "handle",
+          "candidates_total": 13,
+          "candidates_returned": 13,
+          "exit_code": 5,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 22.88,
+              "min": 22.5,
+              "max": 23.38,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 13.09,
+              "min": 12.96,
+              "max": 13.14,
+              "runs": 7
+            },
+            "stdout_identical_across_runs": true
+          }
+        },
+        "context": {
+          "name": "update",
+          "segments": 11,
+          "omitted": {
+            "budget": 53,
+            "overlap": 3,
+            "limit": 0
+          },
+          "explored_candidates": 67,
+          "candidate_limit_reached": false,
+          "estimated_tokens": 3995,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 52.66,
+              "min": 51.8,
+              "max": 53.83,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 22.87,
+              "min": 22.74,
+              "max": 23.04,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        },
+        "symbol": {
+          "name": "update",
+          "called_by_total": 69,
+          "calls_total": 16,
+          "timing_content_refresh": {
+            "wall_ms": {
+              "median": 48.21,
+              "min": 47.78,
+              "max": 49.39,
+              "runs": 7
+            },
+            "max_rss_mb": {
+              "median": 21.73,
+              "min": 21.61,
+              "max": 21.92,
+              "runs": 7
+            },
+            "json_stderr_empty": true,
+            "stdout_identical_across_runs": true
+          }
+        }
+      },
+      "context_sizes": [
+        {
+          "command": "context <target> --tokens 1000",
+          "json_bytes": 16923,
+          "text_bytes": 4588,
+          "text_as_share_of_json": 0.2711,
+          "source_bytes": 2962,
+          "json_envelope_share": 0.825,
+          "text_non_source_share": 0.3544,
+          "rivet_estimate_json": 5641,
+          "rivet_estimate_text": 1530,
+          "rivet_estimate_source": 988,
+          "blake3_hashes_in_json": 12,
+          "estimated_tokens_reported": 991,
+          "segments": 10,
+          "target": "common",
+          "budget_tokens": 1000
+        },
+        {
+          "command": "context <target> --tokens 4000",
+          "json_bytes": 26656,
+          "text_bytes": 13669,
+          "text_as_share_of_json": 0.5128,
+          "source_bytes": 11974,
+          "json_envelope_share": 0.5508,
+          "text_non_source_share": 0.124,
+          "rivet_estimate_json": 8886,
+          "rivet_estimate_text": 4557,
+          "rivet_estimate_source": 3992,
+          "blake3_hashes_in_json": 13,
+          "estimated_tokens_reported": 3995,
+          "segments": 11,
+          "target": "common",
+          "budget_tokens": 4000
+        },
+        {
+          "command": "context <target> --tokens 16000",
+          "json_bytes": 72783,
+          "text_bytes": 51818,
+          "text_as_share_of_json": 0.712,
+          "source_bytes": 47959,
+          "json_envelope_share": 0.3411,
+          "text_non_source_share": 0.0745,
+          "rivet_estimate_json": 24261,
+          "rivet_estimate_text": 17273,
+          "rivet_estimate_source": 15987,
+          "blake3_hashes_in_json": 30,
+          "estimated_tokens_reported": 15993,
+          "segments": 28,
+          "target": "common",
+          "budget_tokens": 16000
+        },
+        {
+          "command": "context <target> --tokens 64000",
+          "json_bytes": 99548,
+          "text_bytes": 69295,
+          "text_as_share_of_json": 0.6961,
+          "source_bytes": 62856,
+          "json_envelope_share": 0.3686,
+          "text_non_source_share": 0.0929,
+          "rivet_estimate_json": 33183,
+          "rivet_estimate_text": 23099,
+          "rivet_estimate_source": 20952,
+          "blake3_hashes_in_json": 52,
+          "estimated_tokens_reported": 20965,
+          "segments": 50,
+          "target": "common",
+          "budget_tokens": 64000
+        }
+      ],
+      "output_formats": [
+        {
+          "command": "symbol <target>",
+          "json_bytes": 57292,
+          "text_bytes": 10947,
+          "text_as_share_of_json": 0.1911,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 19098,
+          "rivet_estimate_text": 3649,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 134,
+          "calls_page_items": 16,
+          "called_by_page_items": 50,
+          "target": "common"
+        },
+        {
+          "command": "symbol <target> --source",
+          "json_bytes": 59013,
+          "text_bytes": 12623,
+          "text_as_share_of_json": 0.2139,
+          "source_bytes": 1666,
+          "json_envelope_share": 0.9718,
+          "text_non_source_share": 0.868,
+          "rivet_estimate_json": 19671,
+          "rivet_estimate_text": 4208,
+          "rivet_estimate_source": 556,
+          "blake3_hashes_in_json": 134,
+          "calls_page_items": 16,
+          "called_by_page_items": 50,
+          "target": "common"
+        },
+        {
+          "command": "refs <target>",
+          "json_bytes": 45127,
+          "text_bytes": 8204,
+          "text_as_share_of_json": 0.1818,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 15043,
+          "rivet_estimate_text": 2735,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 102,
+          "page_items": 50,
+          "total": 69,
+          "target": "common"
+        },
+        {
+          "command": "refs <target> --limit 1000",
+          "json_bytes": 56121,
+          "text_bytes": 12874,
+          "text_as_share_of_json": 0.2294,
+          "source_bytes": 0,
+          "json_envelope_share": 1.0,
+          "text_non_source_share": 1.0,
+          "rivet_estimate_json": 18707,
+          "rivet_estimate_text": 4292,
+          "rivet_estimate_source": 0,
+          "blake3_hashes_in_json": 131,
+          "page_items": 69,
+          "total": 69,
+          "target": "common"
+        },
+        {
+          "command": "context <target> --tokens 4000",
+          "json_bytes": 26656,
+          "text_bytes": 13669,
+          "text_as_share_of_json": 0.5128,
+          "source_bytes": 11974,
+          "json_envelope_share": 0.5508,
+          "text_non_source_share": 0.124,
+          "rivet_estimate_json": 8886,
+          "rivet_estimate_text": 4557,
+          "rivet_estimate_source": 3992,
+          "blake3_hashes_in_json": 13,
+          "estimated_tokens_reported": 3995,
+          "segments": 11,
+          "target": "common"
+        }
+      ],
+      "one_file_edit": {
+        "index_content": {
+          "wall_ms": {
+            "median": 90.99,
+            "min": 88.44,
+            "max": 94.57,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 32.08,
+            "min": 31.88,
+            "max": 32.15,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "index_metadata": {
+          "wall_ms": {
+            "median": 83.61,
+            "min": 82.96,
+            "max": 84.97,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 31.51,
+            "min": 31.44,
+            "max": 31.62,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": null
+        },
+        "refs_query_content": {
+          "wall_ms": {
+            "median": 112.75,
+            "min": 112.55,
+            "max": 113.66,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 35.62,
+            "min": 35.24,
+            "max": 35.68,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": false
+        },
+        "refs_query_metadata": {
+          "wall_ms": {
+            "median": 107.52,
+            "min": 107.34,
+            "max": 109.75,
+            "runs": 7
+          },
+          "max_rss_mb": {
+            "median": 34.96,
+            "min": 34.88,
+            "max": 35.01,
+            "runs": 7
+          },
+          "json_stderr_empty": true,
+          "stdout_identical_across_runs": false
+        },
+        "updated_files_per_edit": 1
+      },
+      "derived_split_ms": {
+        "method": "differences of medians of whole-process wall times; no phase timing was added",
+        "content_hashing": 5.19,
+        "reparse_one_file_plus_full_reresolution": 68.02,
+        "reparse_one_file_plus_full_reresolution_metadata_mode": 65.83,
+        "force_minus_cold": 26.83,
+        "refs_refresh_overhead_content": -6.98,
+        "refs_refresh_overhead_metadata": -12.27
+      }
+    }
+  },
+  "privacy_scan": {
+    "checked_strings": 1327,
+    "hits": 0
+  }
+}
