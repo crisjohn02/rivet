@@ -3,10 +3,10 @@
 # gold answers live in $RIVET_PILOT_TASKS_DIR; run artifacts in
 # $RIVET_PILOT_RUNS_DIR. Both are private and outside this repository.
 schema_version = 1
-study_id = "pilot-01"
+study_id = "pilot-01-smoke"
 kind = "pilot"
 
-tasks = ["p1", "p2", "p3", "p4", "p5"]
+tasks = ["p1"]  # smoke run: validates the harness and the cost estimate before the main pilot
 
 arms = ["B", "C"]
 trials = 1
@@ -15,7 +15,7 @@ retry_rule = "rerun_block_once"
 
 # Hard cap across the whole study, including retries. Before each block and
 # each run the runner requires charged + max_budget_usd + reserve <= cap.
-budget_cap_usd = 22.0  # $25 approved in total; $3 is reserved for the pilot-01-smoke study
+budget_cap_usd = 3.0  # counted against the $25 approved in total
 # Claude Code checks --max-budget-usd between turns, so one run can end a
 # little above its own budget; the reserve is that allowance.
 per_run_reserve_usd = 0.25
