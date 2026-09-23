@@ -1,5 +1,9 @@
 //! Integration tests for the `rivet symbol` `calls`/`called_by` lists (T24).
 //!
+//! SY1 made both lists default to `--min-resolution scoped`; tests about a
+//! list's full contents pass `--min-resolution name_match`, and
+//! `symbol_tiers.rs` covers the default and `hidden_name_match`.
+//!
 //! The lists reuse the T23 reference pipeline (`crate::references`), so these
 //! tests assert exact spans, target IDs, resolutions, and containing symbols
 //! rather than only counts. They drive the built binary against a temporary
@@ -41,8 +45,17 @@ const REFERENCE_KEYS: [&str; 11] = [
     "receiver",
 ];
 
-/// The four call-list keys in contract order.
-const CALL_LIST_KEYS: [&str; 4] = ["total", "truncated", "next_offset", "items"];
+/// The five call-list keys in contract order (`hidden_name_match` is SY1's).
+const CALL_LIST_KEYS: [&str; 5] = [
+    "total",
+    "truncated",
+    "next_offset",
+    "hidden_name_match",
+    "items",
+];
+
+/// The flag that lists name-only rows too, the pre-SY1 default.
+const ALL_TIERS: [&str; 2] = ["--min-resolution", "name_match"];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -247,7 +260,7 @@ fn calls_lists_the_callees_contained_by_the_target() {
     let run_unknown = symbol(
         temp.path(),
         "App\\Reporting\\ReportService::runUnknown",
-        &[],
+        &ALL_TIERS,
     );
     let calls = item_spans(&run_unknown["calls"]);
     assert_eq!(
@@ -267,14 +280,24 @@ fn calls_lists_the_callees_contained_by_the_target() {
     let launch = symbol(temp.path(), "App\\Services\\SurveyService::launch", &[]);
     assert_eq!(
         launch["calls"],
-        json!({"total": 0, "truncated": false, "next_offset": null, "items": []})
+        json!({
+            "total": 0,
+            "truncated": false,
+            "next_offset": null,
+            "hidden_name_match": 0,
+            "items": []
+        })
     );
 }
 
 #[test]
 fn called_by_returns_each_call_site_with_its_containing_symbol() {
     let temp = fixture_repo("called-by");
-    let value = symbol(temp.path(), "App\\Services\\SurveyService::launch", &[]);
+    let value = symbol(
+        temp.path(),
+        "App\\Services\\SurveyService::launch",
+        &ALL_TIERS,
+    );
 
     assert_eq!(value["called_by"]["total"], 6);
     assert_eq!(value["called_by"]["truncated"], false);
@@ -403,7 +426,11 @@ fn top_level_calls_are_retained_in_called_by() {
     );
 
     // `launch` is also reached from two top-level uses in `boot.php`.
-    let launch = symbol(temp.path(), "App\\Services\\SurveyService::launch", &[]);
+    let launch = symbol(
+        temp.path(),
+        "App\\Services\\SurveyService::launch",
+        &ALL_TIERS,
+    );
     let top_level: Vec<&Value> = launch["called_by"]["items"]
         .as_array()
         .unwrap()
@@ -484,24 +511,33 @@ fn minimum_resolution_filters_both_lists() {
     let source = "<?php\ndeclare(strict_types=1);\nnamespace Min;\n\nfinal class Service\n{\n    public function callee(): void\n    {\n    }\n\n    public function hub(): void\n    {\n        $this->callee();\n        $x->callee();\n    }\n}\n\nfunction wrapperA(): void\n{\n    $svc = new \\Min\\Service();\n    $svc->hub();\n}\n\nfunction wrapperB(): void\n{\n    $y->hub();\n}\n";
     let (temp, source) = custom_repo("min-resolution", "mins.php", source);
 
-    // Default: both lists keep the scoped and the unresolved name match.
-    let all = symbol(temp.path(), "Min\\Service::hub", &[]);
+    // `name_match`: both lists keep the scoped and the unresolved name match.
+    let all = symbol(temp.path(), "Min\\Service::hub", &ALL_TIERS);
     assert_eq!(all["calls"]["total"], 2);
     assert_eq!(all["called_by"]["total"], 2);
+    assert_eq!(all["calls"]["hidden_name_match"], 0);
+    assert_eq!(all["called_by"]["hidden_name_match"], 0);
     let calls = item_spans(&all["calls"]);
     assert_eq!(calls[0].4, "scoped");
     assert_eq!(calls[0].5.as_deref(), Some("mins.php#Min\\Service::callee"));
     assert_eq!(calls[1].4, "name_match");
     assert!(calls[1].5.is_none());
 
-    // `scoped` filters both lists and both totals.
+    // `scoped` filters both lists and both totals, and is the default (SY1).
     let scoped = symbol(
         temp.path(),
         "Min\\Service::hub",
         &["--min-resolution", "scoped"],
     );
+    assert_eq!(
+        symbol(temp.path(), "Min\\Service::hub", &[]),
+        scoped,
+        "the default is scoped"
+    );
     assert_eq!(scoped["calls"]["total"], 1, "{scoped}");
     assert_eq!(scoped["called_by"]["total"], 1, "{scoped}");
+    assert_eq!(scoped["calls"]["hidden_name_match"], 1, "{scoped}");
+    assert_eq!(scoped["called_by"]["hidden_name_match"], 1, "{scoped}");
     let calls = item_spans(&scoped["calls"]);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].1, offsets_of(&source, "callee();")[0]);
@@ -541,7 +577,9 @@ fn signature_and_source_flags_shape_the_lists() {
     );
     assert!(source.get("source").is_some(), "{source}");
     assert_eq!(source["calls"]["total"], 0);
-    assert_eq!(source["called_by"]["total"], 6);
+    // Five scoped callers listed; the name-only one is counted (SY1).
+    assert_eq!(source["called_by"]["total"], 5);
+    assert_eq!(source["called_by"]["hidden_name_match"], 1);
 
     // `--source` with `--signature-only` is invalid before any filesystem work.
     let conflict = run(

@@ -119,10 +119,12 @@ Examples:
   rivet symbol SurveyService.launch
   rivet symbol 'App\\Services\\SurveyService::launch' --source
   rivet symbol app/Services/SurveyService.php:20 --signature-only
-  rivet symbol SurveyService.launch --min-resolution scoped --limit 20 --json",
+  rivet symbol SurveyService.launch --min-resolution name_match --limit 20 --json",
         after_help = "\
 Use this instead of `rg` when you need where a name is declared, not every line mentioning it.
 Queries refresh automatically. `?` marks name-only (name_match) evidence; verify it.
+Call lists default to --min-resolution scoped (exact and scoped rows) and count the
+name-only rows they leave out; --min-resolution name_match lists those rows too.
 Several matches exit 5 with candidate IDs: rerun with a quoted canonical ID.
 Both call lists page with --limit/--offset; a truncated list prints its next --offset."
     )]
@@ -141,7 +143,7 @@ Both call lists page with --limit/--offset; a truncated list prints its next --o
         /// Include the declaration's stored source text.
         #[arg(long)]
         source: bool,
-        /// Minimum tier kept in both call lists.
+        /// Minimum tier kept in call lists (default: scoped).
         #[arg(long = "min-resolution", value_name = "exact|scoped|name_match")]
         min_resolution: Option<String>,
         /// Freshness mode, overriding config.

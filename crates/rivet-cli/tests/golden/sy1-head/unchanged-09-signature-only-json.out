@@ -1,0 +1,4 @@
+exit 0
+--- stdout
+{"schema_version":1,"index":{"snapshot":"blake3:9923288ed9545d876e036cb28aabbc1860f466b9cc3f44f709c51b5125e43b1f","freshness":"content","coverage":{"complete":false,"files_seen":10,"files_indexed":9,"skipped":{"unsupported":1,"binary":0,"size":0,"encoding":0,"parse_error":0,"resource_limit":0}},"diagnostics":{"total":0,"truncated":false,"items":[]}},"symbol":{"id":"SurveyService.php#App\\Services\\SurveyService::launch","name":"launch","qualified_name":"App\\Services\\SurveyService::launch","kind":"method","language":"php","file":"SurveyService.php","start_byte":460,"end_byte":546,"start_line":18,"end_line":21,"content_hash":"blake3:fb85f23fac9f1f0b8e32b417b20834a788cf0374be46a79039bf36e0eee9327f"},"signature":"public function launch(): void","doc_comment":null,"parent":"SurveyService.php#App\\Services\\SurveyService"}
+--- stderr

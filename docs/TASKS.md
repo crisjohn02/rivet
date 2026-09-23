@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | RX1 (runner: rivet errors inside chained commands attributed from their text); before it, T49 (held-out study heldout-01: outcome `inconclusive`) |
-| Next task | User decision after heldout-01. The 20 held-out tasks are spent; any change motivated by them needs a new held-out set. Parked: T33c, T36a-T36c, T41+ (TypeScript) |
+| Last completed task | SY1 (`symbol` call lists default to `scoped` and count hidden name-only rows); before it, RX1 (runner: rivet errors inside chained commands attributed from their text) |
+| Next task | CV1 (shorter coverage line), then SN2 (lean snippet). SY1, RX1, CV1 and SN2 follow TE1's reading of the spent heldout-01 tasks, so any claim about their effect needs a new held-out set. Parked: T33c, T36a-T36c, T41+ (TypeScript) |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | heldout-01: 200/200 runs, all passed, 0 blocks excluded, $25.67. C/B input tokens 0.960 (4.0% fewer), one-sided 95% upper bound 1.011, so the efficiency gate is not met; success difference +0.0 pp, lower bound +0.0 pp, so the quality gate is met. Outcome `inconclusive` (benchmark/results/heldout-01). |
+| Last checks | SY1: fmt, clippy `-D warnings`, `cargo test --workspace` (686 passed, 1 ignored), `check_gold.py` (51 entries), `benchmark/runner/test_runner.py` (83 tests) all pass. heldout-01 (T49): C/B 0.960, upper bound 1.011, outcome `inconclusive`. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -174,6 +174,7 @@ Read: BENCHMARK pilot, isolation, collected metrics, and decision rules; IMPLEME
 | [x] | SN1 | Change the managed snippet to recommend the compact text output instead of `--json`, which pilot-01 agents never used. User-approved treatment change. | `rivet snippet` and docs/AGENT-SNIPPET.md agree byte for byte with only the one sentence changed; the new snippet hash is recorded. |
 | [x] | LR2 | Evidence-based exclusion in `refs --mode references`: leave out a same-name unresolved use whose form cannot name the target kind, or whose receiver class (determined by a receiver rule, indexed or not) shares no possible subtype with the target's class (review fix: common-subtype rule, anonymous-class headers recorded); report `by_exclusion`. On a real Laravel application about 93% of call uses are unbound. | The spec §11.5 rule table is implemented exactly; candidate mode is byte-identical; bound uses, trait targets, refused hints and unknown ancestry are never excluded; counts are page-independent; `context` inherits the rule. |
 | [x] | EX1 | State the reason in the `refs` human exclusion line instead of pointing at `--mode candidates`, which pilot-03 agents followed into a needless audit: `N same-name use(s) ruled out (unrelated receiver class: a; form cannot reference a <kind>: b)`, non-zero reasons only, receiver first. | The line appears only when a count is non-zero, in the same position, with the header's kind word and `a`/`an`; `refs --json`, candidate mode, `symbol`, `context`, and the snippet hash are unchanged. |
+| [x] | SY1 | Make `symbol`'s `calls` and `called_by` default to `--min-resolution scoped` and report, per list, the name-only rows the tier filter hid: `hidden_name_match` in JSON (after `next_offset`) and `(+N name-only not listed)` on the human heading, with no flag pointer. Collapse whitespace runs in a displayed `calls` receiver. TE1 lever 2. | `--min-resolution name_match` reproduces the pre-SY1 bytes apart from the new field (0); the count is page-independent, counts `name_match` rows only (also under `exact`), and a list with every row hidden still prints its heading; `refs`, `context`, `symbol --signature-only`, and the snippet hash are unchanged; output is identical across `--force`. |
 
 **Gate G:** T41 onward stays deferred until the pilot supports spending further effort. No full 300+ run benchmark is implied by completing this queue's PHP tasks.
 

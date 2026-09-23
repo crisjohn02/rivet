@@ -138,8 +138,21 @@ fn a_nested_repository_and_a_submodule_are_excluded_from_the_outer_root() {
             assert_eq!(error["error"], "symbol_not_found", "{args:?}");
         }
     }
-    // The calls into the excluded files are uses with nothing to bind to.
+    // The calls into the excluded files are uses with nothing to bind to, so
+    // the default call list hides them as name-only rows (SY1).
     let outer = success(&run(root, &["symbol", "App\\outer", "--json"]));
+    assert_eq!(outer["calls"]["total"], 0, "{outer}");
+    assert_eq!(outer["calls"]["hidden_name_match"], 2, "{outer}");
+    let outer = success(&run(
+        root,
+        &[
+            "symbol",
+            "App\\outer",
+            "--json",
+            "--min-resolution",
+            "name_match",
+        ],
+    ));
     let calls = outer["calls"]["items"].as_array().expect("calls");
     assert_eq!(calls.len(), 2, "{outer}");
     assert!(calls.iter().all(|call| call["resolved_target"].is_null()));

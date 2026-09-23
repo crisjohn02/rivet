@@ -386,7 +386,7 @@ Every reference, caller, and callee carries a `resolution` field. A tier describ
 | `scoped` | A visible receiver/type/namespace heuristic identifies one declaration. | `$this->launch()`, `self::launch()`, or a receiver explicitly typed `SurveyService`. Dynamic dispatch can still select another implementation. |
 | `name_match` | Spelling alone is evidence, or binding is unsupported/ambiguous. | An untyped receiver, a dynamic binding, or a name unique in the index but not lexically bound. |
 
-Human output marks `name_match` results with `?`. `--min-resolution exact|scoped|name_match` defaults to `name_match`. An empty result never proves that no runtime references exist.
+Human output marks `name_match` results with `?`. `--min-resolution exact|scoped|name_match` defaults to `name_match`, except for the `symbol` call lists, which default to `scoped` and count the name-only rows they leave out (§14). An empty result never proves that no runtime references exist.
 
 ## 11.4 v0.1 Receiver Heuristics
 
@@ -536,11 +536,12 @@ calls:
   AllocationEngine.allocate
   Survey.save
 
-called by:
+called by: (+1 name-only not listed)
   SurveyController.launch
   LaunchSurveyJob.handle
-  QueueWorker.dispatch ?
 ```
+
+Both call lists default to `--min-resolution scoped`: they list `exact` and `scoped` rows and leave out name-only (`name_match`) rows, such as a `QueueWorker.dispatch` caller seen only by its spelling. Each list counts the name-only rows it leaves out, as `(+N name-only not listed)` on its heading in human output and as `hidden_name_match` in JSON, so a list whose rows are all name-only never reads as empty. `--min-resolution name_match` lists those rows too, marked `?`. `refs` and `context` keep name-only results by default.
 
 JSON uses a versioned envelope containing `index`, `symbol`, nullable signature/doc/parent fields, and independently paginated `calls` / `called_by` lists. See [OUTPUT-CONTRACT](docs/OUTPUT-CONTRACT.md). Call lists require Milestone 3; earlier development builds do not claim final MVP support.
 
@@ -550,7 +551,7 @@ Options:
 --json
 --source            include the full symbol body
 --signature-only    omit calls and called_by; conflicts with --source
---min-resolution exact|scoped|name_match
+--min-resolution exact|scoped|name_match   call lists; default scoped
 --limit N
 --offset N
 ```

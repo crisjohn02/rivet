@@ -608,9 +608,37 @@ fn context_and_called_by_inherit_reference_mode_exclusion() {
     // `symbol.called_by` is reference-mode matching of call sites.
     let symbol = json_of(
         root,
-        &["symbol", "App\\M::save", "--json", "--limit", "100"],
+        &[
+            "symbol",
+            "App\\M::save",
+            "--json",
+            "--limit",
+            "100",
+            "--min-resolution",
+            "name_match",
+        ],
     );
     assert_eq!(symbol["called_by"]["total"], SAVE_KEPT.len());
+    assert_eq!(symbol["called_by"]["hidden_name_match"], 0);
+    // SY1: the default lists the bound callers and counts the kept name-only
+    // ones; a use excluded by evidence is in neither number.
+    let name_only = symbol["called_by"]["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["resolution"] == "name_match")
+        .count();
+    assert!(name_only > 0, "{symbol}");
+    let default = json_of(
+        root,
+        &["symbol", "App\\M::save", "--json", "--limit", "100"],
+    );
+    assert_eq!(
+        default["called_by"]["total"],
+        SAVE_KEPT.len() - name_only,
+        "{default}"
+    );
+    assert_eq!(default["called_by"]["hidden_name_match"], name_only);
 
     let value = json_of(
         root,

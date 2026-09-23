@@ -93,8 +93,21 @@ fn a_file_that_becomes_invalid_utf8_binary_or_oversize_loses_its_facts() {
                 "{label} {args:?}: {message}"
             );
         }
-        // The call in user.php is still a use, but binds to nothing.
+        // The call in user.php is still a use, but binds to nothing, so the
+        // default call list hides it as a name-only row (SY1).
         let user = success(&run(root, &["symbol", "App\\user", "--json"]));
+        assert_eq!(user["calls"]["total"], 0, "{label}");
+        assert_eq!(user["calls"]["hidden_name_match"], 1, "{label}");
+        let user = success(&run(
+            root,
+            &[
+                "symbol",
+                "App\\user",
+                "--json",
+                "--min-resolution",
+                "name_match",
+            ],
+        ));
         let calls = user["calls"]["items"].as_array().expect("calls");
         assert_eq!(calls.len(), 1, "{label}");
         assert_eq!(calls[0]["resolved_target"], Value::Null, "{label}");

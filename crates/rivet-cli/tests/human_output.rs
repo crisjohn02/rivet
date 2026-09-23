@@ -157,8 +157,37 @@ fn empty_refs_say_the_result_is_not_proof() {
 #[test]
 fn symbol_golden_lists_calls_and_callers_with_marks() {
     let temp = fixture_repo("symbol-golden");
+    // SY1: by default the call lists keep exact and scoped rows, and the
+    // heading counts the name-only rows left out.
     assert_eq!(
         human(temp.path(), &["symbol", LAUNCH]),
+        format!(
+            "App\\Services\\SurveyService::launch\n\
+             method\n\
+             SurveyService.php:18-21\n\
+             id: SurveyService.php#App\\Services\\SurveyService::launch\n\
+             parent: SurveyService.php#App\\Services\\SurveyService\n\
+             \n\
+             signature:\n  public function launch(): void\n\
+             \n\
+             calls: none\n\
+             \n\
+             called by: (+1 name-only not listed)\n\
+             \x20 ReportService.php:24:15  App\\Reporting\\ReportService::runAlias  scoped\n\
+             \x20 ReportService.php:30:15  App\\Reporting\\ReportService::runTyped  scoped\n\
+             \x20 SurveyService.php:26:16  App\\Services\\SurveyService::relaunch   scoped\n\
+             \x20 boot.php:17:7            (file scope)                           scoped\n\
+             \x20 boot.php:22:17           (file scope)                           scoped\n\
+             \n\
+             {COVERAGE}"
+        )
+    );
+    // `--min-resolution name_match` lists the name-only row with its mark.
+    assert_eq!(
+        human(
+            temp.path(),
+            &["symbol", LAUNCH, "--min-resolution", "name_match"]
+        ),
         format!(
             "App\\Services\\SurveyService::launch\n\
              method\n\
@@ -208,29 +237,48 @@ fn symbol_calls_name_their_target_or_say_unresolved() {
         ),
         "{output}"
     );
+    let run_unknown = "ReportService.php#App\\Reporting\\ReportService::runUnknown";
+    let head = "App\\Reporting\\ReportService::runUnknown\n\
+                method\n\
+                ReportService.php:34-37\n\
+                id: ReportService.php#App\\Reporting\\ReportService::runUnknown\n\
+                parent: ReportService.php#App\\Reporting\\ReportService\n\
+                \n\
+                signature:\n  public function runUnknown(): void\n\
+                \n\
+                source:\n\
+                public function runUnknown(): void\n    {\n        $x->launch();\n    }\n";
     let output = human(
         temp.path(),
         &[
             "symbol",
-            "ReportService.php#App\\Reporting\\ReportService::runUnknown",
+            run_unknown,
             "--source",
+            "--min-resolution",
+            "name_match",
         ],
     );
     assert_eq!(
         output,
         format!(
-            "App\\Reporting\\ReportService::runUnknown\n\
-             method\n\
-             ReportService.php:34-37\n\
-             id: ReportService.php#App\\Reporting\\ReportService::runUnknown\n\
-             parent: ReportService.php#App\\Reporting\\ReportService\n\
-             \n\
-             signature:\n  public function runUnknown(): void\n\
-             \n\
-             source:\n\
-             public function runUnknown(): void\n    {{\n        $x->launch();\n    }}\n\
+            "{head}\
              \n\
              calls:\n  ReportService.php:36:13  (unresolved; receiver $x)  name_match ?\n\
+             \n\
+             called by: none\n\
+             \n\
+             {COVERAGE}"
+        )
+    );
+    // SY1: by default a list whose only row is name-only prints its heading
+    // with the count, never `none`.
+    let output = human(temp.path(), &["symbol", run_unknown, "--source"]);
+    assert_eq!(
+        output,
+        format!(
+            "{head}\
+             \n\
+             calls: (+1 name-only not listed)\n\
              \n\
              called by: none\n\
              \n\
@@ -396,13 +444,15 @@ fn truncated_refs_show_the_slice_and_next_offset() {
 #[test]
 fn truncated_call_lists_show_the_slice_and_next_offset() {
     let temp = fixture_repo("symbol-page");
+    // SY1: the page counts the five listed callers; the hidden count is the
+    // same on every page.
     let output = human(temp.path(), &["symbol", LAUNCH, "--limit", "2"]);
     assert!(
         output.contains(
-            "called by:\n\
+            "called by: (+1 name-only not listed)\n\
              \x20 ReportService.php:24:15  App\\Reporting\\ReportService::runAlias  scoped\n\
              \x20 ReportService.php:30:15  App\\Reporting\\ReportService::runTyped  scoped\n\
-             \x20 showing 1-2 of 6; next: --offset 2\n"
+             \x20 showing 1-2 of 5; next: --offset 2\n"
         ),
         "{output}"
     );
@@ -411,7 +461,29 @@ fn truncated_call_lists_show_the_slice_and_next_offset() {
         &["symbol", LAUNCH, "--limit", "2", "--offset", "4"],
     );
     assert!(
-        output.contains("  showing 5-6 of 6; this is the last page\n"),
+        output.contains(
+            "called by: (+1 name-only not listed)\n\
+             \x20 boot.php:22:17  (file scope)  scoped\n\
+             \x20 showing 5-5 of 5; this is the last page\n"
+        ),
+        "{output}"
+    );
+    let output = human(
+        temp.path(),
+        &[
+            "symbol",
+            LAUNCH,
+            "--limit",
+            "2",
+            "--offset",
+            "4",
+            "--min-resolution",
+            "name_match",
+        ],
+    );
+    assert!(
+        output.contains("called by:\n")
+            && output.contains("  showing 5-6 of 6; this is the last page\n"),
         "{output}"
     );
     // The `calls` list of `relaunch` has one item; paging past it says so.
@@ -814,6 +886,12 @@ fn shell_words_handles_single_quotes() {
 /// file is `exit N`, then `--- stdout` and the exact stdout bytes, then
 /// `--- stderr` and the exact stderr bytes, with the repository root (only
 /// present in `init` output, if at all) replaced by `<ROOT>`.
+///
+/// SY1 re-captured `03-symbol`, `04-symbol-source`, and `05-symbol-page`:
+/// the call lists now default to `scoped`, so `called_by` drops its one
+/// name-only row, and each list gains `hidden_name_match`. Every other golden
+/// is unchanged; `symbol_tiers.rs` checks the pre-SY1 bytes under
+/// `--min-resolution name_match`.
 const JSON_GOLDENS: [(&str, &[&str]); 16] = [
     ("01-index", &["index", "--json"]),
     ("02-index-force", &["index", "--json", "--force"]),

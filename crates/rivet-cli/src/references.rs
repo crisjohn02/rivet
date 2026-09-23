@@ -11,6 +11,10 @@
 //! LR2: in reference mode an unresolved same-name use is excluded when
 //! [`Evidence`] shows it cannot refer to the target (spec §11.5); the counts
 //! of excluded uses are returned with the matches.
+//!
+//! SY1: a `symbol` call list is collected at `name_match` and then filtered to
+//! its minimum tier by [`apply_call_list_minimum`], which counts the
+//! `name_match` rows the filter hid.
 
 use std::collections::{HashMap, HashSet};
 
@@ -422,15 +426,55 @@ pub(crate) fn reference_object(
     Ok(Value::Object(object))
 }
 
-/// Builds a `{total, truncated, next_offset, items}` call list, paginating
-/// `matches` independently of any other list.
+/// A `symbol` call list after its tier filter (SY1).
+pub(crate) struct CallList {
+    /// The rows at or above the minimum tier, still in contract order.
+    pub(crate) matches: Vec<ReferenceMatch>,
+    /// How many `name_match` rows the tier filter removed (OUTPUT-CONTRACT
+    /// `hidden_name_match`).
+    pub(crate) hidden_name_match: u64,
+}
+
+/// Applies `minimum` to a call list collected at `name_match`, so every row
+/// the filter removes is one `--min-resolution name_match` lists (SY1).
+///
+/// Only removed `name_match` rows are counted: a `scoped` row that an explicit
+/// `--min-resolution exact` removes is in no count. Filtering after collection
+/// keeps the listed rows identical to collecting at `minimum`, because the
+/// tier test is per row and the `uses` table is unique on the dedupe key; it
+/// also keeps uses excluded by evidence (LR2), which no tier lists, out of the
+/// count. The count is taken before pagination, so it does not depend on
+/// `--limit`/`--offset`.
+pub(crate) fn apply_call_list_minimum(
+    matches: Vec<ReferenceMatch>,
+    minimum: Resolution,
+) -> CallList {
+    let mut hidden_name_match = 0;
+    let matches = matches
+        .into_iter()
+        .filter(|reference| {
+            let kept = reference.resolution.min_resolution(minimum);
+            if !kept && reference.resolution == Resolution::NameMatch {
+                hidden_name_match += 1;
+            }
+            kept
+        })
+        .collect();
+    CallList {
+        matches,
+        hidden_name_match,
+    }
+}
+
+/// Builds a `{total, truncated, next_offset, hidden_name_match, items}` call
+/// list, paginating its matches independently of any other list.
 pub(crate) fn call_list_object(
     store: &Store,
-    matches: &[ReferenceMatch],
+    list: &CallList,
     limit: u64,
     offset: u64,
 ) -> Result<Value, CliError> {
-    let page = paginate(matches, limit, offset);
+    let page = paginate(&list.matches, limit, offset);
     let items: Vec<Value> = page
         .items
         .iter()
@@ -440,12 +484,18 @@ pub(crate) fn call_list_object(
     object.insert("total".to_string(), json!(page.total));
     object.insert("truncated".to_string(), json!(page.truncated));
     object.insert("next_offset".to_string(), json!(page.next_offset));
+    object.insert(
+        "hidden_name_match".to_string(),
+        json!(list.hidden_name_match),
+    );
     object.insert("items".to_string(), Value::Array(items));
     Ok(Value::Object(object))
 }
 
 /// Parses `--min-resolution`, rejecting unknown values before any filesystem
-/// work. Shared by `refs` and `symbol` (both support the flag).
+/// work. Shared by `refs` and `symbol` (both support the flag). An absent flag
+/// is `name_match`, the `refs` default; `symbol` substitutes its own call-list
+/// default before calling this (SY1).
 pub(crate) fn parse_min_resolution(value: Option<&str>) -> Result<Resolution, CliError> {
     match value {
         None => Ok(Resolution::NameMatch),
