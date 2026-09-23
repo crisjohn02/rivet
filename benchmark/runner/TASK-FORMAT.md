@@ -44,7 +44,7 @@ An *item* is `{"file": "<repository-relative path>", "symbol": "<symbol>"}`, and
 | `set_f1` | `{"items": [item, ...]}` | `{"items": [item, ...]}`, non-empty | F1 ≥ `f1_threshold` |
 | `accepted_path` | `{"path": [item, ...]}` | `{"accepted_paths": [[item, ...], ...]}`, each path non-empty | the path equals one accepted path exactly, in order and length |
 
-For `set_f1`, both sides are sets of normalized items, so duplicates collapse. Precision is |A∩G|/|A|, recall is |A∩G|/|G|, and F1 is their harmonic mean. An empty answer, and any answer that does not have status `ok`, scores precision, recall and F1 of 0. All three values are reported.
+For `set_f1`, both sides are sets of normalized items, so duplicates collapse. Precision is |A∩G|/|A|, recall is |A∩G|/|G|, and F1 is their harmonic mean, F1 = 2·|A∩G| / (|A| + |G|), which is 0 when |A∩G| is 0. An empty answer, and any answer that does not have status `ok`, scores precision, recall and F1 of 0. The pass/fail decision is exact: F1 is computed as a rational number and compared with `f1_threshold` read as the exact decimal written in `task.toml`, so an F1 of exactly 4/5 meets `0.8`. All three values are reported as floats rounded from the exact values.
 
 ## study.toml
 

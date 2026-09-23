@@ -12,6 +12,7 @@ import math
 import os
 import re
 import tomllib
+from fractions import Fraction
 
 CATEGORIES = ("locate", "trace", "callers", "tests", "dependencies")
 CHECK_TYPES = ("exact_symbol", "set_f1", "accepted_path")
@@ -147,12 +148,16 @@ def evaluate(check: str, gold_raw, final_text: str | None, f1_threshold: float |
         if f1_threshold is None:
             raise TaskError("set_f1 needs f1_threshold")
         hit = len(answer & gold)
-        # An empty answer has no precision to measure; it is scored 0.
-        precision = hit / len(answer) if answer else 0.0
-        recall = hit / len(gold)
-        f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
-        result.update(precision=precision, recall=recall, f1=f1)
-        result["passed"] = f1 >= f1_threshold
+        # The decision is exact: F1 = 2|A∩G| / (|A| + |G|), the harmonic mean
+        # of precision and recall, against task.toml's decimal threshold,
+        # so an F1 of exactly 4/5 always meets 0.8. Gold is non-empty, so the
+        # denominator is positive. An empty answer has no precision to
+        # measure; it is scored 0.
+        precision = Fraction(hit, len(answer)) if answer else Fraction(0)
+        recall = Fraction(hit, len(gold))
+        f1 = Fraction(2 * hit, len(answer) + len(gold))
+        result.update(precision=float(precision), recall=float(recall), f1=float(f1))
+        result["passed"] = f1 >= Fraction(str(f1_threshold))
     else:
         result["passed"] = answer in gold
     return result

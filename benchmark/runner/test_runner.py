@@ -121,6 +121,38 @@ class CheckTests(unittest.TestCase):
         missing = checks.evaluate("set_f1", gold, "nothing", 0.8)
         self.assertEqual((missing["f1"], missing["answer_status"]), (0.0, "missing"))
 
+    @staticmethod
+    def _f1_case(gold_n: int, correct: int, extra: int, threshold: float) -> dict:
+        gold = [{"file": f"g{i}.php", "symbol": f"G{i}"} for i in range(gold_n)]
+        wrong = [{"file": f"x{i}.php", "symbol": f"X{i}"} for i in range(extra)]
+        return checks.evaluate("set_f1", {"items": gold}, answer({"items": gold[:correct] + wrong}), threshold)
+
+    def test_set_f1_decides_the_threshold_exactly(self):
+        # (gold, correct, extra, threshold, exact F1, passes). In binary
+        # floating point 6+2 of 7 is 0.7999999999999999 and failed 0.8, while
+        # 4+1 of 5 is 0.8000000000000002 and passed; both are exactly 4/5.
+        for gold_n, correct, extra, threshold, f1, passes in (
+            (7, 6, 2, 0.8, 0.8, True),
+            (5, 4, 1, 0.8, 0.8, True),
+            (3, 2, 0, 0.8, 0.8, True),
+            (7, 6, 3, 0.8, 0.75, False),
+            (5, 3, 0, 0.8, 0.75, False),
+            (4, 4, 0, 1.0, 1.0, True),
+            (4, 4, 1, 1.0, 8 / 9, False),
+            (4, 0, 3, 0.8, 0.0, False),
+            (4, 0, 0, 0.8, 0.0, False),
+        ):
+            case = (gold_n, correct, extra, threshold)
+            result = self._f1_case(gold_n, correct, extra, threshold)
+            self.assertEqual(result["passed"], passes, case)
+            self.assertEqual(result["f1"], f1, case)
+            self.assertEqual(result["f1_threshold"], threshold, case)
+            # Reported values stay floats, rounded from the exact fractions.
+            precision = correct / (correct + extra) if correct + extra else 0.0
+            self.assertEqual((result["precision"], result["recall"]), (precision, correct / gold_n), case)
+            for key in ("precision", "recall", "f1"):
+                self.assertIs(type(result[key]), float, (case, key))
+
     def test_accepted_path_matches_any_accepted_path_exactly_in_order(self):
         a = {"file": "a.php", "symbol": "A"}
         b = {"file": "b.php", "symbol": "B"}
