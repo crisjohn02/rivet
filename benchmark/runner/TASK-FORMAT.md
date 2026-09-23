@@ -1,6 +1,6 @@
 # Pilot Task Format, Run Records and runs.csv
 
-This is the normative format for the B/C pilot harness (T38a–T38c). `checks.py`, `run_study.py`, `extract.py` and `report.py` implement it. The protocol it serves is [BENCHMARK](../../docs/BENCHMARK.md). Nothing in this directory may contain corpus content: tasks, prompts, gold answers, transcripts and per-run records are private and live outside the repository.
+This is the normative format for the B/C study harness: pilot studies (T38a–T38c) and confirmatory studies (T48a). `checks.py`, `run_study.py`, `extract.py` and `report.py` implement it. The protocol it serves is [BENCHMARK](../../docs/BENCHMARK.md). Nothing in this directory may contain corpus content: tasks, prompts, gold answers, transcripts and per-run records are private and live outside the repository.
 
 ## Task directory
 
@@ -50,7 +50,7 @@ For `set_f1`, both sides are sets of normalized items, so duplicates collapse. P
 
 A study is `benchmark/studies/<study-id>/study.toml`. It is committed and public-safe, and `study_id` must equal its directory name. [pilot-01](../studies/pilot-01/study.toml) is the pilot's manifest. The runner refuses a manifest that breaks any of these rules:
 
-- `kind = "pilot"`, and `tasks` is a non-empty list of distinct opaque IDs.
+- `kind` is `"pilot"` or `"confirmatory"`, and `tasks` is a non-empty list of distinct opaque IDs. A confirmatory study must also satisfy [Confirmatory studies](#confirmatory-studies).
 - `arms` is a subset of `["B", "C"]`, and `trials` is at least 1. `seed` is an integer. `retry_rule = "rerun_block_once"`.
 - `budget_cap_usd` is positive, and `per_run_reserve_usd` is at least 0.
 - `harness.model` is a full model name, never an alias.
@@ -62,14 +62,56 @@ A study is `benchmark/studies/<study-id>/study.toml`. It is committed and public
 - `[arms_config.C]` has `rivet = true` and `snippet_file = "CLAUDE.md"`, and allows `Bash(rivet:*)`.
 - Both arms deny `Edit, Write, NotebookEdit, WebFetch, WebSearch, Agent, Task`. Their allow and deny lists must be identical apart from `Bash(rivet:*)`.
 - `[sandbox]` has `deny_read_paths` (absolute or `~/` paths), `deny_read_regexes` (anchored at `^/`) and `deny_rivet_exec_in_b = true`. The section is part of the manifest, so it is hashed into `study_manifest_sha256`.
+- A `[confirmatory]` table appears only with `kind = "confirmatory"`.
+
+### Confirmatory studies
+
+A confirmatory study keeps every rule above, and adds these:
+
+- `arms` is exactly `["B", "C"]`.
+- It has a `[confirmatory]` table. Every key is required, and no other key is accepted, so a misspelt frozen setting cannot be silently ignored.
+
+```toml
+[confirmatory]
+preregistration = "benchmark/preregistration.md"   # relative to the git top level of the manifest's repository; no ".", ".." or empty parts
+preregistration_sha256 = "<64 lowercase hex>"      # sha256 of the preregistration's bytes
+rivet_binary_sha256 = "<64 lowercase hex>"         # sha256 of the rivet binary arm C runs
+tasks_sha256 = "<64 lowercase hex>"                # see tasks_sha256 below
+analysis_version = "t48a-1"                        # must equal report.py's CONFIRMATORY_ANALYSIS_VERSION, or the outcome is invalid
+analysis_seed = 20260927                           # integer >= 0 (random.Random ignores a seed's sign)
+bootstrap_replicates = 10000                       # integer >= 1000
+min_complete_trials_per_task = 3                   # integer in [1, trials]
+max_excluded_block_fraction = 0.10                 # number in [0, 1)
+efficiency_gate = "upper_bound_below_1"            # the only accepted value
+```
+
+**`tasks_sha256`.** It is the sha256 of the UTF-8 text with one line per regular file under each listed task directory, `<task-id>/<relative path>\t<sha256 of the file bytes>\n`, with `/` as the separator. The lines are sorted by the UTF-8 bytes of `<task-id>/<relative path>` across all tasks (so `a-b/` sorts before `a/`), and the text holds no absolute path. Every regular file counts, including one the runner never reads, such as `.DS_Store`. A symlink or any other non-regular entry, including a symlinked task directory, is refused rather than skipped, because the runner would read through a symlink that the hash did not cover. A file name with a tab or newline, or one that is not UTF-8, is refused too. `study.tasks_sha256` implements it, and `run_study.py hash-tasks <study.toml>` prints it (see Runner).
+
+**Refusals.** `validate`, `plan` and `run` refuse a confirmatory study, with exit 2 and before anything is written, unless all of these hold:
+
+| Check | Holds when | The refusal prints |
+|---|---|---|
+| preregistration hash | the file exists and its sha256 equals `preregistration_sha256` | the manifest hash and the file's hash (or `none`) |
+| preregistration git | the file is tracked (`git ls-files --error-unmatch`), exists in `HEAD`, is byte-identical to its `HEAD` blob, and `git status --porcelain` shows nothing for it (nothing staged either), in the repository that holds the manifest | the file's hash, and the manifest hash or the `HEAD` blob's hash (`none` when the file is not in `HEAD`) |
+| tasks hash | the listed tasks in `$RIVET_PILOT_TASKS_DIR` hash to `tasks_sha256` | the manifest hash and the computed hash |
+| rivet binary (`run` only) | `RIVET_PILOT_RIVET_BIN` hashes to `rivet_binary_sha256`; checked again when the runner pins its copy | the manifest hash and the binary's hash |
+| dry run (`run` only) | `RIVET_PILOT_CLAUDE_BIN` is unset, or `--dry-run` is given | which check failed |
+
+Each refusal message begins `refused: <check> check failed`.
+
+**Dry runs.** When `RIVET_PILOT_CLAUDE_BIN` is set, the harness is a replacement, and every record (and `manifest.json`) has `dry_run = true`. For any study, `run --dry-run` without `RIVET_PILOT_CLAUDE_BIN` is refused, because it would run the real harness. A confirmatory study also refuses to `run` when its study directory already holds a `manifest.json` or a record whose dry-run flag differs from this run's. A real run would otherwise resume a rehearsal, skip the attempts the rehearsal recorded, and inherit its ledger. A rehearsal therefore uses its own `RIVET_PILOT_RUNS_DIR`, with the real manifest and tasks. `report.py` never evaluates a gate from a dry-run row (see [Confirmatory analysis](#confirmatory-analysis)).
 
 ## Runner
 
 ```bash
-python3 benchmark/runner/run_study.py validate benchmark/studies/<id>/study.toml   # tasks + gold self-check
-python3 benchmark/runner/run_study.py plan     benchmark/studies/<id>/study.toml   # schedule, worst case, argv
-python3 benchmark/runner/run_study.py run      benchmark/studies/<id>/study.toml   # spends usage
+python3 benchmark/runner/run_study.py validate   benchmark/studies/<id>/study.toml   # tasks + gold self-check
+python3 benchmark/runner/run_study.py plan       benchmark/studies/<id>/study.toml   # schedule, worst case, argv
+python3 benchmark/runner/run_study.py run        benchmark/studies/<id>/study.toml   # spends usage
+python3 benchmark/runner/run_study.py run        benchmark/studies/<id>/study.toml --dry-run   # with RIVET_PILOT_CLAUDE_BIN
+python3 benchmark/runner/run_study.py hash-tasks benchmark/studies/<id>/study.toml   # prints tasks_sha256
 ```
+
+`hash-tasks` needs only `RIVET_PILOT_TASKS_DIR`. It prints the digest on stdout and checks nothing else, so it can compute the value a new manifest freezes. For a confirmatory manifest it also says on stderr whether the digest matches `tasks_sha256`.
 
 The runner needs four environment variables, none of which has a default:
 
@@ -78,13 +120,13 @@ The runner needs four environment variables, none of which has a default:
 - `RIVET_CORPUS_DIR`
 - `RIVET_PILOT_RIVET_BIN` (for arm C)
 
-`RIVET_PILOT_CLAUDE_BIN` optionally replaces `claude`, which is how the tests use a fake agent. The runner refuses to start if any of the private directories lies inside this repository. Exit codes:
+`RIVET_PILOT_CLAUDE_BIN` optionally replaces `claude`, which is how the tests use a fake agent. Every record of such a run is a dry run (see [Confirmatory studies](#confirmatory-studies)). The runner refuses to start if any of the private directories lies inside this repository. Exit codes:
 
 | Code | Meaning |
 |---|---|
 | 0 | Finished |
 | 1 | Error, including a setup integrity failure |
-| 2 | Invalid manifest or task |
+| 2 | Invalid manifest or task, or a confirmatory refusal |
 | 3 | Stopped by the budget guard |
 
 A second `run` resumes. Attempts that already have a record are skipped. An attempt that was started but has no record (the runner died) is recorded as `runner_interrupted`.
@@ -239,6 +281,7 @@ Task failures are always included, with their tokens.
 The study directory also holds `manifest.json` (versions, hashes, per-arm argv, schedule, task limits and hashes) and `ledger.jsonl`. The attempt ID is `<task>.t<trial>.<arm>.a<attempt>`, the run ID omits `.a<attempt>`, and the block ID is `<task>.t<trial>`. `record.json` holds:
 
 - IDs, the harness and rivet versions, the rivet binary sha256, and the snippet hash;
+- `harness_binary_is_override` and `dry_run`, both true when `RIVET_PILOT_CLAUDE_BIN` replaced the harness;
 - `settings_hash`, which covers everything held constant across arms;
 - `tool_policy_hash`, which covers the arm's allow and deny lists;
 - the full argv, the names (not values) of the child environment variables, and the child `PATH`;
@@ -275,6 +318,7 @@ Booleans are `true`/`false`, floats have six decimals, and maps are compact sort
 | `model_id` | pinned model passed to `--model` |
 | `models_observed` | models seen in assistant messages and `modelUsage` |
 | `harness_version` | `claude --version` of the binary used |
+| `dry_run` | the record's `dry_run`; for a record older than T48a, its `harness_binary_is_override` |
 | `settings_hash`, `tool_policy_hash` | sha256 of the canonical JSON described above |
 | `tool_version`, `snippet_hash` | C: `rivet --version`, and the sha256 of the installed `CLAUDE.md`. B: not applicable. |
 | `max_budget_usd`, `max_turns`, `wall_seconds_limit` | task limits |
@@ -388,7 +432,67 @@ It writes `report.md` from [REPORT-TEMPLATE](../REPORT-TEMPLATE.md), plus `summa
 
   A zero or missing denominator is reported as undefined, with its reason.
 
-Every confirmatory gate is `NOT EVALUATED (pilot)`, and intervals are not computed (T48a). Identical inputs give byte-identical outputs.
+For a pilot, every confirmatory gate is `NOT EVALUATED (pilot)` and no interval is computed. Identical inputs give byte-identical outputs.
+
+### Confirmatory analysis
+
+For a confirmatory manifest, `report.py` applies the following. `--corpus-manifest` (default `benchmark/corpus.toml`) supplies each project's languages. All means are exactly rounded (`math.fsum`), so a result does not depend on the Python version's float summation.
+
+**Inclusion.** The frozen retry rule is already applied by `extract.py` (see "Retry and inclusion"). Failures of any kind (timeout, crash, invalid answer, a limit reached) count as `pass = 0`, with the tokens they consumed. A scheduled task/trial block is *included* only when each arm has exactly one row with `analysis_inclusion = included`, an available `input_tokens_total`, and a `pass` of `true` or `false`. Otherwise the block is *excluded* from **both** arms. The reason is recorded per arm:
+
+| Reason | Meaning |
+|---|---|
+| `missing_run` | no row at all for that arm (for example, the study stopped) |
+| the latest attempt's `inclusion_reason` | no included row: `infrastructure_failure_after_retry`, `infrastructure_failure_retry_missing`, `contaminated`, ... |
+| `missing_usage` | the included row has no `input_tokens_total` |
+| `missing_pass` | the included row has no pass value |
+
+Every excluded block is listed, with its reasons, in `summary.json` `exclusions` and in `report.md`. A row outside the manifest's schedule (an unknown task, a trial beyond `trials`, a mismatched `block_id`), a task whose rows disagree on project or category, or two included attempts for one block and arm is an input error, and no report is written.
+
+**Validity.** The outcome is `invalid`, and no gate is evaluated, when any of these holds. Every reason that applies is reported, in this order:
+
+| Reason | Holds when |
+|---|---|
+| `dry_run` | some row has `dry_run = true` |
+| `dry_run_unknown` | some row does not record `dry_run` as `true` or `false` |
+| `analysis_version_mismatch` | the manifest's `analysis_version` differs from `report.py`'s `CONFIRMATORY_ANALYSIS_VERSION` (`t48a-1`) |
+| `too_few_complete_trials` | some task has fewer than `min_complete_trials_per_task` included blocks |
+| `too_many_excluded_blocks` | excluded blocks ÷ scheduled blocks exceeds `max_excluded_block_fraction`, compared exactly as the decimal written in the manifest (1 of 8 does not exceed `0.125`) |
+| `no_included_blocks` | no task has an included block, so no estimate exists |
+| `zero_denominator` | the point estimate's B mean input tokens is 0 |
+
+**Point estimates.** They use equal task weighting over the tasks with at least one included block. For each such task and arm, the task mean input tokens (`input_tokens_total`) and the pass rate are taken over its included blocks. Then:
+
+- `ratio` = (mean over tasks of the C task means) ÷ (mean over tasks of the B task means);
+- `success_diff_pp` = 100 × (mean over tasks of the C pass rate − mean over tasks of the B pass rate).
+
+**Paired cluster bootstrap.** This is the exact procedure, so a result can be reproduced by hand:
+
+1. The strata are languages. A task's language is the single entry of its project's `languages` in the corpus manifest. A project with more than one language (or none) is an error for now. Each stratum holds the tasks that have an included block, sorted by task ID.
+2. One `rng = random.Random(analysis_seed)` (Python's Mersenne Twister) drives every draw.
+3. For each of the `bootstrap_replicates` replicates: for each stratum in sorted name order, with n tasks, draw n times `tasks[rng.randrange(n)]`. Each stratum keeps its size.
+4. A drawn task brings all of its included blocks in both arms. The replicate's `ratio` and `success_diff_pp` are the two point estimates over the drawn tasks, with each draw weighted once. When a replicate's B mean is 0, its ratio is `+inf`, which is conservative. Such replicates are counted in `zero_denominator_replicates`.
+5. Upper bound on the ratio: sort the replicate ratios ascending and take index `ceil(0.95 × R) − 1`. Lower bound on the success difference: sort ascending and take index `ceil(0.05 × R) − 1`. Both indices use integer arithmetic. With R = 10000 they are 9499 and 499; with R = 20 they are 18 and 0.
+
+The bootstrap is still computed for an invalid study, when a task has an included block, so a dry run exercises it. Only the gates are withheld.
+
+**Gates and outcome.** The only efficiency gate is `efficiency_gate = "upper_bound_below_1"`:
+
+- `quality_pass` = lower bound > −5.0 percentage points;
+- `efficiency_pass` = upper bound < 1.00 (`+inf` fails).
+
+The outcome is `invalid` under the validity rules; otherwise `fail_quality` when quality fails; otherwise `inconclusive` when efficiency fails; otherwise `pass`. The template's "C/B ≤ 0.70" point-estimate row is reported as `NOT A GATE`, because the manifest's gate wins, and the report states which gates were evaluated.
+
+**summary.json** holds `analysis_version` (the script's), `manifest_analysis_version`, `dry_run`, `inputs` (runs.csv, manifest, preregistration, binary and tasks hashes), `outcome`, `validity`, `blocks` (scheduled, included, excluded, and included blocks per task), `exclusions`, `primary` (the point estimates), `bootstrap` (seed, replicates, strata, both indices, both bounds, and `zero_denominator_replicates`), `gates`, `per_task_primary`, `secondary`, `accounting`, `adoption_c` and `spend`. It is strict JSON: an infinite bound is the string `"+inf"`. Gate pass values are `null` when no gate is evaluated.
+
+**Secondary results.** These are point estimates only, labelled secondary, with no interval and no gate. All of them use included blocks only:
+
+- the successful-run-only input-token ratio, over tasks with a passing run in both arms;
+- cost (Claude Code estimate), tool-call, wall-clock and output-token ratios, over tasks with a value in both arms (missing values are counted, never zero);
+- per-task, per-category and per-language tables;
+- adoption and fallbacks, over the C runs of included blocks.
+
+**report.md.** The title and status say `CONFIRMATORY` and the outcome. A report with any dry-run row is titled `(DRY RUN)`, its status says `DRY RUN`, and its gate cells read `NOT EVALUATED (dry run)`. An invalid study's gate cells read `NOT EVALUATED (invalid study)`. The template's "Two-sided 95% interval" column says that no two-sided interval is computed, and gives the one-sided bound instead.
 
 ## Tests
 
@@ -396,7 +500,7 @@ Every confirmatory gate is `NOT EVALUATED (pilot)`, and intervals are not comput
 python3 benchmark/runner/test_runner.py        # standard library only; add -v for names
 ```
 
-The tests never call a model, the network or the real `claude`. Agent runs use `testdata/fake_claude.py`, selected via `RIVET_PILOT_CLAUDE_BIN`, which replays the canned stream-json transcripts in `testdata/transcripts/`. The fake agent runs inside the same `sandbox-exec` profile, and it can attempt reads and execs from inside it, so the tests prove the confinement from the agent's side. Arm C uses `testdata/fake_rivet.py`. The synthetic tasks and corpus are in `testdata/`. The tests create the instruction files and the stale `.rivet/` at runtime, so this repository carries none.
+The tests never call a model, the network or the real `claude`. Every `run` in them sets `RIVET_PILOT_CLAUDE_BIN`, so no refusal test could reach a real harness even if the refusal were missing. Confirmatory tests build their own throwaway git repository for the manifest and preregistration. Agent runs use `testdata/fake_claude.py`, selected via `RIVET_PILOT_CLAUDE_BIN`, which replays the canned stream-json transcripts in `testdata/transcripts/`. The fake agent runs inside the same `sandbox-exec` profile, and it can attempt reads and execs from inside it, so the tests prove the confinement from the agent's side. Arm C uses `testdata/fake_rivet.py`. The synthetic tasks and corpus are in `testdata/`. The tests create the instruction files and the stale `.rivet/` at runtime, so this repository carries none.
 
 ## Known limitations
 

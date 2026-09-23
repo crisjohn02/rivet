@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Pilot study runner (T38a).
+"""Study runner (T38a; confirmatory studies T48a).
 
-    python3 benchmark/runner/run_study.py validate benchmark/studies/<id>/study.toml
-    python3 benchmark/runner/run_study.py plan     benchmark/studies/<id>/study.toml
-    python3 benchmark/runner/run_study.py run      benchmark/studies/<id>/study.toml
+    python3 benchmark/runner/run_study.py validate   benchmark/studies/<id>/study.toml
+    python3 benchmark/runner/run_study.py plan       benchmark/studies/<id>/study.toml
+    python3 benchmark/runner/run_study.py run        benchmark/studies/<id>/study.toml [--dry-run]
+    python3 benchmark/runner/run_study.py hash-tasks benchmark/studies/<id>/study.toml
 
 `validate` checks the manifest, every task and every gold answer against its
 own check. `plan` prints the schedule and worst-case spend. Only `run` starts
 agent sessions, and it spends model usage unless `RIVET_PILOT_CLAUDE_BIN`
-points at a fake agent.
+points at a fake agent; every record of such a run is marked `dry_run`, and a
+confirmatory study then also needs `--dry-run`. `hash-tasks` prints the
+`tasks_sha256` of the listed tasks. For a confirmatory study, `validate`,
+`plan` and `run` first refuse unless the preregistration and the tasks match
+their frozen hashes, and `run` also needs the frozen rivet binary.
 
 Required environment (no defaults; nothing private lives in the repository):
 
@@ -18,8 +23,8 @@ Required environment (no defaults; nothing private lives in the repository):
     RIVET_PILOT_RIVET_BIN   the rivet binary for arm C (run only)
     RIVET_PILOT_CLAUDE_BIN  optional: harness binary, default `claude`
 
-Exit codes: 0 finished, 1 error, 2 invalid manifest or task, 3 stopped by the
-budget guard. Standard library only.
+Exit codes: 0 finished, 1 error, 2 invalid manifest or task (including every
+confirmatory refusal), 3 stopped by the budget guard. Standard library only.
 """
 
 from __future__ import annotations
@@ -465,6 +470,8 @@ def execute_attempt(ctx: Context, ledger: studylib.Ledger, block: dict, arm: str
         "model_id": study["model"],
         "harness_binary": ctx.claude_bin,
         "harness_binary_is_override": ctx.claude_is_override,
+        # A replaced harness is a rehearsal: its records never count as results.
+        "dry_run": ctx.claude_is_override,
         "harness_version": versions["claude"],
         "settings_hash": studylib.settings_hash(study),
         "tool_policy_hash": studylib.tool_policy_hash(study, arm),
@@ -645,6 +652,9 @@ def gather_versions(ctx: Context) -> dict:
         # runs must not sit under a denied path (for example a build tree in
         # rivet's own repository), and a copy cannot change under the study.
         source_sha = studylib.sha256_file(rivet_bin)
+        if ctx.study["kind"] == "confirmatory" and source_sha != ctx.study["confirmatory"]["rivet_binary_sha256"]:
+            # The preflight checked it too; this closes the gap before the copy.
+            studylib.check_rivet_binary(ctx.study, rivet_bin)
         pinned = os.path.join(ctx.tools_dir, "rivet")
         os.makedirs(ctx.tools_dir, exist_ok=True)
         if os.path.exists(pinned):
@@ -714,6 +724,9 @@ def recover_interrupted(ctx: Context, ledger: studylib.Ledger, records: dict) ->
             "execution_order": None,
             "limits": task.get("limits"),
             "model_id": ctx.study["model"],
+            # For a confirmatory study, refuse_mixed_dry_run guarantees that
+            # the interrupted invocation had this invocation's harness.
+            "dry_run": ctx.claude_is_override,
             "outcome": {"runner_interrupted": True},
             "termination_reason": "runner_interrupted",
             "infrastructure_failure": True,
@@ -729,8 +742,37 @@ def recover_interrupted(ctx: Context, ledger: studylib.Ledger, records: dict) ->
         records[aid] = record
 
 
+def record_dry_run(record: dict):
+    """A record's dry-run flag; records older than T48a carry only
+    `harness_binary_is_override`, which is the same fact."""
+    if "dry_run" in record:
+        return record["dry_run"]
+    return record.get("harness_binary_is_override")
+
+
+def refuse_mixed_dry_run(ctx: Context) -> None:
+    """A confirmatory study directory holds either rehearsal records or real
+    ones, never both: a real run resuming a rehearsal would skip the
+    rehearsed attempts and inherit the rehearsal's ledger."""
+    earlier = []
+    manifest_path = os.path.join(ctx.study_dir, "manifest.json")
+    if os.path.exists(manifest_path):
+        with open(manifest_path, encoding="utf-8") as handle:
+            earlier.append(("manifest.json", record_dry_run(json.load(handle))))
+    for aid, record in sorted(load_existing(ctx).items()):
+        earlier.append((aid, record_dry_run(record)))
+    for name, flag in earlier:
+        if flag is not ctx.claude_is_override:
+            raise studylib.FreezeError(
+                f"refused: dry-run check failed: {ctx.study_dir} already holds {name} with dry_run={flag}, "
+                f"and this run has dry_run={ctx.claude_is_override}; use a separate RIVET_PILOT_RUNS_DIR for a rehearsal"
+            )
+
+
 def run_study(ctx: Context, out=sys.stdout) -> int:
     study = ctx.study
+    if study["kind"] == "confirmatory":
+        refuse_mixed_dry_run(ctx)
     os.makedirs(ctx.study_dir, exist_ok=True)
     ledger = studylib.Ledger(os.path.join(ctx.study_dir, "ledger.jsonl"), study["budget_cap_usd"], study["per_run_reserve_usd"])
     versions = gather_versions(ctx)
@@ -741,6 +783,7 @@ def run_study(ctx: Context, out=sys.stdout) -> int:
         "runner_version": RUNNER_VERSION,
         "harness_version": versions["claude"],
         "harness_binary_is_override": ctx.claude_is_override,
+        "dry_run": ctx.claude_is_override,
         "rivet_version": versions.get("rivet"),
         "rivet_binary_sha256": versions.get("rivet_sha256"),
         "snippet_hash": versions.get("snippet_hash"),
@@ -841,11 +884,45 @@ def plan(ctx: Context, out=sys.stdout) -> int:
     return EXIT_OK
 
 
+def hash_tasks(study: dict, out=sys.stdout) -> int:
+    """Prints the listed tasks' `tasks_sha256` (TASK-FORMAT.md). It checks
+    nothing else, so it can compute the value a new manifest freezes."""
+    digest = studylib.tasks_sha256(require_env("RIVET_PILOT_TASKS_DIR"), study["tasks"])
+    print(digest, file=out)
+    if study["kind"] == "confirmatory":
+        same = digest == study["confirmatory"]["tasks_sha256"]
+        print(f"manifest tasks_sha256 {'matches' if same else 'differs: ' + study['confirmatory']['tasks_sha256']}", file=sys.stderr)
+    return EXIT_OK
+
+
+def confirmatory_preflight(study: dict, command: str, dry_run: bool, out=sys.stdout) -> None:
+    """The refusals of a confirmatory study (TASK-FORMAT.md "Confirmatory
+    studies"), before anything is written. Raises FreezeError."""
+    prereg = studylib.check_preregistration(study)
+    tasks = studylib.check_tasks(study, require_env("RIVET_PILOT_TASKS_DIR"))
+    print(f"frozen: preregistration {prereg['path']} sha256 {prereg['sha256']}, tracked and unmodified at HEAD", file=out)
+    print(f"frozen: tasks sha256 {tasks}", file=out)
+    if command != "run":
+        return
+    if os.environ.get("RIVET_PILOT_CLAUDE_BIN") and not dry_run:
+        raise studylib.FreezeError(
+            "refused: dry-run check failed: RIVET_PILOT_CLAUDE_BIN replaces the harness, so every record is a dry run; "
+            "a confirmatory study needs --dry-run to run that way"
+        )
+    binary = studylib.check_rivet_binary(study, require_env("RIVET_PILOT_RIVET_BIN"))
+    print(f"frozen: rivet binary sha256 {binary}", file=out)
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="rivet pilot study runner (T38a)")
-    parser.add_argument("command", choices=["validate", "plan", "run"])
+    parser = argparse.ArgumentParser(description="rivet study runner (T38a, T48a)")
+    parser.add_argument("command", choices=["validate", "plan", "run", "hash-tasks"])
     parser.add_argument("study")
     parser.add_argument("--corpus-manifest", default=studylib.CORPUS_TOML)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run: acknowledge that RIVET_PILOT_CLAUDE_BIN replaces the harness (required for a confirmatory study)",
+    )
     args = parser.parse_args(argv)
     try:
         study = studylib.load_study(args.study)
@@ -853,6 +930,12 @@ def main(argv=None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INVALID
     try:
+        if args.command == "hash-tasks":
+            return hash_tasks(study)
+        if args.command == "run" and args.dry_run and not os.environ.get("RIVET_PILOT_CLAUDE_BIN"):
+            raise studylib.FreezeError("refused: dry-run check failed: --dry-run without RIVET_PILOT_CLAUDE_BIN would run the real harness")
+        if study["kind"] == "confirmatory":
+            confirmatory_preflight(study, args.command, args.dry_run)
         if args.command == "validate":
             return validate(study, args.corpus_manifest)
         ctx = Context(study, args.corpus_manifest)
@@ -860,6 +943,9 @@ def main(argv=None) -> int:
             return plan(ctx)
         return run_study(ctx)
     except checks.TaskError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_INVALID
+    except studylib.FreezeError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INVALID
     except studylib.StudyError as error:

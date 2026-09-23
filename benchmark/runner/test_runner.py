@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the pilot harness (T38a-T38c).
+"""Tests for the pilot harness (T38a-T38c) and confirmatory studies (T48a).
 
     python3 benchmark/runner/test_runner.py        # or add -v
 
@@ -13,7 +13,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -289,12 +291,17 @@ class StudyTests(unittest.TestCase):
         pilot = os.path.join(studylib.REPO_ROOT, "benchmark", "studies", "pilot-01", "study.toml")
         loaded = studylib.load_study(pilot)
         self.assertEqual(loaded["tasks"], ["p1", "p2", "p3", "p4", "p5"])
-        self.assertEqual((loaded["budget_cap_usd"], loaded["model"], loaded["arms"]), (25.0, "claude-opus-5-5", ["B", "C"]))
+        # 84fee9d lowered the cap to $22 (the smoke study took $3) and
+        # narrowed the deny rules; this expectation follows that manifest.
+        self.assertEqual((loaded["budget_cap_usd"], loaded["model"], loaded["arms"]), (22.0, "claude-opus-5-5", ["B", "C"]))
+        self.assertEqual(loaded["sandbox"]["deny_read_paths"], ["~/rivet-corpus/gold", "~/ssr", "~/rivet", "~/rivet-wt"])
         self.assertEqual(
-            loaded["sandbox"]["deny_read_paths"],
-            ["~/rivet-corpus/gold", "~/ssr", "~/rivet", "~/rivet-wt", "~/.claude/projects"],
+            loaded["sandbox"]["deny_read_regexes"],
+            [
+                "^/private/tmp/claude-[0-9]+/-Users-[^-/]+-(rivet|ssr)(-|/|$)",
+                "^/Users/[^/]+/[.]claude/projects/-Users-[^-/]+-(rivet|ssr)(-|/|$)",
+            ],
         )
-        self.assertEqual(loaded["sandbox"]["deny_read_regexes"], ["^/private/tmp/claude-"])
         with self.assertRaises(studylib.StudyError):
             self.load(study_text(**{"deny_rivet_exec_in_b = true": "deny_rivet_exec_in_b = false"}))
         with self.assertRaises(studylib.StudyError):
@@ -558,9 +565,9 @@ class Harness:
         )
         return env
 
-    def run(self, command="run", **env_kw):
+    def run(self, command="run", extra=(), **env_kw):
         return subprocess.run(
-            [sys.executable, RUNNER, command, self.study_path, "--corpus-manifest", CORPUS_MANIFEST],
+            [sys.executable, RUNNER, command, self.study_path, "--corpus-manifest", CORPUS_MANIFEST, *extra],
             env=self.env(**env_kw),
             capture_output=True,
             text=True,
@@ -1098,6 +1105,745 @@ class ReportTests(unittest.TestCase):
         summary = report.generate(csv_path, h.study_path, os.path.join(h.root, "report"))
         self.assertAlmostEqual(summary["comparisons"]["input_tokens_total"]["ratio_c_over_b"], 1.0)
         self.assertEqual(summary["accounting"]["C"]["accounted"], 1)
+
+
+# ---- confirmatory studies (T48a) --------------------------------------------
+
+# TOML literals for the [confirmatory] table; tests override single keys.
+CONF_DEFAULTS = {
+    "preregistration": '"benchmark/preregistration.md"',
+    "preregistration_sha256": '"' + "a" * 64 + '"',
+    "rivet_binary_sha256": '"' + "b" * 64 + '"',
+    "tasks_sha256": '"' + "c" * 64 + '"',
+    "analysis_version": '"t48a-1"',
+    "analysis_seed": "20260927",
+    "bootstrap_replicates": "1000",
+    "min_complete_trials_per_task": "1",
+    "max_excluded_block_fraction": "0.10",
+    "efficiency_gate": '"upper_bound_below_1"',
+}
+GIT_TEST_ENV = {
+    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+    "HOME": tempfile.gettempdir(),
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    **run_study.GIT_IDENTITY,
+}
+
+
+def confirmatory_study_text(conf=None, **overrides) -> str:
+    """The demo manifest as a confirmatory study. A `conf` value of None
+    drops that key from the [confirmatory] table."""
+    text = study_text(**{'kind = "pilot"': 'kind = "confirmatory"', **overrides})
+    values = dict(CONF_DEFAULTS)
+    values.update(conf or {})
+    return text + "\n[confirmatory]\n" + "".join(f"{k} = {v}\n" for k, v in values.items() if v is not None)
+
+
+def task_overrides(tasks, trials) -> dict:
+    return {'tasks = ["demo-locate"]': "tasks = [" + ", ".join(f'"{t}"' for t in tasks) + "]", "trials = 1": f"trials = {trials}"}
+
+
+def git(repo, *args) -> str:
+    done = subprocess.run(["git", "-C", repo, *args], env=GIT_TEST_ENV, capture_output=True, text=True, timeout=60)
+    if done.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)}: {done.stderr}")
+    return done.stdout
+
+
+class FrozenRepo:
+    """A git repository holding a confirmatory manifest and its committed
+    preregistration, frozen against `tasks_dir` and the fake rivet."""
+
+    PREREG = "benchmark/preregistration.md"
+
+    def __init__(self, root, tasks_dir, tasks, trials=1, conf=None, commit_prereg=True, study_id="conf-study"):
+        self.repo = os.path.join(root, "repo")
+        os.makedirs(os.path.join(self.repo, "benchmark"))
+        git(self.repo, "init", "-q", "--template=", "-b", "main")
+        self.prereg = os.path.join(self.repo, self.PREREG)
+        spit(self.prereg, "# Preregistration (synthetic)\n")
+        self.prereg_sha = studylib.sha256_file(self.prereg)
+        self.tasks_sha = studylib.tasks_sha256(tasks_dir, list(tasks))
+        self.rivet_sha = studylib.sha256_file(FAKE_RIVET)
+        values = {
+            "preregistration_sha256": f'"{self.prereg_sha}"',
+            "tasks_sha256": f'"{self.tasks_sha}"',
+            "rivet_binary_sha256": f'"{self.rivet_sha}"',
+        }
+        values.update(conf or {})
+        self.study_path = write_study(os.path.join(self.repo, "benchmark"), study_id, confirmatory_study_text(values, **task_overrides(tasks, trials)))
+        git(self.repo, "add", "--", os.path.relpath(self.study_path, self.repo))
+        if commit_prereg:
+            git(self.repo, "add", "--", self.PREREG)
+        git(self.repo, "commit", "-q", "--no-gpg-sign", "-m", "freeze")
+
+    def set_prereg_sha(self, digest):
+        text = slurp(self.study_path)
+        spit(self.study_path, text.replace(self.prereg_sha, digest))
+
+
+class ConfirmatoryManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def load(self, text):
+        return studylib.load_study(write_study(self.tmp, "demo-study", text))
+
+    def test_confirmatory_manifest_fields(self):
+        s = self.load(confirmatory_study_text(**{"trials = 1": "trials = 5"}))
+        self.assertEqual(s["kind"], "confirmatory")
+        self.assertEqual(
+            s["confirmatory"],
+            {
+                "preregistration": "benchmark/preregistration.md",
+                "preregistration_sha256": "a" * 64,
+                "rivet_binary_sha256": "b" * 64,
+                "tasks_sha256": "c" * 64,
+                "analysis_version": "t48a-1",
+                "analysis_seed": 20260927,
+                "bootstrap_replicates": 1000,
+                "min_complete_trials_per_task": 1,
+                "max_excluded_block_fraction": 0.1,
+                "efficiency_gate": "upper_bound_below_1",
+            },
+        )
+        self.assertIsNone(self.load(study_text())["confirmatory"])
+
+    def test_confirmatory_manifest_rules(self):
+        five = {"trials = 1": "trials = 5"}
+        bad_conf = [
+            {"preregistration": '"/abs/prereg.md"'},
+            {"preregistration": '"../prereg.md"'},
+            {"preregistration": '"benchmark/./prereg.md"'},
+            {"preregistration": '""'},
+            {"preregistration_sha256": '"' + "A" * 64 + '"'},
+            {"tasks_sha256": '"' + "c" * 63 + '"'},
+            {"rivet_binary_sha256": None},
+            {"analysis_version": '""'},
+            {"analysis_seed": "-1"},
+            {"analysis_seed": "true"},
+            {"analysis_seed": "1.5"},
+            {"bootstrap_replicates": "999"},
+            {"bootstrap_replicates": "1000.0"},
+            {"min_complete_trials_per_task": "0"},
+            {"min_complete_trials_per_task": "6"},
+            {"max_excluded_block_fraction": "1.0"},
+            {"max_excluded_block_fraction": "-0.01"},
+            {"max_excluded_block_fraction": "true"},
+            {"efficiency_gate": '"point_estimate_and_upper_bound"'},
+            {"efficiency_gate": None},
+            {"unknown_setting": "1"},
+        ]
+        for conf in bad_conf:
+            with self.assertRaises(studylib.StudyError, msg=conf):
+                self.load(confirmatory_study_text(conf, **five))
+        for arms in ('["B"]', '["C", "B"]', '["B", "C", "C"]'):
+            with self.assertRaises(studylib.StudyError, msg=arms):
+                self.load(confirmatory_study_text(**five, **{'arms = ["B", "C"]': f"arms = {arms}"}))
+        with self.assertRaises(studylib.StudyError):
+            self.load(study_text(**{'kind = "pilot"': 'kind = "confirmatory"'}))  # no [confirmatory]
+        with self.assertRaises(studylib.StudyError):
+            self.load(study_text() + "\n[confirmatory]\nanalysis_seed = 1\n")  # a pilot may not carry one
+        with self.assertRaises(studylib.StudyError):
+            self.load(study_text(**{'kind = "pilot"': 'kind = "main"'}))
+        # Boundaries that are allowed.
+        self.load(confirmatory_study_text({"max_excluded_block_fraction": "0", "min_complete_trials_per_task": "5", "analysis_seed": "0"}, **five))
+
+    def make_tasks(self, root):
+        for rel, content in (
+            ("a/task.toml", "id = 'a'\n"),
+            ("a/prompt.md", "prompt a\n"),
+            ("a/B.txt", "upper\n"),
+            ("a/sub/extra.txt", "nested\n"),
+            ("a-b/task.toml", "id = 'a-b'\n"),
+        ):
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            spit(path, content)
+
+    def test_tasks_sha256_is_the_documented_text(self):
+        tasks = os.path.join(self.tmp, "tasks")
+        self.make_tasks(tasks)
+
+        def h(text):
+            return studylib.sha256_bytes(text.encode())
+
+        # Sorted by the bytes of "<task>/<path>" across all tasks: "-" (0x2d)
+        # sorts before "/" (0x2f), and "B" before "p", "s" and "t".
+        expected = (
+            f"a-b/task.toml\t{h(chr(105) + 'd = ' + chr(39) + 'a-b' + chr(39) + chr(10))}\n"
+            f"a/B.txt\t{h('upper' + chr(10))}\n"
+            f"a/prompt.md\t{h('prompt a' + chr(10))}\n"
+            f"a/sub/extra.txt\t{h('nested' + chr(10))}\n"
+            f"a/task.toml\t{h('id = ' + chr(39) + 'a' + chr(39) + chr(10))}\n"
+        )
+        text = studylib.tasks_hash_text(tasks, ["a", "a-b"])
+        self.assertEqual(text, expected)
+        self.assertNotIn(self.tmp, text)
+        digest = studylib.tasks_sha256(tasks, ["a", "a-b"])
+        self.assertEqual(digest, h(expected))
+        # Manifest order does not matter; location does not matter.
+        self.assertEqual(studylib.tasks_sha256(tasks, ["a-b", "a"]), digest)
+        moved = os.path.join(self.tmp, "elsewhere", "tasks")
+        shutil.copytree(tasks, moved)
+        self.assertEqual(studylib.tasks_sha256(moved, ["a", "a-b"]), digest)
+        # Every regular file counts, including one nobody reads.
+        spit(os.path.join(moved, "a", ".DS_Store"), "x")
+        self.assertNotEqual(studylib.tasks_sha256(moved, ["a", "a-b"]), digest)
+        os.unlink(os.path.join(moved, "a", ".DS_Store"))
+        spit(os.path.join(moved, "a", "prompt.md"), "prompt a!\n")
+        self.assertNotEqual(studylib.tasks_sha256(moved, ["a", "a-b"]), digest)
+        # A symlink would let the runner read bytes the hash never saw.
+        os.symlink(os.path.join(moved, "a", "B.txt"), os.path.join(moved, "a", "link.txt"))
+        with self.assertRaises(studylib.StudyError):
+            studylib.tasks_sha256(moved, ["a"])
+        with self.assertRaises(studylib.StudyError):
+            studylib.tasks_sha256(tasks, ["missing"])
+
+    def test_hash_tasks_command_prints_the_digest(self):
+        h = Harness(tasks=("demo-locate", "demo-trace"))
+        self.addCleanup(h.close)
+        done = h.run("hash-tasks")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout, studylib.tasks_sha256(h.tasks_dir, ["demo-locate", "demo-trace"]) + "\n")
+        frozen = FrozenRepo(h.root, h.tasks_dir, ["demo-locate", "demo-trace"])
+        h.study_path = frozen.study_path
+        done = h.run("hash-tasks")
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, frozen.tasks_sha))
+        self.assertIn("matches", done.stderr)
+        spit(os.path.join(h.tasks_dir, "demo-trace", "notes.txt"), "late edit\n")
+        done = h.run("hash-tasks")
+        self.assertEqual(done.returncode, 0)
+        self.assertNotEqual(done.stdout.strip(), frozen.tasks_sha)
+        self.assertIn(f"differs: {frozen.tasks_sha}", done.stderr)
+
+
+class ConfirmatoryRunnerTests(unittest.TestCase):
+    """Every refusal of section 1, for validate, plan and run. Every `run`
+    here uses the fake agent, so a missing refusal could never reach a
+    model."""
+
+    def harness(self, conf=None, commit_prereg=True, tasks=("demo-locate",), plan=None):
+        h = Harness(tasks=tasks, study_id="conf-study", plan=plan)
+        self.addCleanup(h.close)
+        h.frozen = FrozenRepo(h.root, h.tasks_dir, tasks, conf=conf, commit_prereg=commit_prereg)
+        h.study_path = h.frozen.study_path
+        return h
+
+    def assert_refused(self, h, check, hashes, commands=("validate", "plan", "run")):
+        for command in commands:
+            done = h.run(command, extra=["--dry-run"] if command == "run" else [])
+            self.assertEqual(done.returncode, 2, f"{command}: {done.stdout}{done.stderr}")
+            self.assertIn(check, done.stderr, command)
+            for digest in hashes:
+                self.assertIn(digest, done.stderr, command)
+        self.assertEqual(h.calls(), [])
+        self.assertFalse(os.path.exists(h.study_dir))
+
+    def test_frozen_study_validates_plans_and_dry_runs(self):
+        h = self.harness()
+        done = h.run("validate")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"frozen: preregistration benchmark/preregistration.md sha256 {h.frozen.prereg_sha}", done.stdout)
+        self.assertIn(f"frozen: tasks sha256 {h.frozen.tasks_sha}", done.stdout)
+        self.assertEqual(h.run("plan").returncode, 0)
+        done = h.run("run", extra=["--dry-run"])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"frozen: rivet binary sha256 {h.frozen.rivet_sha}", done.stdout)
+        records = h.records()
+        self.assertEqual(sorted(records), ["demo-locate.t1.B.a1", "demo-locate.t1.C.a1"])
+        self.assertTrue(all(r["dry_run"] is True for r in records.values()))
+        self.assertIs(json.loads(slurp(os.path.join(h.study_dir, "manifest.json")))["dry_run"], True)
+        self.assertEqual({row["dry_run"] for row in h.csv_rows().values()}, {"true"})
+
+    def test_preregistration_hash_mismatch_is_refused(self):
+        h = self.harness()
+        h.frozen.set_prereg_sha("1" * 64)
+        self.assert_refused(h, "preregistration hash check failed", ["1" * 64, h.frozen.prereg_sha])
+
+    def test_missing_preregistration_is_refused(self):
+        h = self.harness()
+        os.unlink(h.frozen.prereg)
+        self.assert_refused(h, "preregistration hash check failed", [h.frozen.prereg_sha])
+
+    def test_untracked_preregistration_is_refused(self):
+        h = self.harness(commit_prereg=False)
+        self.assert_refused(h, "is not tracked by git", [h.frozen.prereg_sha])
+
+    def test_staged_but_uncommitted_preregistration_is_refused(self):
+        h = self.harness(commit_prereg=False)
+        git(h.frozen.repo, "add", "--", FrozenRepo.PREREG)
+        self.assert_refused(h, "is not in HEAD", [h.frozen.prereg_sha])
+
+    def test_modified_preregistration_is_refused(self):
+        h = self.harness()
+        committed = h.frozen.prereg_sha
+        spit(h.frozen.prereg, "# Preregistration (edited after freezing)\n")
+        edited = studylib.sha256_file(h.frozen.prereg)
+        # The manifest follows the edit, so only the git check can catch it.
+        h.frozen.set_prereg_sha(edited)
+        self.assert_refused(h, "is modified relative to HEAD", [committed, edited])
+        # Staged, not committed: still modified relative to HEAD.
+        git(h.frozen.repo, "add", "--", FrozenRepo.PREREG)
+        self.assert_refused(h, "is modified relative to HEAD", [committed, edited], commands=("validate",))
+
+    def test_task_hash_mismatch_is_refused(self):
+        h = self.harness()
+        with open(os.path.join(h.tasks_dir, "demo-locate", "prompt.md"), "a") as handle:
+            handle.write("one more line\n")
+        actual = studylib.tasks_sha256(h.tasks_dir, ["demo-locate"])
+        self.assert_refused(h, "tasks hash check failed", [h.frozen.tasks_sha, actual])
+
+    def test_binary_hash_mismatch_refuses_run_only(self):
+        h = self.harness()
+        other = os.path.join(h.root, "other-rivet")
+        shutil.copyfile(FAKE_RIVET, other)
+        with open(other, "a") as handle:
+            handle.write("# a different build\n")
+        os.chmod(other, 0o755)
+        for command in ("validate", "plan"):
+            self.assertEqual(h.run(command, rivet=other).returncode, 0, command)
+        done = h.run("run", extra=["--dry-run"], rivet=other)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("rivet binary check failed", done.stderr)
+        self.assertIn(h.frozen.rivet_sha, done.stderr)
+        self.assertIn(studylib.sha256_file(other), done.stderr)
+        self.assertEqual(h.calls(), [])
+        self.assertFalse(os.path.exists(h.study_dir))
+
+    def test_override_without_dry_run_is_refused(self):
+        h = self.harness()
+        done = h.run("run")
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("dry-run check failed", done.stderr)
+        self.assertIn("--dry-run", done.stderr)
+        self.assertEqual(h.calls(), [])
+        self.assertFalse(os.path.exists(h.study_dir))
+        # --dry-run without an override would run the real harness: refused
+        # before anything else, for any study.
+        env = h.env()
+        del env["RIVET_PILOT_CLAUDE_BIN"]
+        for path in (h.study_path, Harness().study_path):
+            done = subprocess.run([sys.executable, RUNNER, "run", path, "--dry-run"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(done.returncode, 2, done.stderr)
+            self.assertIn("--dry-run without RIVET_PILOT_CLAUDE_BIN", done.stderr)
+
+    def test_rehearsal_and_real_records_never_mix(self):
+        h = self.harness(tasks=("demo-locate", "demo-trace"), plan={"demo-trace:B": [{"transcript": "path_answer.jsonl"}], "demo-trace:C": [{"transcript": "path_answer.jsonl"}]})
+        self.assertEqual(h.run("run", extra=["--dry-run"]).returncode, 0)
+        # Pretend one attempt had been a real run. A resumed dry run must
+        # refuse rather than add rehearsal records to it (and the reverse
+        # holds by symmetry); no real harness is started by this test.
+        path = os.path.join(h.study_dir, "runs", "demo-trace.t1.B.a1", "record.json")
+        record = json.loads(slurp(path))
+        record["dry_run"] = False
+        spit(path, json.dumps(record))
+        shutil.rmtree(os.path.join(h.study_dir, "runs", "demo-trace.t1.C.a1"))
+        calls = len(h.calls())
+        done = h.run("run", extra=["--dry-run"])
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("already holds demo-trace.t1.B.a1 with dry_run=False", done.stderr)
+        self.assertEqual(len(h.calls()), calls)
+
+
+# Synthetic confirmatory rows. Tokens and passes are per block: (B, C).
+
+
+def conf_row(task, trial, arm, tokens, passed, attempt=1, inclusion="included", reason="first_attempt", project="demo", category="locate", term="completed", infra="false", dry="false"):
+    row = {c: "unavailable" for c in extract.COLUMNS}
+    row.update(
+        {
+            "run_id": f"{task}.t{trial}.{arm}",
+            "attempt_id": f"{task}.t{trial}.{arm}.a{attempt}",
+            "block_id": f"{task}.t{trial}",
+            "task_id": task,
+            "project": project,
+            "category": category,
+            "config": arm,
+            "trial": str(trial),
+            "attempt": str(attempt),
+            "analysis_inclusion": inclusion,
+            "inclusion_reason": reason,
+            "dry_run": dry,
+            "pass": passed if isinstance(passed, str) else ("true" if passed else "false"),
+            "answer_status": "ok",
+            "termination_reason": term,
+            "infrastructure_failure": infra,
+            "contaminated": "false" if arm == "B" else "not_applicable",
+            "isolation_violations": "none",
+            "input_tokens_total": str(tokens),
+            "wall_clock_seconds": "20.0" if arm == "B" else "10.0",
+            "tool_calls_total": "8" if arm == "B" else "4",
+            "output_tokens": "100",
+            "cost_usd_claude_code_estimate": "0.200000" if arm == "B" else "0.100000",
+            "model_id": "claude-opus-5-5",
+            "started_at": "2026-09-27T10:00:00Z",
+            "rivet_invocations_by_command": '{"refs":1,"symbol":1}' if arm == "C" else "not_applicable",
+            "rivet_errors_by_exit": "{}" if arm == "C" else "not_applicable",
+            "rivet_to_text_fallbacks": "0" if arm == "C" else "not_applicable",
+        }
+    )
+    return row
+
+
+def block_rows(task, trial, b_tokens, b_pass, c_tokens, c_pass, **kw):
+    return [conf_row(task, trial, "B", b_tokens, b_pass, **kw), conf_row(task, trial, "C", c_tokens, c_pass, **kw)]
+
+
+class ConfirmatoryAnalysisTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.corpus = os.path.join(self.tmp, "corpus.toml")
+        spit(
+            self.corpus,
+            'schema_version = 1\n[[project]]\nname = "demo"\nlanguages = ["php"]\n'
+            '[[project]]\nname = "demo-ts"\nlanguages = ["typescript"]\n'
+            '[[project]]\nname = "mixed"\nlanguages = ["php", "typescript"]\n',
+        )
+        self.count = 0
+
+    def generate(self, rows, tasks, trials, conf=None, study_id="conf-report"):
+        """(summary, report.md text, output dir) for `rows` under a
+        confirmatory manifest."""
+        self.count += 1
+        study = write_study(os.path.join(self.tmp, f"s{self.count}"), study_id, confirmatory_study_text(conf, **task_overrides(tasks, trials)))
+        csv_path = os.path.join(self.tmp, f"runs{self.count}.csv")
+        write_rows(csv_path, rows)
+        out = os.path.join(self.tmp, f"out{self.count}")
+        summary = report.generate(csv_path, study, out, corpus_manifest=self.corpus)
+        return summary, slurp(os.path.join(out, "report.md")), out
+
+    def reasons(self, summary):
+        return [r["reason"] for r in summary["validity"]["reasons"]]
+
+    def test_bound_index_rule(self):
+        # ceil(0.95 R) - 1 and ceil(0.05 R) - 1, in integer arithmetic.
+        self.assertEqual([report.bound_index(r, 95) for r in (20, 1000, 1001, 10000)], [18, 949, 950, 9499])
+        self.assertEqual([report.bound_index(r, 5) for r in (20, 1000, 1001, 10000)], [0, 49, 50, 499])
+
+    def test_hand_computed_bounds_on_a_tiny_fixture(self):
+        # Tasks (sorted IDs, so indices 0, 1, 2): tokens B/C and pass B/C.
+        values = {
+            "a": {"B": {"tokens": 1000.0, "success": 1.0}, "C": {"tokens": 500.0, "success": 1.0}},
+            "b": {"B": {"tokens": 1000.0, "success": 0.0}, "C": {"tokens": 1000.0, "success": 1.0}},
+            "c": {"B": {"tokens": 2000.0, "success": 1.0}, "C": {"tokens": 3000.0, "success": 0.0}},
+        }
+        # random.Random(7), 20 replicates, one stratum of three: the draws are
+        # tasks[rng.randrange(3)] three times per replicate.
+        draws = [
+            (1, 0, 1), (2, 0, 0), (2, 0, 1), (2, 0, 2), (0, 0, 0), (1, 1, 0), (0, 0, 2), (1, 0, 2), (0, 0, 2), (2, 2, 0),
+            (2, 2, 1), (0, 0, 0), (2, 0, 1), (1, 0, 2), (0, 2, 1), (2, 2, 0), (0, 2, 2), (2, 0, 1), (0, 2, 2), (0, 2, 0),
+        ]
+        names = ["a", "b", "c"]
+        self.assertEqual(list(report.bootstrap_draws({"php": names}, 7, 20)), [[names[i] for i in d] for d in draws])
+        # C/B of a replicate is (500 na + 1000 nb + 3000 nc) / (1000 na + 1000 nb + 2000 nc):
+        # 2 x 0.5, 2 x 0.8333, 4 x 1.0, 6 x 1.125, 5 x 1.3, 1 x 1.4. Index 18 is 1.3.
+        # C - B is 100 (nb - nc) / 3 pp: 5 x -66.67, 5 x -33.33, 8 x 0, 2 x +66.67. Index 0 is -66.67.
+        boot = report.bootstrap(values, {"php": names}, 7, 20)
+        self.assertEqual((boot["ratio_upper_bound_index"], boot["success_diff_lower_bound_index"]), (18, 0))
+        self.assertAlmostEqual(boot["ratio_upper_bound"], 1.3)
+        self.assertAlmostEqual(boot["success_diff_lower_bound_pp"], -200 / 3)
+        self.assertEqual(boot["zero_denominator_replicates"], 0)
+        point = report.estimates(values, names)
+        self.assertAlmostEqual(point["ratio"], 4500 / 4000)
+        self.assertEqual(point["success_diff_pp"], 0.0)
+
+    def test_known_token_ratio_through_the_report(self):
+        # a: B 1000, 1000 / C 400, 600; b: B 3000, 3000 / C 3000, 3000.
+        # C/B = mean(500, 3000) / mean(1000, 3000) = 1750 / 2000 = 0.875.
+        # Success: a B 1/2, C 2/2; b B 2/2, C 1/2 -> difference 0 pp.
+        rows = (
+            block_rows("a", 1, 1000, True, 400, True) + block_rows("a", 2, 1000, False, 600, True)
+            + block_rows("b", 1, 3000, True, 3000, True) + block_rows("b", 2, 3000, True, 3000, False)
+        )
+        summary, text, _ = self.generate(rows, ["a", "b"], 2)
+        prim = summary["primary"]
+        self.assertEqual((prim["b_mean_input_tokens"], prim["c_mean_input_tokens"], prim["ratio_c_over_b"]), (2000.0, 1750.0, 0.875))
+        self.assertAlmostEqual(prim["reduction_pct"], 12.5)
+        self.assertEqual(prim["success_diff_pp"], 0.0)
+        # Replicates are {a,a}: 0.5 and +50 pp; {a,b}: 0.875 and 0; {b,b}: 1.0 and -50 pp.
+        # Seed 20260927 draws them 244, 504 and 252 times in 1000 replicates.
+        random_counts = {"aa": 0, "ab": 0, "bb": 0}
+        rng = random.Random(20260927)
+        for _ in range(1000):
+            pair = "".join(sorted("ab"[rng.randrange(2)] for _ in range(2)))
+            random_counts[pair] += 1
+        self.assertEqual(random_counts, {"aa": 244, "ab": 504, "bb": 252})
+        # Sorted ratios: 244 x 0.5, 504 x 0.875, 252 x 1.0; index 949 is 1.0.
+        # Sorted differences: 252 x -50, ...; index 49 is -50.
+        boot = summary["bootstrap"]
+        self.assertEqual((boot["ratio_upper_bound"], boot["success_diff_lower_bound_pp"]), (1.0, -50.0))
+        self.assertEqual((boot["replicates"], boot["seed"], boot["strata"]), (1000, 20260927, {"php": ["a", "b"]}))
+        self.assertEqual(summary["outcome"], "fail_quality")
+        self.assertEqual(summary["gates"]["quality_pass"], False)
+        self.assertEqual(summary["gates"]["efficiency_pass"], False)
+        self.assertIn("| Mean total input tokens / run | — | 2,000 | 1,750 | Ratio: 0.875; reduction: 12.5% | two-sided not computed; one-sided 95% upper bound on C/B: 1.000 |", text)
+        self.assertIn("| Success non-inferiority | One-sided 95% lower bound on C−B > −5 percentage points | difference +0.0 pp; lower bound -50.0 pp | FAIL |", text)
+        self.assertIn("| Efficiency point estimate | C/B ≤ 0.70 (not a gate of this study) | C/B = 0.875 | NOT A GATE (efficiency_gate = upper_bound_below_1) |", text)
+        self.assertIn("| Verdict | gates not met (success non-inferiority failed) |", text)
+
+    def test_unequal_trial_counts_use_equal_task_weighting(self):
+        # a keeps 3 blocks; b keeps 1 of 3 (two lose their usage).
+        rows = []
+        for trial in (1, 2, 3):
+            rows += block_rows("a", trial, 1000, True, 500, True)
+        rows += block_rows("b", 1, 3000, True, 3000, True)
+        for trial in (2, 3):
+            rows += [conf_row("b", trial, "B", "unavailable", True), conf_row("b", trial, "C", 3000, True)]
+        summary, _, _ = self.generate(rows, ["a", "b"], 3, {"max_excluded_block_fraction": "0.5"})
+        # Task-weighted (500 + 3000) / (1000 + 3000) = 0.875; weighting runs
+        # instead would give (1500 + 3000) / (3000 + 3000) = 0.75.
+        self.assertEqual(summary["primary"]["ratio_c_over_b"], 0.875)
+        self.assertEqual(summary["blocks"]["included_by_task"], {"a": 3, "b": 1})
+        self.assertEqual([e["block_id"] for e in summary["exclusions"]], ["b.t2", "b.t3"])
+        self.assertEqual(summary["validity"], {"valid": True, "reasons": []})
+
+    def test_a_cheaper_failed_run_is_counted(self):
+        rows = block_rows("a", 1, 1000, True, 800, True) + [
+            conf_row("a", 2, "B", 1000, True),
+            conf_row("a", 2, "C", 100, False, term="wall_timeout"),
+        ]
+        summary, _, _ = self.generate(rows, ["a"], 2)
+        # C mean (800 + 100) / 2 = 450, C success 1/2.
+        self.assertEqual(summary["primary"]["c_mean_input_tokens"], 450.0)
+        self.assertEqual(summary["primary"]["ratio_c_over_b"], 0.45)
+        self.assertEqual(summary["primary"]["success_diff_pp"], -50.0)
+        self.assertEqual(summary["exclusions"], [])
+        self.assertEqual(summary["accounting"]["C"]["limit_reached"], 1)
+
+    def test_a_retry_replaces_the_block_and_is_not_double_counted(self):
+        rows = [
+            conf_row("a", 1, "B", 999999, "unavailable", inclusion="excluded", reason="superseded_by_block_retry", infra="true", term="provider_error"),
+            conf_row("a", 1, "C", 5, False, inclusion="excluded", reason="superseded_by_block_retry"),
+            conf_row("a", 1, "B", 1000, True, attempt=2, reason="block_retry"),
+            conf_row("a", 1, "C", 800, True, attempt=2, reason="block_retry"),
+            *block_rows("a", 2, 1000, True, 800, True),
+            # b.t1's rerun failed again in C: the whole block goes, B included.
+            conf_row("b", 1, "B", 7, "unavailable", inclusion="excluded", reason="superseded_by_block_retry", infra="true", term="provider_error"),
+            conf_row("b", 1, "C", 7, True, inclusion="excluded", reason="superseded_by_block_retry"),
+            conf_row("b", 1, "B", 123456, True, attempt=2, reason="block_retry"),
+            conf_row("b", 1, "C", 9, "unavailable", attempt=2, inclusion="excluded", reason="infrastructure_failure_after_retry", infra="true", term="provider_error"),
+        ] + block_rows("b", 2, 2000, True, 1000, True)
+        summary, text, _ = self.generate(rows, ["a", "b"], 2, {"max_excluded_block_fraction": "0.25"})
+        self.assertEqual(summary["per_task_primary"]["a"]["B"], {"tokens": 1000.0, "success": 1.0})
+        self.assertEqual(summary["per_task_primary"]["a"]["C"], {"tokens": 800.0, "success": 1.0})
+        self.assertEqual(summary["per_task_primary"]["b"]["B"]["tokens"], 2000.0)
+        self.assertEqual(summary["exclusions"], [{"block_id": "b.t1", "task_id": "b", "trial": 1, "reasons": {"C": "infrastructure_failure_after_retry"}}])
+        # (800 + 1000) / (1000 + 2000) = 0.6.
+        self.assertAlmostEqual(summary["primary"]["ratio_c_over_b"], 0.6)
+        self.assertEqual(summary["accounting"]["B"]["rerun_attempts"], 2)
+        self.assertEqual(summary["validity"]["valid"], True)  # 1 of 4 blocks = 0.25, not above 0.25
+        self.assertIn("`b.t1` (C: infrastructure_failure_after_retry)", text)
+
+    def test_missing_usage_excludes_the_block_from_both_arms(self):
+        rows = block_rows("a", 1, 1000, True, 500, True) + [
+            conf_row("a", 2, "B", "unavailable", True),
+            conf_row("a", 2, "C", 10**9, True),
+        ]
+        summary, text, out = self.generate(rows, ["a"], 2, {"max_excluded_block_fraction": "0.5"})
+        self.assertEqual(summary["exclusions"], [{"block_id": "a.t2", "task_id": "a", "trial": 2, "reasons": {"B": "missing_usage"}}])
+        # C's enormous run in that block is not counted, and nothing is zero-filled.
+        self.assertEqual((summary["primary"]["b_mean_input_tokens"], summary["primary"]["c_mean_input_tokens"]), (1000.0, 500.0))
+        self.assertEqual(summary["per_task"]["input_tokens_total"]["a"]["C"]["n"], 1)
+        self.assertIn("`a.t2` (B: missing_usage)", text)
+        per_task = slurp(os.path.join(out, "per-task.csv"))
+        self.assertIn("a,demo,locate,C,input_tokens_total,500.000000,1,0", per_task)
+
+    def test_zero_denominator_in_a_replicate_is_infinite_and_counted(self):
+        # a has B 0 (C 100); b has B 1000 (C 500). Replicates {a,a} have a
+        # zero B denominator; the point estimate (B mean 500) does not.
+        rows = block_rows("a", 1, 0, True, 100, True) + block_rows("b", 1, 1000, True, 500, True)
+        summary, text, out = self.generate(rows, ["a", "b"], 1)
+        rng = random.Random(20260927)
+        both_a = sum(1 for _ in range(1000) if [rng.randrange(2), rng.randrange(2)] == [0, 0])
+        self.assertEqual(summary["bootstrap"]["zero_denominator_replicates"], both_a)
+        self.assertGreater(both_a, 0)
+        self.assertAlmostEqual(summary["primary"]["ratio_c_over_b"], 0.6)
+        self.assertTrue(math.isinf(summary["bootstrap"]["ratio_upper_bound"]))
+        # +inf fails the efficiency gate; success is equal, so: inconclusive.
+        self.assertEqual(summary["outcome"], "inconclusive")
+        raw = slurp(os.path.join(out, "summary.json"))
+        json.loads(raw, parse_constant=lambda c: self.fail(f"non-standard JSON constant {c}"))
+        self.assertIn('"ratio_upper_bound": "+inf"', raw)
+        self.assertIn("one-sided 95% upper bound on C/B: +inf", text)
+
+    def test_zero_denominator_in_the_point_estimate_is_invalid(self):
+        rows = block_rows("a", 1, 0, True, 100, True) + block_rows("b", 1, 0, True, 500, True)
+        summary, text, _ = self.generate(rows, ["a", "b"], 1)
+        self.assertEqual(summary["outcome"], "invalid")
+        self.assertEqual(self.reasons(summary), ["zero_denominator"])
+        self.assertIsNone(summary["primary"]["ratio_c_over_b"])
+        self.assertEqual(summary["primary"]["ratio_undefined_reason"], "zero denominator")
+        self.assertEqual(summary["bootstrap"]["zero_denominator_replicates"], 1000)
+        self.assertEqual((summary["gates"]["evaluated"], summary["gates"]["efficiency_pass"], summary["gates"]["quality_pass"]), (False, None, None))
+        self.assertIn("unavailable (zero denominator)", text)
+
+    def test_incomplete_arm_blocks_are_excluded(self):
+        # a.t2 has no C run (the study stopped); task c never ran at all.
+        rows = block_rows("a", 1, 1000, True, 500, True) + [conf_row("a", 2, "B", 1000, True)] + block_rows("b", 1, 1000, True, 500, True) + block_rows("b", 2, 1000, True, 500, True)
+        summary, text, _ = self.generate(rows, ["a", "b", "c"], 2, {"max_excluded_block_fraction": "0.5"})
+        self.assertEqual(
+            summary["exclusions"],
+            [
+                {"block_id": "a.t2", "task_id": "a", "trial": 2, "reasons": {"C": "missing_run"}},
+                {"block_id": "c.t1", "task_id": "c", "trial": 1, "reasons": {"B": "missing_run", "C": "missing_run"}},
+                {"block_id": "c.t2", "task_id": "c", "trial": 2, "reasons": {"B": "missing_run", "C": "missing_run"}},
+            ],
+        )
+        self.assertEqual(summary["outcome"], "invalid")
+        self.assertEqual(self.reasons(summary), ["too_few_complete_trials"])
+        self.assertIn("c: 0 included blocks", summary["validity"]["reasons"][0]["detail"])
+        self.assertEqual(summary["primary"]["tasks"], ["a", "b"])
+        self.assertIn("| no runs | — | 1 | 2 | B: 2 / C: 2 | B: 0 / C: 0 |", text)
+        self.assertIn("| c | unavailable / unavailable |", text)
+
+    def four_tasks(self, c_tokens, c_pass):
+        rows = []
+        for i, task in enumerate(("t1", "t2", "t3", "t4")):
+            for trial in (1, 2):
+                rows += block_rows(task, trial, 1000 * (i + 1), True, c_tokens(i, trial), c_pass(i, trial), category="locate" if i < 2 else "trace")
+        return rows
+
+    def test_outcome_pass(self):
+        summary, text, _ = self.generate(self.four_tasks(lambda i, t: 500 * (i + 1) + t, lambda i, t: True), ["t1", "t2", "t3", "t4"], 2)
+        self.assertEqual(summary["outcome"], "pass")
+        self.assertLess(summary["bootstrap"]["ratio_upper_bound"], 1.0)
+        self.assertEqual(summary["bootstrap"]["success_diff_lower_bound_pp"], 0.0)
+        self.assertEqual((summary["gates"]["efficiency_pass"], summary["gates"]["quality_pass"]), (True, True))
+        self.assertIn("| Verdict | gates passed |", text)
+        self.assertIn("> **Status: CONFIRMATORY — outcome `pass`.**", text)
+        self.assertEqual(text.count(" | PASS |"), 2)
+        self.assertIn("**Supported public statement:** Pending review.", text)
+        self.assertIn("| locate | 2 |", text)
+        self.assertEqual(sorted(summary["secondary"]["by_category"]), ["locate", "trace"])
+        self.assertAlmostEqual(summary["secondary"]["comparisons"]["tool_calls_total"]["ratio_c_over_b"], 0.5)
+        self.assertEqual(summary["secondary"]["successful_runs_only_input_tokens"]["paired_tasks"], 4)
+        self.assertEqual(summary["adoption_c"]["runs_invoking_rivet"], 8)
+
+    def test_outcome_fail_quality(self):
+        # C is half as expensive but fails t4 entirely: -25 pp.
+        summary, text, _ = self.generate(self.four_tasks(lambda i, t: 500 * (i + 1), lambda i, t: i != 3), ["t1", "t2", "t3", "t4"], 2)
+        self.assertEqual(summary["outcome"], "fail_quality")
+        self.assertEqual(summary["gates"]["efficiency_pass"], True)
+        self.assertEqual(summary["gates"]["quality_pass"], False)
+        self.assertEqual(summary["primary"]["success_diff_pp"], -25.0)
+        self.assertIn("**Supported public statement:** None. The success non-inferiority gate failed.", text)
+
+    def test_outcome_inconclusive(self):
+        # Equal success; t4 costs C three times B, so resamples reach C/B >= 1.
+        summary, text, _ = self.generate(
+            self.four_tasks(lambda i, t: 3 * 4000 if i == 3 else 500 * (i + 1), lambda i, t: True), ["t1", "t2", "t3", "t4"], 2
+        )
+        self.assertEqual(summary["outcome"], "inconclusive")
+        self.assertEqual((summary["gates"]["efficiency_pass"], summary["gates"]["quality_pass"]), (False, True))
+        self.assertGreaterEqual(summary["bootstrap"]["ratio_upper_bound"], 1.0)
+        self.assertIn("| Verdict | inconclusive (efficiency gate not met) |", text)
+
+    def test_outcome_invalid_for_each_validity_reason(self):
+        good = self.four_tasks(lambda i, t: 500 * (i + 1), lambda i, t: True)
+        tasks = ["t1", "t2", "t3", "t4"]
+        cases = {
+            "too_few_complete_trials": (
+                [r for r in good if r["block_id"] != "t2.t2"],
+                {"min_complete_trials_per_task": "2", "max_excluded_block_fraction": "0.5"},
+            ),
+            "too_many_excluded_blocks": ([r for r in good if r["block_id"] != "t2.t2"], {"max_excluded_block_fraction": "0.1"}),
+            "dry_run": ([dict(r, dry_run="true") if r["attempt_id"] == "t1.t1.C.a1" else r for r in good], None),
+            "dry_run_unknown": ([dict(r, dry_run="unavailable") if r["attempt_id"] == "t1.t1.C.a1" else r for r in good], None),
+            "analysis_version_mismatch": (good, {"analysis_version": '"t48a-0"'}),
+            "no_included_blocks": ([dict(r, input_tokens_total="unavailable") for r in good], {"max_excluded_block_fraction": "0.99"}),
+        }
+        for reason, (rows, conf) in cases.items():
+            summary, text, _ = self.generate(rows, tasks, 2, conf)
+            self.assertEqual(summary["outcome"], "invalid", reason)
+            self.assertIn(reason, self.reasons(summary), reason)
+            self.assertEqual((summary["gates"]["evaluated"], summary["gates"]["efficiency_pass"], summary["gates"]["quality_pass"]), (False, None, None), reason)
+            self.assertNotIn(" | PASS |", text, reason)
+            self.assertNotIn(" | FAIL |", text, reason)
+            self.assertIn(f"INVALID (", text, reason)
+        # One of eight blocks excluded is exactly 0.125: not above a 0.125 limit.
+        summary, _, _ = self.generate([r for r in good if r["block_id"] != "t2.t2"], tasks, 2, {"max_excluded_block_fraction": "0.125"})
+        self.assertEqual(summary["outcome"], "pass")
+        # The zero-denominator reason has its own test above.
+
+    def test_dry_run_report_is_labelled_and_evaluates_no_gate(self):
+        rows = [dict(r, dry_run="true") for r in self.four_tasks(lambda i, t: 500 * (i + 1), lambda i, t: True)]
+        summary, text, _ = self.generate(rows, ["t1", "t2", "t3", "t4"], 2)
+        self.assertTrue(summary["dry_run"])
+        self.assertEqual(summary["outcome"], "invalid")
+        self.assertEqual(self.reasons(summary), ["dry_run"])
+        self.assertEqual((summary["gates"]["evaluated"], summary["gates"]["efficiency_pass"], summary["gates"]["quality_pass"]), (False, None, None))
+        self.assertTrue(text.startswith("# Rivet Benchmark Report — conf-report (DRY RUN)\n"))
+        self.assertIn("> **Status: DRY RUN.**", text)
+        self.assertEqual(text.count("NOT EVALUATED (dry run)"), 2)
+        self.assertIn("| Verdict | DRY RUN — invalid study (dry_run) |", text)
+        # The rehearsal still exercises the bootstrap; it only withholds gates.
+        self.assertLess(summary["bootstrap"]["ratio_upper_bound"], 1.0)
+
+    def test_same_inputs_and_seed_are_byte_identical_and_seed_moves_only_the_bounds(self):
+        rows = []
+        for i, task in enumerate(("t1", "t2", "t3", "t4", "t5", "t6")):
+            for trial in (1, 2, 3):
+                rows += block_rows(task, trial, 1000 + 250 * i, (i + trial) % 3 != 0, 400 + 180 * i * i + 10 * trial, (i * trial) % 4 != 1)
+        tasks = ["t1", "t2", "t3", "t4", "t5", "t6"]
+        a, _, out_a = self.generate(rows, tasks, 3)
+        b, _, out_b = self.generate(rows, tasks, 3)
+        for name in ("report.md", "summary.json", "per-task.csv"):
+            self.assertEqual(slurp(os.path.join(out_a, name), "rb"), slurp(os.path.join(out_b, name), "rb"), name)
+        other, _, _ = self.generate(rows, tasks, 3, {"analysis_seed": "1"})
+        self.assertEqual(other["primary"], a["primary"])
+        self.assertEqual(other["bootstrap"]["seed"], 1)
+        self.assertNotEqual(
+            (other["bootstrap"]["ratio_upper_bound"], other["bootstrap"]["success_diff_lower_bound_pp"]),
+            (a["bootstrap"]["ratio_upper_bound"], a["bootstrap"]["success_diff_lower_bound_pp"]),
+        )
+
+    def test_two_strata_keep_their_sizes(self):
+        rows = []
+        for task in ("p1", "p2", "p3"):
+            rows += block_rows(task, 1, 1000, True, 600, True, project="demo")
+        for task in ("s1", "s2"):
+            rows += block_rows(task, 1, 2000, True, 1800, True, project="demo-ts")
+        summary, text, _ = self.generate(rows, ["s2", "p3", "s1", "p1", "p2"], 1)
+        strata = summary["bootstrap"]["strata"]
+        self.assertEqual(strata, {"php": ["p1", "p2", "p3"], "typescript": ["s1", "s2"]})
+        seen = set()
+        for drawn in report.bootstrap_draws(strata, 20260927, 500):
+            self.assertEqual(len(drawn), 5)
+            self.assertTrue(set(drawn[:3]) <= {"p1", "p2", "p3"}, drawn)
+            self.assertTrue(set(drawn[3:]) <= {"s1", "s2"}, drawn)
+            seen.update(drawn)
+        self.assertEqual(seen, {"p1", "p2", "p3", "s1", "s2"})
+        self.assertEqual(sorted(summary["secondary"]["by_language"]), ["php", "typescript"])
+        self.assertIn("php: 3 tasks; typescript: 2 tasks", text)
+        # A project with two languages cannot be stratified yet.
+        mixed = block_rows("m1", 1, 1000, True, 600, True, project="mixed")
+        with self.assertRaises(report.ReportError):
+            self.generate(mixed, ["m1"], 1)
+
+    def test_rows_that_break_the_schedule_are_refused(self):
+        rows = block_rows("a", 1, 1000, True, 500, True) + block_rows("a", 2, 1000, True, 500, True)
+        with self.assertRaises(report.ReportError):
+            self.generate(rows, ["a"], 1)  # trial 2 is not scheduled
+        doubled = block_rows("a", 1, 1000, True, 500, True) + [conf_row("a", 1, "C", 400, True, attempt=2, reason="block_retry")]
+        with self.assertRaises(report.ReportError):
+            self.generate(doubled, ["a"], 1)  # two included C attempts in one block
+
+    def test_end_to_end_dry_run_report(self):
+        h = Harness(study_id="conf-study")
+        self.addCleanup(h.close)
+        h.study_path = FrozenRepo(h.root, h.tasks_dir, ["demo-locate"]).study_path
+        self.assertEqual(h.run("run", extra=["--dry-run"]).returncode, 0)
+        csv_path = os.path.join(h.root, "runs.csv")
+        spit(csv_path, extract.extract(h.study_dir))
+        out = os.path.join(h.root, "report")
+        summary = report.generate(csv_path, h.study_path, out, corpus_manifest=CORPUS_MANIFEST)
+        self.assertEqual((summary["outcome"], summary["dry_run"]), ("invalid", True))
+        self.assertEqual(summary["primary"]["ratio_c_over_b"], 1.0)
+        self.assertIn("(DRY RUN)", slurp(os.path.join(out, "report.md")).splitlines()[0])
 
 
 if __name__ == "__main__":

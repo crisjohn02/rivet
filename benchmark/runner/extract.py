@@ -49,6 +49,7 @@ COLUMNS = [
     "model_id",
     "models_observed",
     "harness_version",
+    "dry_run",
     "settings_hash",
     "tool_policy_hash",
     "tool_version",
@@ -192,6 +193,9 @@ def row_for(study_dir: str, record: dict, included: bool, reason: str) -> dict:
         "model_id": record.get("model_id"),
         "models_observed": "|".join(t.models_observed()) or None,
         "harness_version": record.get("harness_version"),
+        # A replaced harness (RIVET_PILOT_CLAUDE_BIN) is a rehearsal. Records
+        # older than T48a carry only `harness_binary_is_override`.
+        "dry_run": record["dry_run"] if "dry_run" in record else record.get("harness_binary_is_override"),
         "settings_hash": record.get("settings_hash"),
         "tool_policy_hash": record.get("tool_policy_hash"),
         "tool_version": record.get("tool_version") if arm == "C" else NOT_APPLICABLE,

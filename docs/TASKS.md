@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | EX1 |
-| Next task | Retest the callers task with EX1 before any further pilot (benchmark/results/pilot-03/RESULT.md, "Next change"); needs a user-approved run |
+| Last completed task | T48a |
+| Next task | T48b (held-out tasks, batch 1); then the preregistration (T48) before any confirmatory run |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | EX1: `refs` human output replaces `N name matches excluded by evidence (see --mode candidates)` with `N same-name use(s) ruled out (unrelated receiver class: a; form cannot reference a <kind>: b)`, listing only non-zero reasons; OUTPUT-CONTRACT gives the grammar. `refs --json` matches a golden captured from the 82879eb build; candidate mode, `symbol`, `context`, and the snippet hash (`1819530610c1418d4b0d9bce84363504d99f5029d628558185ede35a82d3b5f7`) are unchanged. fmt, clippy -D warnings, 675 workspace tests (1 ignored, T36a), and 51 gold entries pass. |
+| Last checks | T48a: `python3 benchmark/runner/test_runner.py` 82 tests pass (33 new for confirmatory manifests, freezing refusals, dry runs, inclusion, validity, bootstrap, gates; one stale pilot-01 expectation updated to the manifest 84fee9d committed). Pilot `report.md`/`summary.json`/`per-task.csv` are byte-identical to HEAD on five synthetic fixtures. fmt, clippy -D warnings, 675 workspace tests (1 ignored, T36a), and 51 gold entries pass; no Rust changed. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -203,6 +203,7 @@ These are still separate tasks, activated only after Gate G. Read the correspond
 | [ ] | T46 | Exercise the pinned real TypeScript fixture and run two-language contract checks. | Known limitations are documented; full/incremental query bytes and coverage hold for both languages. |
 | [ ] | T47 | Compare source estimates against the pilot model's tokenizer and rendered outputs. | Record error distributions on PHP/TS, Unicode, and minified samples; avoid silently changing budget semantics. |
 | [ ] | T48 | Prepare held-out task checks and preregistration in small batches. | Corpus, endpoints, sample-size rationale, limits, retry rules, and projected spend are fixed before confirmatory runs. Creating a large corpus is split into batch subtasks. |
+| [x] | T48a | Implement and validate paired intervals and preregistered gate reporting on synthetic fixtures. | `kind = "confirmatory"` manifests freeze the preregistration, tasks, and rivet binary by hash; `report.py` applies block exclusion, validity rules, a paired cluster bootstrap within language strata, and the preregistered gates, with dry runs never evaluated; pilot output is byte-identical. |
 | [ ] | T49 | Execute/analyze the confirmatory benchmark only under an explicit run/spend budget. | Results report passed gates, failure, or inconclusive—not a selected successful-run comparison. Keep this operational job separate from ordinary coding sessions. |
 
 Release tasks are deliberately not expanded yet. If results justify release, break [RELEASING](RELEASING.md) into separate packaging, ownership/license, CI/platform, artifact-test, and publication tasks. No publication is authorized by this planning document.

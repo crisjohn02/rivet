@@ -99,7 +99,7 @@ Publish scripts, corpus pins, per-run results, confidence intervals, total spend
 
 ## Report files and reproducible generation
 
-Use [benchmark/REPORT-TEMPLATE.md](../benchmark/REPORT-TEMPLATE.md) for both pilot and confirmatory reports. It exists now; the runner, extractors, generator, and results do not. Keep every study in its own directory so reruns cannot silently replace earlier evidence:
+Use [benchmark/REPORT-TEMPLATE.md](../benchmark/REPORT-TEMPLATE.md) for both pilot and confirmatory reports. The runner, extractor, and generator that fill it are in `benchmark/runner/` ([TASK-FORMAT](../benchmark/runner/TASK-FORMAT.md)). Keep every study in its own directory so reruns cannot silently replace earlier evidence:
 
 ```text
 benchmark/
@@ -117,7 +117,7 @@ benchmark/
     SHA256SUMS                       checksums of report inputs and outputs
 ```
 
-The planned pipeline is `runner artifacts → extract.py → runs.csv → report.py → summary.json + per-task.csv + report.md`. These script names are implementation targets, not available commands. Per-attempt rows include an attempt ID, scheduled block ID, and analysis inclusion/retry reason so the analysis applies the frozen retry rule without double-counting reruns. Preserve originals outside agent workspaces; review transcripts for secrets before publishing and document redactions.
+The pipeline is `runner artifacts → extract.py → runs.csv → report.py → summary.json + per-task.csv + report.md`. Per-attempt rows include an attempt ID, scheduled block ID, and analysis inclusion/retry reason so the analysis applies the frozen retry rule without double-counting reruns. Preserve originals outside agent workspaces; review transcripts for secrets before publishing and document redactions.
 
 The generator owns numerical tables and gate outcomes and rewrites template links relative to the report destination. Human commentary explains findings and limitations with run IDs; it must not manually change computed results. Identical inputs, analysis version, and seed must reproduce the same numerical artifacts. Reference the completed report from the README/release notes only after its evidence is reviewed; the empty template must never appear as a performance result.
 
