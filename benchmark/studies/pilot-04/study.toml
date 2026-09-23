@@ -15,7 +15,7 @@ retry_rule = "rerun_block_once"
 
 # Hard cap across the whole study, including retries. Before each block and
 # each run the runner requires charged + max_budget_usd + reserve <= cap.
-budget_cap_usd = 2.5  # $25 approved in total; $9.35 spent by pilots 01-03. Expected spend is about $0.60; the cap must cover the guard (charged + the task's $1.50 run budget + reserve)
+budget_cap_usd = 4.0  # $25 approved in total; $9.35 spent by pilots 01-03. Expected spend is about $0.60; the guard reserves a whole block (2 x $1.50 run budget + 2 x $0.25 reserve) before starting it
 # Claude Code checks --max-budget-usd between turns, so one run can end a
 # little above its own budget; the reserve is that allowance.
 per_run_reserve_usd = 0.25
