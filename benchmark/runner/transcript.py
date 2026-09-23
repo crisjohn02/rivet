@@ -7,7 +7,7 @@ Nothing is inferred: a value the transcript does not support is returned as
 `None` and written as `unavailable`.
 
 Heuristic extractors are marked HEURISTIC below and in TASK-FORMAT.md:
-rivet command parsing, rivet exit-code attribution, text-tool fallbacks and
+rivet command parsing, rivet error attribution, text-tool fallbacks and
 the arm-B contamination scan.
 """
 
@@ -43,6 +43,38 @@ FRESHNESS_RE = re.compile(r"\"freshness\"\s*:\s*\"([A-Za-z_]+)\"")
 # Output only rivet produces: the JSON index block with a blake3 snapshot.
 RIVET_OUTPUT_RE = re.compile(r"\"snapshot\"\s*:\s*\"blake3:[0-9a-f]{16,}")
 RIVET_WORD_RE = re.compile(r"(?<![\w.-])rivet(?![\w.-])")
+# rivet's human error text (crates/rivet-cli/src/human.rs `error_text`): the
+# line `rivet <command>: <message>`, the line `hint: <hint>`, then one line
+# group per extra field. Captures the command, the message and the line after
+# the hint (a lookahead, so a following error's header is not consumed).
+RIVET_ERROR_RE = re.compile(r"^rivet (index|init|symbol|refs|context): (.*)\nhint: .*(?=(?:\n(.*))?)", re.MULTILINE)
+# The human text does not print the error code. Each entry is (exit, message
+# form, form of the first line after the hint) for a code whose text the CLI
+# fixes; either form identifies it. Exits are OUTPUT-CONTRACT "Errors".
+# `general` and messages that wrap I/O, lock or config errors have no fixed
+# form, so they are recognised as rivet errors with no exit.
+RIVET_ERROR_FORMS = [
+    (exit_code, re.compile(message), re.compile(extra) if extra else None)
+    for exit_code, message, extra in (
+        ("5", r"query '.*' matched \d+ symbols", r"candidates:"),  # ambiguous_symbol
+        ("4", r"query '.*' matched no symbols|no symbol encloses .*", r"did you mean:"),  # symbol_not_found
+        ("6", r".* is not indexed: it (?:has a syntax error|exceeds a parser resource limit)", r"detail: .*"),  # parse_failure
+        ("7", r".* is .*, which is not indexed|.* is not in a supported language", None),  # unsupported_language
+        (
+            "8",
+            r"the context target needs at least \d+ estimated tokens, but the budget is \d+",
+            r"required_tokens: \d+ \(budget_tokens: \d+\)",
+        ),  # budget_too_small
+        ("9", r"the repository changed while it was being indexed.*", None),  # repository_changed
+        ("2", r"invalid value for `.*|.* cannot be combined with .*|`--offset` is not supported by `rivet context`", None),  # invalid_arguments
+        (
+            "3",
+            r"no committed index at .*|the cache has no committed snapshot|incompatible cache: .*|"
+            r".* is not indexed: (?:it is binary|it exceeds max_file_size_kb|its content is not valid UTF-8).*",
+            None,
+        ),  # repository_unavailable
+    )
+]
 
 
 def load_events(path: str) -> tuple[list[dict], int]:
@@ -333,11 +365,48 @@ def rivet_calls(t: Transcript) -> list[dict]:
     return calls
 
 
+def rivet_error_texts(text: str) -> list[tuple[str, str | None]]:
+    """(command, exit or None) for each rivet human error in a tool result,
+    in order. HEURISTIC: see `RIVET_ERROR_RE` and `RIVET_ERROR_FORMS`."""
+    found = []
+    for match in RIVET_ERROR_RE.finditer(text):
+        message, extra = match.group(2), match.group(3) or ""
+        exit_code = None
+        for code, message_re, extra_re in RIVET_ERROR_FORMS:
+            if message_re.fullmatch(message) or (extra_re is not None and extra_re.fullmatch(extra)):
+                exit_code = code
+                break
+        found.append((match.group(1), exit_code))
+    return found
+
+
+def call_errors(call: dict) -> list[str]:
+    """The rivet errors of one rivet call, one key per error (TASK-FORMAT.md
+    "Heuristic extractors", Exit codes). HEURISTIC."""
+    result = call["result"]
+    if result is None:
+        return ["no_result"]
+    match = EXIT_CODE_RE.match(result["text"])
+    if call["sole"] and result["is_error"] and match:
+        # One rivet and one exit status: its error text is the same error.
+        return [match.group(1)]
+    unmatched = [inv["subcommand"] for inv in call["invocations"]]
+    keys = []
+    for command, exit_code in rivet_error_texts(result["text"]):
+        if command in unmatched:
+            unmatched.remove(command)
+            keys.append(exit_code or "unattributed")
+    if not keys and result["is_error"]:
+        # The failing status may be another program's, so it is not rivet's.
+        keys.append("unattributed")
+    return keys
+
+
 def rivet_metrics(t: Transcript) -> dict:
-    """Arm-C rivet adoption metrics. HEURISTIC exit attribution: a failed
-    tool result's `Exit code N` is attributed to rivet only when the Bash
-    call is a single simple rivet command; otherwise `unattributed`. A call
-    without a tool result is `no_result`."""
+    """Arm-C rivet adoption metrics. HEURISTIC error attribution, one count
+    per error (`call_errors`): a sole rivet command's `Exit code N`, else
+    each rivet human error text in the result, else `unattributed` for a
+    failed result. A call without a tool result is `no_result`."""
     by_command: dict[str, int] = {}
     errors: dict[str, int] = {}
     freshness: set[str] = set()
@@ -345,16 +414,10 @@ def rivet_metrics(t: Transcript) -> dict:
     for call in calls:
         for inv in call["invocations"]:
             by_command[inv["subcommand"]] = by_command.get(inv["subcommand"], 0) + 1
-        result = call["result"]
-        if result is None:
-            errors["no_result"] = errors.get("no_result", 0) + 1
-            continue
-        freshness.update(FRESHNESS_RE.findall(result["text"]))
-        if not result["is_error"]:
-            continue
-        match = EXIT_CODE_RE.match(result["text"])
-        key = match.group(1) if (match and call["sole"]) else "unattributed"
-        errors[key] = errors.get(key, 0) + 1
+        for key in call_errors(call):
+            errors[key] = errors.get(key, 0) + 1
+        if call["result"] is not None:
+            freshness.update(FRESHNESS_RE.findall(call["result"]["text"]))
     return {
         "rivet_calls": len(calls),
         "rivet_invocations_by_command": dict(sorted(by_command.items())),

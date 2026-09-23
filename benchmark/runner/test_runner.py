@@ -39,6 +39,7 @@ from transcript import (  # noqa: E402
     contamination_scan,
     fallbacks,
     provider_error,
+    rivet_error_texts,
     rivet_invocations,
     rivet_metrics,
 )
@@ -196,6 +197,48 @@ class CheckTests(unittest.TestCase):
 
 # ---- transcripts -----------------------------------------------------------
 
+# rivet's human error text, as crates/rivet-cli/tests/human_output.rs pins it.
+AMBIGUOUS = (
+    "rivet symbol: query 'launch' matched 3 symbols\n"
+    "hint: Re-run with one of the returned canonical IDs.\n"
+    "candidates:\n"
+    "  ReportService.php#App\\Reporting\\ReportService::launch  method  ReportService.php:16-18\n"
+    "  SurveyService.php#App\\Services\\SurveyService::launch   method  SurveyService.php:18-21\n"
+    "showing 1-2 of 3; next: --offset 2\n"
+)
+NOT_FOUND = (
+    "rivet refs: query 'lanch' matched no symbols\n"
+    "hint: Check the spelling, or use a qualified name or canonical ID.\n"
+    "did you mean:\n"
+    "  App\\Services\\SurveyService::launch\n"
+)
+BUDGET = (
+    "rivet context: the context target needs at least 10 estimated tokens, but the budget is 9\n"
+    "hint: Re-run with `--tokens 10` or higher.\n"
+    "required_tokens: 10 (budget_tokens: 9)\n"
+)
+BAD_MODE = (
+    'rivet refs: invalid value for `--mode`: "everything" (expected "references" or "candidates")\n'
+    "hint: Pass `--mode references` or `--mode candidates`.\n"
+)
+REFS_OK = "App\\Services\\SurveyService::launch  method  SurveyService.php:18-21\n1 reference: 1 exact\n  exact  call  Http/SurveyController.php:12\n"
+
+
+def bash_transcript(*calls) -> Transcript:
+    """A synthetic transcript of Bash calls, each (command, result text, is_error)."""
+    events = []
+    for n, (command, text, is_error) in enumerate(calls):
+        tid = f"tu_{n}"
+        use = {"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": command}}
+        events.append({"type": "assistant", "message": {"id": f"m{n}", "content": [use]}})
+        result = {"type": "tool_result", "tool_use_id": tid, "is_error": is_error, "content": text}
+        events.append({"type": "user", "message": {"content": [result]}})
+    return Transcript(events)
+
+
+def errors_of(*calls) -> dict:
+    return rivet_metrics(bash_transcript(*calls))["rivet_errors_by_exit"]
+
 
 class TranscriptTests(unittest.TestCase):
     def test_token_totals_come_from_model_usage_across_models(self):
@@ -261,6 +304,86 @@ class TranscriptTests(unittest.TestCase):
         # context App\Billing\Invoice::total is followed by Grep "function total".
         self.assertEqual(metrics["rivet_to_text_fallbacks"], 1)
         self.assertEqual(fallbacks(fixture("ok_exact.jsonl")), 0)
+
+    def test_rivet_error_text_forms_map_to_contract_exits(self):
+        unconfigured = "rivet index: cannot read config .rivet/config.toml: denied\nhint: Fix the .rivet configuration access and retry.\n"
+        cases = {
+            AMBIGUOUS: [("symbol", "5")],
+            NOT_FOUND: [("refs", "4")],
+            "rivet symbol: no symbol encloses src/a.php:3\nhint: Pick the nearest symbol, or query it by name.\n": [("symbol", "4")],
+            "rivet symbol: src/a.php is not indexed: it has a syntax error\nhint: Fix the syntax error in src/a.php and retry.\ndetail: ERROR at byte 3\n": [("symbol", "6")],
+            "rivet symbol: README.md is not in a supported language\nhint: Query a symbol declared in an indexed PHP file.\n": [("symbol", "7")],
+            BUDGET: [("context", "8")],
+            "rivet index: the repository changed while it was being indexed, and again during the one retry\nhint: Retry.\n": [("index", "9")],
+            BAD_MODE: [("refs", "2")],
+            "rivet refs: no committed index at .rivet/index.db\nhint: Run `rivet index` to build the cache.\n": [("refs", "3")],
+            "rivet symbol: a.bin is not indexed: it is binary (a NUL byte within the inspected prefix)\nhint: Binary.\n": [("symbol", "3")],
+            # A rivet error whose message has no fixed form: recognised, no exit.
+            unconfigured: [("index", None)],
+            # Back to back: the second header is not taken as the first's extra line.
+            BAD_MODE + "rivet symbol: query 'x' matched no symbols\nhint: Check the spelling.\n": [("refs", "2"), ("symbol", "4")],
+            # Not the form: no hint line, not at a line start, not a failing command, clap's form.
+            "rivet symbol: query 'x' matched 2 symbols\ncandidates:\n": [],
+            "src/a.php:3:rivet symbol: query 'x' matched 2 symbols\nhint: y\n": [],
+            "rivet snippet: x\nhint: y\n": [],
+            "error: unexpected argument '--foo' found\n\nUsage: rivet symbol [OPTIONS] <QUERY>\n": [],
+        }
+        for text, expected in cases.items():
+            self.assertEqual(rivet_error_texts(text), expected, text)
+
+    def test_a_standalone_rivet_error_counts_once(self):
+        # The exit status and the text are the same error.
+        self.assertEqual(errors_of(("rivet symbol launch", "Exit code 5\n" + AMBIGUOUS, True)), {"5": 1})
+        # `2>&1` splits into two segments, so the call is not sole; its text attributes it.
+        self.assertEqual(errors_of(("rivet symbol launch 2>&1", "Exit code 5\n" + AMBIGUOUS, True)), {"5": 1})
+        # Without text, a sole call still counts its exit status.
+        self.assertEqual(errors_of(("rivet symbol launch 2>/dev/null", "Exit code 5", True)), {"5": 1})
+
+    def test_an_error_before_a_text_search_is_attributed_from_its_text(self):
+        rg = "src/Services/SurveyService.php:18:    public function launch(): void\n"
+        # rg matched, so the call succeeded and only the text shows rivet's error.
+        self.assertEqual(errors_of(("rivet symbol launch; rg -n 'function launch' src", rg + AMBIGUOUS, False)), {"5": 1})
+        # rg matched nothing: its exit 1 is the call's status and is not counted again.
+        self.assertEqual(errors_of(("rivet symbol launch; rg -n 'function nosuch' src", "Exit code 1\n" + AMBIGUOUS, True)), {"5": 1})
+        # `&&` stops at rivet: its status and its text are one error.
+        self.assertEqual(errors_of(("rivet symbol launch && rg -n launch src", "Exit code 5\n" + AMBIGUOUS, True)), {"5": 1})
+
+    def test_an_error_piped_into_head_is_attributed_from_its_text(self):
+        # stderr bypasses the pipe, and head succeeds.
+        self.assertEqual(errors_of(("rivet refs lanch | head -20", NOT_FOUND, False)), {"4": 1})
+        self.assertEqual(errors_of(("rivet refs launch --mode everything 2>&1 | head -5", BAD_MODE, False)), {"2": 1})
+
+    def test_two_rivet_calls_in_one_command_count_only_the_failing_one(self):
+        query = "'App\\Services\\SurveyService::launch'"
+        self.assertEqual(errors_of((f"rivet symbol launch; rivet refs {query}", REFS_OK + AMBIGUOUS, False)), {"5": 1})
+        # The second fails and `&&` makes its exit the call's: counted once.
+        self.assertEqual(errors_of((f"rivet refs {query} && rivet context {query} --tokens 9", "Exit code 8\n" + REFS_OK + BUDGET, True)), {"8": 1})
+        # Each invocation takes at most one error, matched by subcommand.
+        both = ("rivet symbol launch; rivet refs lanch; rivet refs lanch", AMBIGUOUS + NOT_FOUND + NOT_FOUND + AMBIGUOUS, False)
+        self.assertEqual(errors_of(both), {"4": 2, "5": 1})
+        # A header naming a command the call did not run is someone else's text.
+        self.assertEqual(errors_of((f"cat notes.txt; rivet refs {query}", AMBIGUOUS + REFS_OK, False)), {})
+
+    def test_text_search_output_mentioning_errors_is_not_a_rivet_error(self):
+        query = "'App\\Services\\SurveyService::launch'"
+        rg = (
+            "src/Http/Kernel.php:40:    // error: rivet symbol: query 'x' matched 2 symbols\n"
+            "src/Http/Kernel.php:41:    throw new \\RuntimeException('rivet refs: error');\n"
+        )
+        self.assertEqual(errors_of((f"rivet refs {query}; rg -n error src/Http", REFS_OK + rg, False)), {})
+        # One searched file drops the path prefix; an `error:` line is still not rivet's form.
+        one_file = "error: could not load the survey\nhint: a comment in the source\n"
+        self.assertEqual(errors_of((f"rivet refs {query}; rg error src/a.php", REFS_OK + one_file, False)), {})
+
+    def test_unattributable_rivet_failures_stay_unattributed(self):
+        # A failed chained call with no rivet error text: the status may be rg's.
+        self.assertEqual(errors_of(("rivet refs launch; rg -n nosuch src", "Exit code 1\n" + REFS_OK, True)), {"unattributed": 1})
+        # A rivet error whose message has no fixed form names no exit.
+        unconfigured = "rivet index: cannot read config .rivet/config.toml: denied\nhint: Fix the .rivet configuration access and retry.\n"
+        self.assertEqual(errors_of(("rivet index; rg -n x src", unconfigured, False)), {"unattributed": 1})
+        self.assertEqual(errors_of(("rivet index && rg -n x src", "Exit code 3\n" + unconfigured, True)), {"unattributed": 1})
+        # A sole call's exit status is still attributed when the text is unknown.
+        self.assertEqual(errors_of(("rivet index", "Exit code 3\n" + unconfigured, True)), {"3": 1})
 
     def test_contamination_scan(self):
         evidence = contamination_scan(fixture("b_contaminated.jsonl"))

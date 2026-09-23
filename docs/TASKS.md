@@ -8,7 +8,7 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T49 (held-out study heldout-01: outcome `inconclusive`) |
+| Last completed task | RX1 (runner: rivet errors inside chained commands attributed from their text); before it, T49 (held-out study heldout-01: outcome `inconclusive`) |
 | Next task | User decision after heldout-01. The 20 held-out tasks are spent; any change motivated by them needs a new held-out set. Parked: T33c, T36a-T36c, T41+ (TypeScript) |
 | Active task / partial progress | None |
 | Blocker | None known |
@@ -184,6 +184,7 @@ Benchmark reporting uses [REPORT-TEMPLATE](../benchmark/REPORT-TEMPLATE.md). Spl
 | [x] | T38a | Define the study manifest and record/replay one run's usage, transcript, and evaluator outcome. | A synthetic run round-trips with IDs, versions, limits, and failure accounting; no model call required. |
 | [x] | T38b | Implement artifact extraction to per-attempt CSV. | Fixtures prove token totals, missing-usage handling, failures, and retry inclusion rules; originals remain traceable. |
 | [x] | T38c | Implement task-weighted aggregates and Markdown report generation. | Known synthetic ratios/counts reproduce; pilot reports mark confirmatory gates unevaluated; tables link to evidence. |
+| [x] | RX1 | Attribute rivet errors inside chained shell commands from rivet's human error text (`rivet <command>: <message>` then `hint: `), mapping the code to its exit by OUTPUT-CONTRACT. TE1 found 13 held-out `ambiguous_symbol` exits, of which the exit-status heuristic attributed 5. | One count per error (a sole call's exit status, else the text, else `unattributed`); synthetic tests cover standalone, `; rg`, `\| head`, two rivet calls with one failing, and `rg` output mentioning `error`; TASK-FORMAT.md states the rule; fixture `runs.csv`, `report.md`, `summary.json` and `per-task.csv` are byte-identical. |
 
 T40 produces `benchmark/results/<study-id>/report.md` from the template and computed artifacts. Before T49, add **T48a — implement and validate paired intervals and preregistered gate reporting** on synthetic fixtures, including incomplete blocks and degenerate cases. Reuse the pilot reporting pipeline. Run analysis locally before considering more model trials.
 

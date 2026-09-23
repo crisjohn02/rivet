@@ -390,7 +390,29 @@ These are heuristics. Do not present their counts as exact.
   - after `--pre` or `--pre=`.
 
   The subcommand is the first non-flag argument. The query is the next non-flag argument, skipping the values of `--tokens --offset --limit --mode --snippet-file --kind --depth --root`.
-- **Exit codes.** For a failed tool result beginning `Exit code N`, N is attributed to rivet only when the Bash call is a single simple rivet command. Otherwise the failure is counted as `unattributed`, and a call without a result is counted as `no_result`.
+- **Exit codes.** Each Bash call that invokes rivet adds one count per rivet error to `rivet_errors_by_exit`, keyed by exit code. A call is read in this order:
+  1. **A single simple rivet command** whose failed result begins `Exit code N` counts N once. Its error text is the same error and is not counted again.
+  2. **Otherwise, the result text.** Each rivet human error found in it is counted, whether or not the call failed. rivet writes errors to stderr, which bypasses `| head` and is kept alongside a following `; rg`. The form is from `error_text` in `crates/rivet-cli/src/human.rs`:
+     - a line that starts `rivet <command>: <message>`, where `<command>` is `index`, `init`, `symbol`, `refs` or `context`;
+     - immediately followed by a line starting `hint: `.
+
+     `<command>` must be the subcommand of one of the call's rivet invocations, and each invocation takes at most one error, in text order. The human text does not print the error code. So the code is read from the message, or from the first line after the hint, and mapped to its exit by OUTPUT-CONTRACT "Errors":
+
+     | Exit | Code | Message, or first line after the hint |
+     |---|---|---|
+     | 5 | `ambiguous_symbol` | `query '<q>' matched <N> symbols`, or `candidates:` |
+     | 4 | `symbol_not_found` | `query '<q>' matched no symbols` or `no symbol encloses <q>`, or `did you mean:` |
+     | 6 | `parse_failure` | `<path> is not indexed: it has a syntax error` or `…: it exceeds a parser resource limit`, or `detail: ` |
+     | 7 | `unsupported_language` | `<path> is <language>, which is not indexed` or `<path> is not in a supported language` |
+     | 8 | `budget_too_small` | `the context target needs at least <N> estimated tokens, but the budget is <M>`, or `required_tokens: <N> (budget_tokens: <M>)` |
+     | 9 | `repository_changed` | `the repository changed while it was being indexed…` |
+     | 2 | `invalid_arguments` | `invalid value for ` …, … ` cannot be combined with ` …, or `` `--offset` is not supported by `rivet context` `` |
+     | 3 | `repository_unavailable` | `no committed index at ` …, `the cache has no committed snapshot`, `incompatible cache: ` …, or `<path> is not indexed: ` for a binary, oversize or non-UTF-8 file |
+
+     An error in this form whose message matches no row counts as `unattributed`. This covers `general` and messages that wrap an I/O, lock or config error.
+  3. **A failed call with no matched error text** counts once as `unattributed`, as before, since the shell's status may belong to another program. When the text accounts for any error, the call's status is not counted again.
+
+  A call without a result counts as `no_result`. Text that does not start a line never matches, so `rg` output (`path:line:…`) that quotes rivet or mentions `error` does not count. These are not read: `--json` error objects, and clap's own argument errors (`error: …`, exit 2).
 - **Fallbacks.** This is BENCHMARK.md's "text-tool use within the next two tool calls on the same identifier/file". A rivet call counts one fallback when either of the next two tool calls matches the rivet query. The following call qualifies only if it is:
   - `Read`, `Grep` or `Glob`;
   - Bash that does not invoke rivet.
