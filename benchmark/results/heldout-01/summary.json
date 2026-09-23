@@ -1,0 +1,2284 @@
+{
+  "accounting": {
+    "B": {
+      "accounted": 100,
+      "attempts": 100,
+      "contaminated": 0,
+      "crash_or_invalid_answer": 0,
+      "evaluator_failures": 0,
+      "infrastructure_failures": 0,
+      "isolation_violations": 0,
+      "limit_reached": 0,
+      "missing": 0,
+      "rerun_attempts": 0,
+      "scheduled": 100,
+      "successful": 100,
+      "unscheduled_runs": 0
+    },
+    "C": {
+      "accounted": 100,
+      "attempts": 100,
+      "contaminated": 0,
+      "crash_or_invalid_answer": 0,
+      "evaluator_failures": 0,
+      "infrastructure_failures": 0,
+      "isolation_violations": 0,
+      "limit_reached": 0,
+      "missing": 0,
+      "rerun_attempts": 0,
+      "scheduled": 100,
+      "successful": 100,
+      "unscheduled_runs": 0
+    }
+  },
+  "adoption_c": {
+    "eligible_runs": 100,
+    "errors_by_exit": {
+      "5": 5,
+      "unattributed": 1
+    },
+    "invocations_by_command": {
+      "context": 19,
+      "refs": 64,
+      "symbol": 68
+    },
+    "runs_invoking_rivet": 79,
+    "runs_with_known_commands": 100,
+    "runs_with_known_fallbacks": 100,
+    "text_fallbacks": 38
+  },
+  "analysis_version": "t48a-1",
+  "arms": [
+    "B",
+    "C"
+  ],
+  "blocks": {
+    "excluded": 0,
+    "included": 100,
+    "included_by_task": {
+      "h01": 5,
+      "h02": 5,
+      "h03": 5,
+      "h04": 5,
+      "h05": 5,
+      "h06": 5,
+      "h07": 5,
+      "h08": 5,
+      "h09": 5,
+      "h10": 5,
+      "h11": 5,
+      "h12": 5,
+      "h13": 5,
+      "h14": 5,
+      "h15": 5,
+      "h16": 5,
+      "h17": 5,
+      "h18": 5,
+      "h19": 5,
+      "h20": 5
+    },
+    "max_excluded_block_fraction": 0.1,
+    "min_complete_trials_per_task": 3,
+    "scheduled": 100
+  },
+  "bootstrap": {
+    "method": "paired cluster bootstrap: resample tasks with replacement within language strata; each drawn task brings all its included blocks in both arms",
+    "ratio_upper_bound": 1.0113805472413744,
+    "ratio_upper_bound_index": 9499,
+    "replicates": 10000,
+    "rng": "python random.Random(analysis_seed); per replicate, strata in sorted name order, n draws of tasks_sorted_by_id[rng.randrange(n)] per stratum",
+    "seed": 20260927,
+    "strata": {
+      "php": [
+        "h01",
+        "h02",
+        "h03",
+        "h04",
+        "h05",
+        "h06",
+        "h07",
+        "h08",
+        "h09",
+        "h10",
+        "h11",
+        "h12",
+        "h13",
+        "h14",
+        "h15",
+        "h16",
+        "h17",
+        "h18",
+        "h19",
+        "h20"
+      ]
+    },
+    "success_diff_lower_bound_index": 499,
+    "success_diff_lower_bound_pp": 0.0,
+    "zero_denominator_replicates": 0
+  },
+  "dry_run": false,
+  "exclusions": [],
+  "gates": {
+    "efficiency_gate": "upper_bound_below_1",
+    "efficiency_pass": false,
+    "efficiency_rule": "one-sided 95% upper bound on C/B < 1.00",
+    "evaluated": true,
+    "not_evaluated_reason": null,
+    "point_estimate_at_most_0_70": "not_a_gate",
+    "quality_pass": true,
+    "quality_rule": "one-sided 95% lower bound on C - B > -5 percentage points"
+  },
+  "inputs": {
+    "preregistration": "benchmark/preregistration.md",
+    "preregistration_sha256": "a29eee087ae4e5427689346f59e179445540b8079dd8b19c4bb6c844bc05fa2e",
+    "rivet_binary_sha256": "89e3f10f81df936da1cc089e19b82ea93aca2ce649d1416f05bc9118bb4e062a",
+    "runs_csv_sha256": "4f55cb11dd008913dbc6d4c7323eb9512a17b83a3ee89d3784040e7734316e89",
+    "study_manifest_sha256": "62bb3b8a3c152d95d0dff03ec86d46e7399747f3dbc6e80b3d49e95e5fe408f6",
+    "tasks_sha256": "f96062c7949580eb7770180a14ab57e68ab5701c61eac10bf416a17d664eb819"
+  },
+  "manifest_analysis_version": "t48a-1",
+  "outcome": "inconclusive",
+  "per_task": {
+    "cost_usd": {
+      "h01": {
+        "B": {
+          "mean": 0.0747022,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.0723438,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h02": {
+        "B": {
+          "mean": 0.17018840000000002,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.1685662,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h03": {
+        "B": {
+          "mean": 0.0658506,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.0599446,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h04": {
+        "B": {
+          "mean": 0.06350059999999999,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.0644204,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h05": {
+        "B": {
+          "mean": 0.1404326,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.146341,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h06": {
+        "B": {
+          "mean": 0.2718198,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.27581880000000003,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h07": {
+        "B": {
+          "mean": 0.141908,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.1568744,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h08": {
+        "B": {
+          "mean": 0.11818340000000001,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.09730799999999999,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h09": {
+        "B": {
+          "mean": 0.078988,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.09791540000000001,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h10": {
+        "B": {
+          "mean": 0.10678460000000001,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.10735779999999999,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h11": {
+        "B": {
+          "mean": 0.1098296,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.0888696,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h12": {
+        "B": {
+          "mean": 0.067672,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.0767694,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h13": {
+        "B": {
+          "mean": 0.0812292,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.07705,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h14": {
+        "B": {
+          "mean": 0.058004999999999994,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.0682454,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h15": {
+        "B": {
+          "mean": 0.20912999999999998,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.2155354,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h16": {
+        "B": {
+          "mean": 0.3462072,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.3241596,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h17": {
+        "B": {
+          "mean": 0.11462019999999999,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.1169214,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h18": {
+        "B": {
+          "mean": 0.18482379999999998,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.14216679999999998,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h19": {
+        "B": {
+          "mean": 0.1006742,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.107559,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h20": {
+        "B": {
+          "mean": 0.0685836,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 0.0971196,
+          "missing": 0,
+          "n": 5
+        }
+      }
+    },
+    "input_tokens_total": {
+      "h01": {
+        "B": {
+          "mean": 34165.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 36051.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h02": {
+        "B": {
+          "mean": 95669.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 91871.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h03": {
+        "B": {
+          "mean": 31945.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 26910.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h04": {
+        "B": {
+          "mean": 25154.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 25671.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h05": {
+        "B": {
+          "mean": 65032.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 62817.6,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h06": {
+        "B": {
+          "mean": 131201.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 143447.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h07": {
+        "B": {
+          "mean": 70240.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 72132.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h08": {
+        "B": {
+          "mean": 51769.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 42936.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h09": {
+        "B": {
+          "mean": 36868.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 37080.6,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h10": {
+        "B": {
+          "mean": 62138.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 62062.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h11": {
+        "B": {
+          "mean": 56397.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 52455.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h12": {
+        "B": {
+          "mean": 34737.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 36076.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h13": {
+        "B": {
+          "mean": 32572.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 28170.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h14": {
+        "B": {
+          "mean": 24995.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 26697.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h15": {
+        "B": {
+          "mean": 116235.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 104729.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h16": {
+        "B": {
+          "mean": 203571.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 180407.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h17": {
+        "B": {
+          "mean": 49288.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 57283.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h18": {
+        "B": {
+          "mean": 114760.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 85780.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h19": {
+        "B": {
+          "mean": 50043.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 57012.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h20": {
+        "B": {
+          "mean": 31144.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 35735.2,
+          "missing": 0,
+          "n": 5
+        }
+      }
+    },
+    "output_tokens": {
+      "h01": {
+        "B": {
+          "mean": 799.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 790.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h02": {
+        "B": {
+          "mean": 1260.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1243.6,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h03": {
+        "B": {
+          "mean": 768.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 640.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h04": {
+        "B": {
+          "mean": 898.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 899.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h05": {
+        "B": {
+          "mean": 1688.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1780.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h06": {
+        "B": {
+          "mean": 2267.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 2471.6,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h07": {
+        "B": {
+          "mean": 1847.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1484.6,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h08": {
+        "B": {
+          "mean": 1406.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1094.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h09": {
+        "B": {
+          "mean": 1203.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1091.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h10": {
+        "B": {
+          "mean": 1666.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1748.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h11": {
+        "B": {
+          "mean": 1105.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1057.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h12": {
+        "B": {
+          "mean": 728.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 852.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h13": {
+        "B": {
+          "mean": 1285.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1009.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h14": {
+        "B": {
+          "mean": 682.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 796.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h15": {
+        "B": {
+          "mean": 2516.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 2462.6,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h16": {
+        "B": {
+          "mean": 3863.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 3588.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h17": {
+        "B": {
+          "mean": 1605.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1201.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h18": {
+        "B": {
+          "mean": 2195.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1568.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h19": {
+        "B": {
+          "mean": 1234.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1225.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h20": {
+        "B": {
+          "mean": 1092.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1063.0,
+          "missing": 0,
+          "n": 5
+        }
+      }
+    },
+    "success": {
+      "h01": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h02": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h03": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h04": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h05": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h06": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h07": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h08": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h09": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h10": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h11": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h12": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h13": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h14": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h15": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h16": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h17": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h18": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h19": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h20": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 5
+        }
+      }
+    },
+    "tool_calls_total": {
+      "h01": {
+        "B": {
+          "mean": 3.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 3.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h02": {
+        "B": {
+          "mean": 5.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 5.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h03": {
+        "B": {
+          "mean": 3.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 2.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h04": {
+        "B": {
+          "mean": 2.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 2.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h05": {
+        "B": {
+          "mean": 6.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 4.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h06": {
+        "B": {
+          "mean": 8.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 9.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h07": {
+        "B": {
+          "mean": 7.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 4.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h08": {
+        "B": {
+          "mean": 5.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 3.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h09": {
+        "B": {
+          "mean": 3.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 3.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h10": {
+        "B": {
+          "mean": 6.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 5.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h11": {
+        "B": {
+          "mean": 4.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 4.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h12": {
+        "B": {
+          "mean": 3.4,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 3.6,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h13": {
+        "B": {
+          "mean": 3.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 2.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h14": {
+        "B": {
+          "mean": 2.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 2.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h15": {
+        "B": {
+          "mean": 10.2,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 7.8,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h16": {
+        "B": {
+          "mean": 12.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 9.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h17": {
+        "B": {
+          "mean": 5.8,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 4.0,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h18": {
+        "B": {
+          "mean": 8.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 5.4,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h19": {
+        "B": {
+          "mean": 4.6,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 4.2,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h20": {
+        "B": {
+          "mean": 3.0,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 2.4,
+          "missing": 0,
+          "n": 5
+        }
+      }
+    },
+    "wall_clock_seconds": {
+      "h01": {
+        "B": {
+          "mean": 15.400988000000002,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 14.849277,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h02": {
+        "B": {
+          "mean": 23.099247400000003,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 22.6527462,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h03": {
+        "B": {
+          "mean": 14.7457168,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 16.381375,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h04": {
+        "B": {
+          "mean": 13.195931000000002,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 16.4102876,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h05": {
+        "B": {
+          "mean": 25.2164506,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 29.8289038,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h06": {
+        "B": {
+          "mean": 33.3244278,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 39.2021252,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h07": {
+        "B": {
+          "mean": 27.250502,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 25.966215599999998,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h08": {
+        "B": {
+          "mean": 20.602755600000002,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 22.6149732,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h09": {
+        "B": {
+          "mean": 18.3398018,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 20.1871446,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h10": {
+        "B": {
+          "mean": 25.7955626,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 30.376440600000002,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h11": {
+        "B": {
+          "mean": 19.175157000000002,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 20.0163512,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h12": {
+        "B": {
+          "mean": 14.9589386,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 16.3685562,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h13": {
+        "B": {
+          "mean": 17.594677,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 18.7574598,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h14": {
+        "B": {
+          "mean": 11.3596416,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 16.7390228,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h15": {
+        "B": {
+          "mean": 35.945214,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 39.276918,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h16": {
+        "B": {
+          "mean": 46.6007676,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 45.538293599999996,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h17": {
+        "B": {
+          "mean": 23.3983636,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 26.301905599999998,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h18": {
+        "B": {
+          "mean": 34.7752344,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 27.2195496,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h19": {
+        "B": {
+          "mean": 19.543776400000002,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 24.4247638,
+          "missing": 0,
+          "n": 5
+        }
+      },
+      "h20": {
+        "B": {
+          "mean": 17.690029799999998,
+          "missing": 0,
+          "n": 5
+        },
+        "C": {
+          "mean": 19.0641766,
+          "missing": 0,
+          "n": 5
+        }
+      }
+    }
+  },
+  "per_task_primary": {
+    "h01": {
+      "B": {
+        "success": 1.0,
+        "tokens": 34165.0
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 36051.0
+      },
+      "category": "locate",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h02": {
+      "B": {
+        "success": 1.0,
+        "tokens": 95669.8
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 91871.0
+      },
+      "category": "locate",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h03": {
+      "B": {
+        "success": 1.0,
+        "tokens": 31945.6
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 26910.4
+      },
+      "category": "callers",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h04": {
+      "B": {
+        "success": 1.0,
+        "tokens": 25154.4
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 25671.8
+      },
+      "category": "callers",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h05": {
+      "B": {
+        "success": 1.0,
+        "tokens": 65032.4
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 62817.6
+      },
+      "category": "tests",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h06": {
+      "B": {
+        "success": 1.0,
+        "tokens": 131201.8
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 143447.8
+      },
+      "category": "tests",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h07": {
+      "B": {
+        "success": 1.0,
+        "tokens": 70240.4
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 72132.8
+      },
+      "category": "trace",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h08": {
+      "B": {
+        "success": 1.0,
+        "tokens": 51769.0
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 42936.0
+      },
+      "category": "trace",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h09": {
+      "B": {
+        "success": 1.0,
+        "tokens": 36868.2
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 37080.6
+      },
+      "category": "dependencies",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h10": {
+      "B": {
+        "success": 1.0,
+        "tokens": 62138.6
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 62062.0
+      },
+      "category": "dependencies",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h11": {
+      "B": {
+        "success": 1.0,
+        "tokens": 56397.8
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 52455.8
+      },
+      "category": "locate",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h12": {
+      "B": {
+        "success": 1.0,
+        "tokens": 34737.8
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 36076.4
+      },
+      "category": "locate",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h13": {
+      "B": {
+        "success": 1.0,
+        "tokens": 32572.2
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 28170.2
+      },
+      "category": "callers",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h14": {
+      "B": {
+        "success": 1.0,
+        "tokens": 24995.0
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 26697.8
+      },
+      "category": "callers",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h15": {
+      "B": {
+        "success": 1.0,
+        "tokens": 116235.0
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 104729.8
+      },
+      "category": "tests",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h16": {
+      "B": {
+        "success": 1.0,
+        "tokens": 203571.6
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 180407.4
+      },
+      "category": "tests",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h17": {
+      "B": {
+        "success": 1.0,
+        "tokens": 49288.0
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 57283.2
+      },
+      "category": "trace",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h18": {
+      "B": {
+        "success": 1.0,
+        "tokens": 114760.8
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 85780.0
+      },
+      "category": "trace",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h19": {
+      "B": {
+        "success": 1.0,
+        "tokens": 50043.4
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 57012.4
+      },
+      "category": "dependencies",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    },
+    "h20": {
+      "B": {
+        "success": 1.0,
+        "tokens": 31144.4
+      },
+      "C": {
+        "success": 1.0,
+        "tokens": 35735.2
+      },
+      "category": "dependencies",
+      "included_blocks": 5,
+      "language": "php",
+      "project": "fluent"
+    }
+  },
+  "primary": {
+    "b_mean_input_tokens": 65896.56,
+    "b_success_rate": 1.0,
+    "c_mean_input_tokens": 63266.46,
+    "c_success_rate": 1.0,
+    "ratio_c_over_b": 0.9600874461428639,
+    "ratio_undefined_reason": null,
+    "reduction_pct": 3.99125538571361,
+    "success_diff_pp": 0.0,
+    "tasks": [
+      "h01",
+      "h02",
+      "h03",
+      "h04",
+      "h05",
+      "h06",
+      "h07",
+      "h08",
+      "h09",
+      "h10",
+      "h11",
+      "h12",
+      "h13",
+      "h14",
+      "h15",
+      "h16",
+      "h17",
+      "h18",
+      "h19",
+      "h20"
+    ],
+    "weighting": "equal task weighting over included blocks; failures count as pass = 0 with their tokens"
+  },
+  "secondary": {
+    "arm_means": {
+      "cost_usd": {
+        "all_tasks": {
+          "B": {
+            "mean": 0.12865664999999998,
+            "tasks": 20
+          },
+          "C": {
+            "mean": 0.12806433,
+            "tasks": 20
+          }
+        },
+        "missing_runs": {
+          "B": 0,
+          "C": 0
+        },
+        "paired": {
+          "B": 0.12865664999999998,
+          "C": 0.12806433
+        },
+        "paired_tasks": [
+          "h01",
+          "h02",
+          "h03",
+          "h04",
+          "h05",
+          "h06",
+          "h07",
+          "h08",
+          "h09",
+          "h10",
+          "h11",
+          "h12",
+          "h13",
+          "h14",
+          "h15",
+          "h16",
+          "h17",
+          "h18",
+          "h19",
+          "h20"
+        ]
+      },
+      "input_tokens_total": {
+        "all_tasks": {
+          "B": {
+            "mean": 65896.56,
+            "tasks": 20
+          },
+          "C": {
+            "mean": 63266.46,
+            "tasks": 20
+          }
+        },
+        "missing_runs": {
+          "B": 0,
+          "C": 0
+        },
+        "paired": {
+          "B": 65896.56,
+          "C": 63266.46
+        },
+        "paired_tasks": [
+          "h01",
+          "h02",
+          "h03",
+          "h04",
+          "h05",
+          "h06",
+          "h07",
+          "h08",
+          "h09",
+          "h10",
+          "h11",
+          "h12",
+          "h13",
+          "h14",
+          "h15",
+          "h16",
+          "h17",
+          "h18",
+          "h19",
+          "h20"
+        ]
+      },
+      "output_tokens": {
+        "all_tasks": {
+          "B": {
+            "mean": 1505.73,
+            "tasks": 20
+          },
+          "C": {
+            "mean": 1403.4299999999998,
+            "tasks": 20
+          }
+        },
+        "missing_runs": {
+          "B": 0,
+          "C": 0
+        },
+        "paired": {
+          "B": 1505.73,
+          "C": 1403.4299999999998
+        },
+        "paired_tasks": [
+          "h01",
+          "h02",
+          "h03",
+          "h04",
+          "h05",
+          "h06",
+          "h07",
+          "h08",
+          "h09",
+          "h10",
+          "h11",
+          "h12",
+          "h13",
+          "h14",
+          "h15",
+          "h16",
+          "h17",
+          "h18",
+          "h19",
+          "h20"
+        ]
+      },
+      "success": {
+        "all_tasks": {
+          "B": {
+            "mean": 1.0,
+            "tasks": 20
+          },
+          "C": {
+            "mean": 1.0,
+            "tasks": 20
+          }
+        },
+        "missing_runs": {
+          "B": 0,
+          "C": 0
+        },
+        "paired": {
+          "B": 1.0,
+          "C": 1.0
+        },
+        "paired_tasks": [
+          "h01",
+          "h02",
+          "h03",
+          "h04",
+          "h05",
+          "h06",
+          "h07",
+          "h08",
+          "h09",
+          "h10",
+          "h11",
+          "h12",
+          "h13",
+          "h14",
+          "h15",
+          "h16",
+          "h17",
+          "h18",
+          "h19",
+          "h20"
+        ]
+      },
+      "tool_calls_total": {
+        "all_tasks": {
+          "B": {
+            "mean": 5.55,
+            "tasks": 20
+          },
+          "C": {
+            "mean": 4.38,
+            "tasks": 20
+          }
+        },
+        "missing_runs": {
+          "B": 0,
+          "C": 0
+        },
+        "paired": {
+          "B": 5.55,
+          "C": 4.38
+        },
+        "paired_tasks": [
+          "h01",
+          "h02",
+          "h03",
+          "h04",
+          "h05",
+          "h06",
+          "h07",
+          "h08",
+          "h09",
+          "h10",
+          "h11",
+          "h12",
+          "h13",
+          "h14",
+          "h15",
+          "h16",
+          "h17",
+          "h18",
+          "h19",
+          "h20"
+        ]
+      },
+      "wall_clock_seconds": {
+        "all_tasks": {
+          "B": {
+            "mean": 22.900659179999998,
+            "tasks": 20
+          },
+          "C": {
+            "mean": 24.608824300000002,
+            "tasks": 20
+          }
+        },
+        "missing_runs": {
+          "B": 0,
+          "C": 0
+        },
+        "paired": {
+          "B": 22.900659179999998,
+          "C": 24.608824300000002
+        },
+        "paired_tasks": [
+          "h01",
+          "h02",
+          "h03",
+          "h04",
+          "h05",
+          "h06",
+          "h07",
+          "h08",
+          "h09",
+          "h10",
+          "h11",
+          "h12",
+          "h13",
+          "h14",
+          "h15",
+          "h16",
+          "h17",
+          "h18",
+          "h19",
+          "h20"
+        ]
+      }
+    },
+    "by_category": {
+      "callers": {
+        "b_mean_input_tokens": 28666.8,
+        "b_success_rate": 1.0,
+        "c_mean_input_tokens": 26862.55,
+        "c_success_rate": 1.0,
+        "ratio_c_over_b": 0.9370613392495849,
+        "success_diff_pp": 0.0,
+        "tasks": 4
+      },
+      "dependencies": {
+        "b_mean_input_tokens": 45048.65,
+        "b_success_rate": 1.0,
+        "c_mean_input_tokens": 47972.55,
+        "c_success_rate": 1.0,
+        "ratio_c_over_b": 1.0649053856219888,
+        "success_diff_pp": 0.0,
+        "tasks": 4
+      },
+      "locate": {
+        "b_mean_input_tokens": 55242.600000000006,
+        "b_success_rate": 1.0,
+        "c_mean_input_tokens": 54113.55,
+        "c_success_rate": 1.0,
+        "ratio_c_over_b": 0.9795619684808462,
+        "success_diff_pp": 0.0,
+        "tasks": 4
+      },
+      "tests": {
+        "b_mean_input_tokens": 129010.2,
+        "b_success_rate": 1.0,
+        "c_mean_input_tokens": 122850.65,
+        "c_success_rate": 1.0,
+        "ratio_c_over_b": 0.9522553255479024,
+        "success_diff_pp": 0.0,
+        "tasks": 4
+      },
+      "trace": {
+        "b_mean_input_tokens": 71514.55,
+        "b_success_rate": 1.0,
+        "c_mean_input_tokens": 64533.0,
+        "c_success_rate": 1.0,
+        "ratio_c_over_b": 0.9023758102372175,
+        "success_diff_pp": 0.0,
+        "tasks": 4
+      }
+    },
+    "by_language": {
+      "php": {
+        "b_mean_input_tokens": 65896.56,
+        "b_success_rate": 1.0,
+        "c_mean_input_tokens": 63266.46,
+        "c_success_rate": 1.0,
+        "ratio_c_over_b": 0.9600874461428639,
+        "success_diff_pp": 0.0,
+        "tasks": 20
+      }
+    },
+    "comparisons": {
+      "cost_usd": {
+        "change_pct": -0.46038817270617205,
+        "paired_tasks": 20,
+        "ratio_c_over_b": 0.9953961182729383,
+        "reduction_pct": 0.46038817270617205,
+        "undefined_reason": null
+      },
+      "input_tokens_total": {
+        "change_pct": -3.99125538571361,
+        "paired_tasks": 20,
+        "ratio_c_over_b": 0.9600874461428639,
+        "reduction_pct": 3.99125538571361,
+        "undefined_reason": null
+      },
+      "output_tokens": {
+        "change_pct": -6.794046741447679,
+        "paired_tasks": 20,
+        "ratio_c_over_b": 0.9320595325855232,
+        "reduction_pct": 6.794046741447679,
+        "undefined_reason": null
+      },
+      "success": {
+        "difference_pp": 0.0,
+        "paired_tasks": 20
+      },
+      "tool_calls_total": {
+        "change_pct": -21.081081081081077,
+        "paired_tasks": 20,
+        "ratio_c_over_b": 0.7891891891891892,
+        "reduction_pct": 21.081081081081077,
+        "undefined_reason": null
+      },
+      "wall_clock_seconds": {
+        "change_pct": 7.459021622800299,
+        "paired_tasks": 20,
+        "ratio_c_over_b": 1.074590216228003,
+        "reduction_pct": -7.459021622800299,
+        "undefined_reason": null
+      }
+    },
+    "label": "secondary: point estimates only, no interval, no gate",
+    "successful_runs_only_input_tokens": {
+      "b_mean": 65896.56,
+      "c_mean": 63266.46,
+      "paired_tasks": 20,
+      "ratio_c_over_b": 0.9600874461428639,
+      "undefined_reason": null
+    }
+  },
+  "spend": {
+    "attempts_with_unknown_cost": 0,
+    "cap_usd": 60.0,
+    "reported_usd_claude_code_estimate": 25.672098
+  },
+  "study_id": "heldout-01",
+  "study_kind": "confirmatory",
+  "validity": {
+    "reasons": [],
+    "valid": true
+  }
+}

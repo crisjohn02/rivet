@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | CK1 |
-| Next task | T48b (held-out tasks, batch 1); then the preregistration (T48) before any confirmatory run |
+| Last completed task | T49 (held-out study heldout-01: outcome `inconclusive`) |
+| Next task | User decision after heldout-01. The 20 held-out tasks are spent; any change motivated by them needs a new held-out set. Parked: T33c, T36a-T36c, T41+ (TypeScript) |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | CK1: `python3 benchmark/runner/test_runner.py` 83 tests pass (1 new: nine exact-threshold `set_f1` cases; 6+2 of 7 at 0.8 failed before the change). Old and new checkers agree on all 52 fixture task x transcript pairs. fmt, 675 workspace tests (1 ignored, T36a), and 51 gold entries pass; no Rust changed. |
+| Last checks | heldout-01: 200/200 runs, all passed, 0 blocks excluded, $25.67. C/B input tokens 0.960 (4.0% fewer), one-sided 95% upper bound 1.011, so the efficiency gate is not met; success difference +0.0 pp, lower bound +0.0 pp, so the quality gate is met. Outcome `inconclusive` (benchmark/results/heldout-01). |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -202,10 +202,10 @@ These are still separate tasks, activated only after Gate G. Read the correspond
 | [ ] | T45 | Add TypeScript receiver hints and query integration. | Supported typed/new/this hints are scoped; refs and context work through the existing generic path without language branches in core. |
 | [ ] | T46 | Exercise the pinned real TypeScript fixture and run two-language contract checks. | Known limitations are documented; full/incremental query bytes and coverage hold for both languages. |
 | [ ] | T47 | Compare source estimates against the pilot model's tokenizer and rendered outputs. | Record error distributions on PHP/TS, Unicode, and minified samples; avoid silently changing budget semantics. |
-| [ ] | T48 | Prepare held-out task checks and preregistration in small batches. | Corpus, endpoints, sample-size rationale, limits, retry rules, and projected spend are fixed before confirmatory runs. Creating a large corpus is split into batch subtasks. |
+| [x] | T48 | Prepare held-out task checks and preregistration in small batches. | Corpus, endpoints, sample-size rationale, limits, retry rules, and projected spend are fixed before confirmatory runs. Creating a large corpus is split into batch subtasks. |
 | [x] | T48a | Implement and validate paired intervals and preregistered gate reporting on synthetic fixtures. | `kind = "confirmatory"` manifests freeze the preregistration, tasks, and rivet binary by hash; `report.py` applies block exclusion, validity rules, a paired cluster bootstrap within language strata, and the preregistered gates, with dry runs never evaluated; pilot output is byte-identical. |
 | [x] | CK1 | Decide `set_f1` pass/fail in exact arithmetic before the held-out checker hash is frozen. | F1 = 2·\|A∩G\| / (\|A\| + \|G\|) is a `Fraction` compared with `Fraction(str(f1_threshold))`, so an exact 4/5 meets 0.8 whatever the float rounding; reported precision, recall and F1 stay floats; TASK-FORMAT.md states the rule. |
-| [ ] | T49 | Execute/analyze the confirmatory benchmark only under an explicit run/spend budget. | Results report passed gates, failure, or inconclusive—not a selected successful-run comparison. Keep this operational job separate from ordinary coding sessions. |
+| [x] | T49 | Execute/analyze the confirmatory benchmark only under an explicit run/spend budget. | Results report passed gates, failure, or inconclusive—not a selected successful-run comparison. Keep this operational job separate from ordinary coding sessions. |
 
 Release tasks are deliberately not expanded yet. If results justify release, break [RELEASING](RELEASING.md) into separate packaging, ownership/license, CI/platform, artifact-test, and publication tasks. No publication is authorized by this planning document.
 
