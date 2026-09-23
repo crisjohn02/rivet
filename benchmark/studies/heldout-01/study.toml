@@ -1,0 +1,93 @@
+# Held-out confirmatory study manifest (T48a format; see benchmark/runner/TASK-FORMAT.md).
+# Preregistered in benchmark/preregistration.md, whose SHA-256 is pinned below.
+# Public-safe: opaque task IDs and harness settings only. Tasks, prompts and
+# gold answers live in $RIVET_PILOT_TASKS_DIR; run artifacts in
+# $RIVET_PILOT_RUNS_DIR. Both are private and outside this repository.
+schema_version = 1
+study_id = "heldout-01"
+kind = "confirmatory"
+
+tasks = ["h01", "h02", "h03", "h04", "h05", "h06", "h07", "h08", "h09", "h10", "h11", "h12", "h13", "h14", "h15", "h16", "h17", "h18", "h19", "h20"]
+
+arms = ["B", "C"]
+trials = 5
+seed = 20260928
+retry_rule = "rerun_block_once"
+
+# Hard cap across the whole study, including retries. Before each block and
+# each run the runner requires charged + max_budget_usd + reserve <= cap.
+budget_cap_usd = 60.0  # approved by the user for this study on 2026-09-23
+# Claude Code checks --max-budget-usd between turns, so one run can end a
+# little above its own budget; the reserve is that allowance.
+per_run_reserve_usd = 0.25
+
+[harness]
+model = "claude-opus-5-5"
+settings = '{"effortLevel":"high"}'
+flags = [
+  "-p",
+  "--setting-sources", "project",
+  "--strict-mcp-config",
+  "--disable-slash-commands",
+  "--no-session-persistence",
+  "--output-format", "stream-json",
+  "--verbose",
+  "--permission-prompts", "none",
+]
+# Built-in tools that exist in the session at all (--tools).
+tools = ["Read", "Grep", "Glob", "Bash"]
+# docs/BENCHMARK.md "Config B prompt, verbatim"; both arms. The runner
+# refuses the manifest if this ever differs from that document.
+append_system_prompt = """
+When searching code, prefer `rg -n <pattern> <dir>` scoped to a likely directory over repository-wide searches. Read specific line ranges rather than whole files. Before reading a file, search for the symbol's definition and read only the enclosing function or class."""
+
+[arms_config.B]
+rivet = false
+allowed_tools = ["Read", "Grep", "Glob", "Bash(rg:*)", "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)"]
+disallowed_tools = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Bash(rivet:*)"]
+
+[arms_config.C]
+rivet = true
+snippet_file = "CLAUDE.md"
+allowed_tools = ["Read", "Grep", "Glob", "Bash(rg:*)", "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)", "Bash(rivet:*)"]
+disallowed_tools = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task"]
+
+[sandbox]
+# Every agent process runs under `sandbox-exec` (benchmark/runner/sandbox.py).
+# Reads of these paths are denied in both arms, identically. "~/" expands to
+# the runner's home and every path is resolved with realpath. The runner also
+# always denies $RIVET_PILOT_TASKS_DIR, $RIVET_CORPUS_DIR and
+# $RIVET_PILOT_RUNS_DIR, except the attempt's own workspace and the study's
+# pinned rivet copy. The runner refuses to start if a workspace, the harness
+# binary or the rivet copy would fall under a denied path.
+deny_read_paths = [
+  "~/rivet-corpus/gold",   # gold answers, partition notes, held-out gold
+  "~/ssr",
+  "~/rivet",               # rivet's repository
+  "~/rivet-wt",            # rivet's worktrees
+  # ~/.claude/projects is narrowed to the regex below: denying all of it would
+  # also deny the child Claude Code's own per-project state.
+]
+deny_read_regexes = [
+  # Session transcripts and scratch of the orchestrator (a rivet session) and of
+  # any session on the private originals (~/ssr). Narrowed from all of
+  # /private/tmp/claude-* and ~/.claude/projects, which would also deny the
+  # child Claude Code's own scratch and state. The runs directory must be named
+  # so that its sessions' slugs cannot match, e.g. ~/pilot-runs-rivet.
+  '^/private/tmp/claude-[0-9]+/-Users-[^-/]+-(rivet|ssr)(-|/|$)',
+  '^/Users/[^/]+/[.]claude/projects/-Users-[^-/]+-(rivet|ssr)(-|/|$)',
+]
+# Arm B additionally gets (deny process-exec (regex #"/rivet$")).
+deny_rivet_exec_in_b = true
+
+[confirmatory]
+preregistration = "benchmark/preregistration.md"
+preregistration_sha256 = "a29eee087ae4e5427689346f59e179445540b8079dd8b19c4bb6c844bc05fa2e"
+rivet_binary_sha256 = "89e3f10f81df936da1cc089e19b82ea93aca2ce649d1416f05bc9118bb4e062a"
+tasks_sha256 = "f96062c7949580eb7770180a14ab57e68ab5701c61eac10bf416a17d664eb819"
+analysis_version = "t48a-1"
+analysis_seed = 20260927
+bootstrap_replicates = 10000
+min_complete_trials_per_task = 3
+max_excluded_block_fraction = 0.10
+efficiency_gate = "upper_bound_below_1"
