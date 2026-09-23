@@ -1,18 +1,22 @@
-"""Study manifest, run schedule, budget ledger and harness command (T38a).
+"""Study manifest, run schedule, budget ledger and harness command (T38a),
+and the freezing checks of a confirmatory study (T48a).
 
 A study is `benchmark/studies/<study-id>/study.toml` (committed, public-safe:
-opaque task IDs and settings only). See TASK-FORMAT.md "study.toml".
-Standard library only.
+opaque task IDs and settings only). See TASK-FORMAT.md "study.toml" and
+"Confirmatory studies". Standard library only.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import re
 import shutil
+import stat
+import subprocess
 import tomllib
 
 from checks import TASK_ID_RE
@@ -64,9 +68,33 @@ RIVET_ALLOW = "Bash(rivet:*)"
 # session; a nested harness must not inherit them.
 STRIPPED_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT")
 
+STUDY_KINDS = ("pilot", "confirmatory")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+# The only efficiency gate the analysis implements (TASK-FORMAT.md
+# "Gates and outcome"): the one-sided 95% upper bound on C/B is below 1.00.
+EFFICIENCY_GATES = ("upper_bound_below_1",)
+MIN_BOOTSTRAP_REPLICATES = 1000
+CONFIRMATORY_KEYS = (
+    "preregistration",
+    "preregistration_sha256",
+    "rivet_binary_sha256",
+    "tasks_sha256",
+    "analysis_version",
+    "analysis_seed",
+    "bootstrap_replicates",
+    "min_complete_trials_per_task",
+    "max_excluded_block_fraction",
+    "efficiency_gate",
+)
+
 
 class StudyError(ValueError):
     """The manifest or the environment does not allow a safe study run."""
+
+
+class FreezeError(StudyError):
+    """A confirmatory study does not match its frozen preregistration, tasks
+    or rivet binary, or was asked to run in a way it must refuse."""
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -101,6 +129,74 @@ def _string_list(value, where: str) -> list[str]:
     return list(value)
 
 
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _confirmatory_table(table, trials: int) -> dict:
+    """Validates the `[confirmatory]` table (TASK-FORMAT.md "Confirmatory
+    studies"). Every key is required and no other key is accepted, so a
+    misspelt frozen setting cannot be silently ignored."""
+    if not isinstance(table, dict):
+        raise StudyError('study.toml: kind = "confirmatory" requires a [confirmatory] table')
+    unknown = sorted(set(table) - set(CONFIRMATORY_KEYS))
+    if unknown:
+        raise StudyError(f"study.toml: [confirmatory] has unknown keys: {', '.join(unknown)}")
+    missing = [key for key in CONFIRMATORY_KEYS if key not in table]
+    if missing:
+        raise StudyError(f"study.toml: [confirmatory] is missing {', '.join(missing)}")
+    prereg = table["preregistration"]
+    if (
+        not isinstance(prereg, str)
+        or not prereg
+        or prereg.startswith("/")
+        or "\\" in prereg
+        or any(part in ("", ".", "..") for part in prereg.split("/"))
+    ):
+        raise StudyError("study.toml: confirmatory.preregistration must be a repository-relative path without '.', '..' or empty components")
+    for key in ("preregistration_sha256", "rivet_binary_sha256", "tasks_sha256"):
+        value = table[key]
+        if not isinstance(value, str) or not HEX64_RE.match(value):
+            raise StudyError(f"study.toml: confirmatory.{key} must be 64 lowercase hex digits")
+    version = table["analysis_version"]
+    if not isinstance(version, str) or not version.strip():
+        raise StudyError("study.toml: confirmatory.analysis_version must be a non-empty string")
+    seed = table["analysis_seed"]
+    # random.Random uses the absolute value of an integer seed, so a negative
+    # seed would silently equal its positive twin.
+    if not _is_int(seed) or seed < 0:
+        raise StudyError("study.toml: confirmatory.analysis_seed must be a non-negative integer")
+    replicates = table["bootstrap_replicates"]
+    if not _is_int(replicates) or replicates < MIN_BOOTSTRAP_REPLICATES:
+        raise StudyError(f"study.toml: confirmatory.bootstrap_replicates must be an integer >= {MIN_BOOTSTRAP_REPLICATES}")
+    minimum = table["min_complete_trials_per_task"]
+    if not _is_int(minimum) or not 1 <= minimum <= trials:
+        raise StudyError(f"study.toml: confirmatory.min_complete_trials_per_task must be an integer in [1, trials = {trials}]")
+    fraction = table["max_excluded_block_fraction"]
+    if (
+        isinstance(fraction, bool)
+        or not isinstance(fraction, (int, float))
+        or not math.isfinite(fraction)
+        or not 0 <= fraction < 1
+    ):
+        raise StudyError("study.toml: confirmatory.max_excluded_block_fraction must be a number in [0, 1)")
+    gate = table["efficiency_gate"]
+    if gate not in EFFICIENCY_GATES:
+        raise StudyError(f"study.toml: confirmatory.efficiency_gate must be one of {', '.join(EFFICIENCY_GATES)}")
+    return {
+        "preregistration": prereg,
+        "preregistration_sha256": table["preregistration_sha256"],
+        "rivet_binary_sha256": table["rivet_binary_sha256"],
+        "tasks_sha256": table["tasks_sha256"],
+        "analysis_version": version,
+        "analysis_seed": seed,
+        "bootstrap_replicates": replicates,
+        "min_complete_trials_per_task": minimum,
+        "max_excluded_block_fraction": float(fraction),
+        "efficiency_gate": gate,
+    }
+
+
 def load_study(path: str) -> dict:
     """Loads and validates a study manifest. Raises StudyError."""
     with open(path, "rb") as handle:
@@ -115,9 +211,10 @@ def load_study(path: str) -> dict:
         raise StudyError("study.toml: study_id must be an opaque id")
     if os.path.basename(os.path.dirname(os.path.abspath(path))) != study_id:
         raise StudyError(f"study.toml: study_id {study_id!r} must match its directory name")
-    if raw.get("kind") != "pilot":
-        raise StudyError("study.toml: kind must be \"pilot\"; this runner does not evaluate confirmatory gates")
-    tasks = _string_list(raw.get("tasks", []), "tasks") if raw.get("tasks") else []
+    kind = raw.get("kind")
+    if kind not in STUDY_KINDS:
+        raise StudyError('study.toml: kind must be "pilot" or "confirmatory"')
+    tasks =_string_list(raw.get("tasks", []), "tasks") if raw.get("tasks") else []
     if not tasks:
         raise StudyError("study.toml: tasks is empty; T38 defines the pilot task IDs")
     for task in tasks:
@@ -142,6 +239,13 @@ def load_study(path: str) -> dict:
         raise StudyError("study.toml: per_run_reserve_usd must be >= 0")
     if raw.get("retry_rule") != "rerun_block_once":
         raise StudyError("study.toml: retry_rule must be \"rerun_block_once\"")
+    confirmatory = None
+    if kind == "confirmatory":
+        if arms != ["B", "C"]:
+            raise StudyError('study.toml: a confirmatory study must have arms = ["B", "C"] exactly')
+        confirmatory = _confirmatory_table(raw.get("confirmatory"), trials)
+    elif "confirmatory" in raw:
+        raise StudyError('study.toml: [confirmatory] is only valid with kind = "confirmatory"')
 
     harness = raw.get("harness")
     if not isinstance(harness, dict):
@@ -236,7 +340,8 @@ def load_study(path: str) -> dict:
         "path": os.path.abspath(path),
         "sha256": manifest_sha,
         "study_id": study_id,
-        "kind": "pilot",
+        "kind": kind,
+        "confirmatory": confirmatory,
         "tasks": tasks,
         "arms": arms,
         "trials": trials,
@@ -460,3 +565,129 @@ def load_corpus_projects(path: str = CORPUS_TOML) -> dict:
     with open(path, "rb") as handle:
         raw = tomllib.load(handle)
     return {p["name"]: p for p in raw.get("project", []) if isinstance(p, dict) and "name" in p}
+
+
+# ---- confirmatory freezing (T48a) ----------------------------------------
+
+
+def tasks_hash_text(tasks_dir: str, tasks: list[str]) -> str:
+    """The text `tasks_sha256` hashes: one line per regular file under each
+    listed task directory, `<task-id>/<relative path>\\t<sha256 of the
+    bytes>\\n`, sorted by the UTF-8 bytes of that path. It holds no absolute
+    path. A symlink or any other non-regular entry is refused rather than
+    skipped, because the runner would read through a symlink that the hash
+    did not cover."""
+    entries = []
+    for task in tasks:
+        root = os.path.join(tasks_dir, task)
+        if os.path.islink(root) or not os.path.isdir(root):
+            raise StudyError(f"task directory {task}/ is missing or not a plain directory")
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in sorted(dirnames) + sorted(filenames):
+                full = os.path.join(dirpath, name)
+                rel = f"{task}/" + os.path.relpath(full, root).replace(os.sep, "/")
+                mode = os.lstat(full).st_mode
+                if stat.S_ISDIR(mode):
+                    continue
+                if not stat.S_ISREG(mode):
+                    raise StudyError(f"{rel} is not a regular file (symlinks and special files are not hashed)")
+                if any(c in rel for c in "\t\n\r"):
+                    raise StudyError(f"{rel!r}: a tab or newline in a task file name would break tasks_sha256")
+                try:
+                    key = rel.encode("utf-8")
+                except UnicodeEncodeError as error:
+                    raise StudyError(f"{rel!r}: task file names must be UTF-8") from error
+                entries.append((key, f"{rel}\t{sha256_file(full)}\n"))
+    entries.sort(key=lambda entry: entry[0])
+    return "".join(line for _key, line in entries)
+
+
+def tasks_sha256(tasks_dir: str, tasks: list[str]) -> str:
+    return sha256_bytes(tasks_hash_text(tasks_dir, tasks).encode("utf-8"))
+
+
+def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"  # a check must not rewrite the index
+    try:
+        return subprocess.run(
+            ["git", "--literal-pathspecs", "-C", repo, *args], capture_output=True, timeout=60, check=False, env=env
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise FreezeError(f"refused: preregistration git check failed: cannot run git: {error}") from error
+
+
+def manifest_repository(study: dict) -> str:
+    """The top level of the git repository that holds the manifest."""
+    done = _git(os.path.dirname(study["path"]), "rev-parse", "--show-toplevel")
+    if done.returncode != 0:
+        raise FreezeError(f"refused: preregistration git check failed: {study['path']} is not inside a git repository")
+    return os.path.realpath(done.stdout.decode("utf-8", "replace").strip())
+
+
+def check_preregistration(study: dict) -> dict:
+    """The preregistration exists, has the manifest's sha256, is tracked by
+    git and is byte-identical to its HEAD version, with nothing staged."""
+    conf = study["confirmatory"]
+    rel = conf["preregistration"]
+    expected = conf["preregistration_sha256"]
+    repo = manifest_repository(study)
+    path = os.path.join(repo, rel)
+    if not os.path.isfile(path):
+        raise FreezeError(
+            f"refused: preregistration hash check failed: {rel} does not exist in {repo}; "
+            f"manifest preregistration_sha256 {expected}, file sha256 none"
+        )
+    actual = sha256_file(path)
+    if actual != expected:
+        raise FreezeError(
+            f"refused: preregistration hash check failed for {rel}: "
+            f"manifest preregistration_sha256 {expected}, file sha256 {actual}"
+        )
+    if _git(repo, "ls-files", "--error-unmatch", "--", rel).returncode != 0:
+        raise FreezeError(
+            f"refused: preregistration git check failed: {rel} is not tracked by git in {repo}; "
+            f"manifest preregistration_sha256 {expected}, file sha256 {actual}"
+        )
+    blob = _git(repo, "cat-file", "blob", f"HEAD:{rel}")
+    if blob.returncode != 0:
+        raise FreezeError(
+            f"refused: preregistration git check failed: {rel} is not in HEAD (staged but not committed); "
+            f"manifest preregistration_sha256 {expected}, file sha256 {actual}, HEAD sha256 none"
+        )
+    head = sha256_bytes(blob.stdout)
+    status = _git(repo, "status", "--porcelain", "--untracked-files=all", "--", rel)
+    lines = status.stdout.decode("utf-8", "replace").strip()
+    if status.returncode != 0 or lines or head != actual:
+        raise FreezeError(
+            f"refused: preregistration git check failed: {rel} is modified relative to HEAD "
+            f"(git status: {lines or 'clean'}); HEAD sha256 {head}, file sha256 {actual}"
+        )
+    return {"path": rel, "repository": repo, "sha256": actual}
+
+
+def check_tasks(study: dict, tasks_dir: str) -> str:
+    expected = study["confirmatory"]["tasks_sha256"]
+    actual = tasks_sha256(tasks_dir, study["tasks"])
+    if actual != expected:
+        raise FreezeError(
+            f"refused: tasks hash check failed: manifest tasks_sha256 {expected}, "
+            f"the listed tasks in RIVET_PILOT_TASKS_DIR hash to {actual}"
+        )
+    return actual
+
+
+def check_rivet_binary(study: dict, rivet_bin: str) -> str:
+    expected = study["confirmatory"]["rivet_binary_sha256"]
+    if not os.path.isfile(rivet_bin):
+        raise FreezeError(
+            f"refused: rivet binary check failed: RIVET_PILOT_RIVET_BIN {rivet_bin} is not a file; "
+            f"manifest rivet_binary_sha256 {expected}, binary sha256 none"
+        )
+    actual = sha256_file(rivet_bin)
+    if actual != expected:
+        raise FreezeError(
+            f"refused: rivet binary check failed: manifest rivet_binary_sha256 {expected}, "
+            f"RIVET_PILOT_RIVET_BIN {rivet_bin} sha256 {actual}"
+        )
+    return actual
