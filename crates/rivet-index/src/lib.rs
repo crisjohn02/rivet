@@ -7,10 +7,16 @@
 //!
 //! T19 adds [`resolve`]: direct PHP import/namespace bindings and lexically
 //! bound function references, resolved from the persisted uses and scopes.
+//!
+//! T36d adds [`hierarchy`]: each class-like's declared supertypes, resolved
+//! through the same bindings as their `type` uses, and their transitive
+//! closure.
 
+pub mod hierarchy;
 mod query;
 pub mod resolve;
 
+pub use hierarchy::{Hierarchy, Supertype, ancestors, direct_supertypes};
 pub use query::{
     InvalidFileLine, QueryOutcome, check_query_syntax, levenshtein, lookup_name_matches,
     resolve_query, suggestions,

@@ -47,13 +47,27 @@
 //!   not a member use;
 //! - the class operand of `instanceof` as a [`RefKind::Type`] use; and
 //! - no use for an enum case's own name, which is a declaration.
+//!
+//! T36d adds:
+//!
+//! - each name in a class's `extends` and `implements` clauses, an enum's
+//!   `implements` clause, and an interface's `extends` list as a
+//!   [`RefKind::Type`] use, for named and anonymous classes alike; the use's
+//!   container is the declared class-like (for an anonymous class, the
+//!   nearest named container, since it is not a symbol);
+//! - for a named class, interface, or enum, one [`DeclaredSupertype`] fact
+//!   per such name in the scope that declares it, so the index can answer
+//!   hierarchy questions from the same use and its binding; and
+//! - an expression scope before `::` (`$obj::$p`, `$obj::C`,
+//!   `$this->f()::$p`) walked as code, so the uses inside it are recorded;
+//!   the expression itself is never a type use.
 
 use std::collections::{BTreeMap, HashMap};
 
 use rivet_core::extract::{
-    CallArg, CallArgKind, CallReceiver, ExtractedImport, ExtractedScope, ExtractedUse, ImportKind,
-    NewBinding, ParameterList, ReceiverEvidence, ScopeFacts, ScopeImport, TypedBinding,
-    TypedOrigin, UseHint,
+    CallArg, CallArgKind, CallReceiver, DeclaredSupertype, ExtractedImport, ExtractedScope,
+    ExtractedUse, ImportKind, NewBinding, ParameterList, ReceiverEvidence, ScopeFacts, ScopeImport,
+    SupertypeRelation, TypedBinding, TypedOrigin, UseHint,
 };
 use rivet_core::{ExtractedSymbol, RefKind, Span, SymbolKind};
 use tree_sitter::Node;
@@ -107,6 +121,9 @@ struct Walker<'a> {
     next_body_ordinal: u32,
     /// Function/method symbol index -> by-reference flag per parameter (AF3).
     parameter_lists: BTreeMap<usize, Vec<bool>>,
+    /// Class-like symbol index -> its declared supertypes in source order
+    /// (T36d).
+    supertypes: BTreeMap<usize, Vec<DeclaredSupertype>>,
 }
 
 /// Extract uses, imports, and lexical scope facts from a parsed, error-free
@@ -141,6 +158,7 @@ pub fn extract_uses(
         body_stack: vec![None],
         next_body_ordinal: 0,
         parameter_lists: BTreeMap::new(),
+        supertypes: BTreeMap::new(),
     };
     walker.visit(root, false);
     if walker.use_limit_exceeded {
@@ -443,7 +461,12 @@ impl Walker<'_> {
     }
 
     /// Descend into a class-like declaration body, tracking the class context.
+    ///
+    /// The header's `extends`/`implements` names are recorded first (T36d),
+    /// outside the class context: they are written in the declaring scope's
+    /// terms, like any other class name there.
     fn visit_class(&mut self, node: Node<'_>) {
+        self.visit_supertype_clauses(node);
         self.class_stack
             .push((node.id(), node.kind() == "anonymous_class"));
         if let Some(body) = node.child_by_field_name("body") {
@@ -456,6 +479,63 @@ impl Walker<'_> {
             }
         }
         self.class_stack.pop();
+    }
+
+    /// Records each name in a class-like header's `extends` (`base_clause`) and
+    /// `implements` (`class_interface_clause`) clauses as a type use (T36d).
+    ///
+    /// Each name is pushed exactly as [`record_scope_class`](Self::record_scope_class)
+    /// pushes an explicit class scope, so it resolves through the same import
+    /// and namespace rules. A named class, interface, or enum also records one
+    /// [`DeclaredSupertype`] per name; an anonymous class is not a symbol and
+    /// a trait has no supertypes, so neither records the fact.
+    fn visit_supertype_clauses(&mut self, node: Node<'_>) {
+        let declared = match node.kind() {
+            "class_declaration" | "interface_declaration" | "enum_declaration" => {
+                self.declared_class_like(node)
+            }
+            _ => None,
+        };
+        for clause in named_children(node) {
+            let relation = match clause.kind() {
+                "base_clause" => SupertypeRelation::Extends,
+                "class_interface_clause" => SupertypeRelation::Implements,
+                _ => continue,
+            };
+            for name in named_children(clause) {
+                if !self.record_scope_class(name) {
+                    continue;
+                }
+                let (Some(symbol), Ok(span)) = (
+                    declared,
+                    Span::new(name.start_byte() as u32, name.end_byte() as u32),
+                ) else {
+                    continue;
+                };
+                let spelling = self.text(name);
+                self.supertypes
+                    .entry(symbol)
+                    .or_default()
+                    .push(DeclaredSupertype {
+                        symbol,
+                        relation,
+                        spelling,
+                        span,
+                    });
+            }
+        }
+    }
+
+    /// The index of the class, interface, or enum symbol declared by `node`,
+    /// whose span is exactly the declaration node's.
+    fn declared_class_like(&self, node: Node<'_>) -> Option<usize> {
+        self.symbols.iter().position(|symbol| {
+            matches!(
+                symbol.kind,
+                SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum
+            ) && symbol.span.start_byte() == node.start_byte() as u32
+                && symbol.span.end_byte() == node.end_byte() as u32
+        })
     }
 
     /// Enter a function body, then visit its parameters, return type, and body.
@@ -691,17 +771,7 @@ impl Walker<'_> {
             }
         }
         if let Some(scope) = scope {
-            // A class named explicitly is a type use of that class (AF4); a
-            // relative scope names no class by itself.
-            let named = self.record_scope_class(scope);
-            if !named
-                && !matches!(
-                    scope.kind(),
-                    "name" | "qualified_name" | "relative_name" | "relative_scope"
-                )
-            {
-                self.visit(scope, false);
-            }
+            self.visit_scope(scope);
         }
         if let Some(arguments) = node.child_by_field_name("arguments") {
             if let (Some(callee), Some(receiver)) = (callee.as_deref(), receiver) {
@@ -979,7 +1049,7 @@ impl Walker<'_> {
     fn visit_scoped_property(&mut self, node: Node<'_>, write: bool) {
         let scope = node.child_by_field_name("scope");
         if let Some(scope) = scope {
-            self.record_scope_class(scope);
+            self.visit_scope(scope);
         }
         if let Some(name) = node.child_by_field_name("name")
             && name.kind() == "variable_name"
@@ -1000,8 +1070,9 @@ impl Walker<'_> {
         }
         let scope = children[0];
         let name = children[children.len() - 1];
-        // `Foo::BAR` and `Foo::class` are type uses of `Foo` (AF4).
-        self.record_scope_class(scope);
+        // `Foo::BAR` and `Foo::class` are type uses of `Foo` (AF4); an
+        // expression scope is walked as code (T36d).
+        self.visit_scope(scope);
         // `::class` is the class-name literal, not a member.
         if name.kind() == "name" && self.text(name).eq_ignore_ascii_case("class") {
             return;
@@ -1226,6 +1297,25 @@ impl Walker<'_> {
         true
     }
 
+    /// Handles the scope before `::` in a static call, a class-constant
+    /// access, or a static property access.
+    ///
+    /// A class named explicitly is a type use of that class (AF4); `self`,
+    /// `static`, and `parent` name no class by themselves. Any other scope is
+    /// an expression (`$obj`, `$this->f()`, `(expr)`) whose own uses are
+    /// walked as code (T36d); the expression itself is never a type use.
+    fn visit_scope(&mut self, scope: Node<'_>) {
+        if self.record_scope_class(scope) {
+            return;
+        }
+        if !matches!(
+            scope.kind(),
+            "name" | "qualified_name" | "relative_name" | "relative_scope"
+        ) {
+            self.visit(scope, false);
+        }
+    }
+
     fn bind_variable(&mut self, name: Node<'_>, binding: Binding) {
         if name.kind() != "variable_name" {
             return;
@@ -1308,6 +1398,7 @@ impl Walker<'_> {
     fn finish_scopes(&mut self) -> Vec<ExtractedScope> {
         let mut scope_facts = std::mem::take(&mut self.scope_facts);
         let mut parameter_lists = std::mem::take(&mut self.parameter_lists);
+        let mut supertypes = std::mem::take(&mut self.supertypes);
         // Every top-level scope always exists so imports and top-level
         // declarations have a home even in a file with no uses: the file scope
         // for a file with no namespace, otherwise one scope per namespace
@@ -1341,6 +1432,10 @@ impl Walker<'_> {
                     symbol: index,
                     by_ref,
                 });
+            }
+            // Likewise a class-like's declared supertypes (T36d).
+            if let Some(list) = supertypes.remove(&index) {
+                facts.supertypes.extend(list);
             }
         }
         share_top_level_variables(&mut scope_facts);
@@ -2971,5 +3066,214 @@ mod tests {
             summary,
             vec![("Foo".to_string(), "type"), ("C".to_string(), "read")]
         );
+    }
+
+    /// `(spelling, kind, container qualified name)` for every use.
+    fn use_containers(file: &ExtractedFile) -> Vec<(String, &'static str, Option<String>)> {
+        file.uses
+            .iter()
+            .map(|use_| {
+                (
+                    use_.spelling.clone(),
+                    use_.ref_kind.as_str(),
+                    use_.containing_symbol_index
+                        .map(|index| file.symbols[index].qualified_name.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// `(declaring qualified name, relation, spelling)` for every recorded
+    /// supertype fact, with the scope key that holds it.
+    fn supertype_facts(file: &ExtractedFile) -> Vec<(String, String, &'static str, String)> {
+        file.scopes
+            .iter()
+            .flat_map(|scope| {
+                scope.facts.supertypes.iter().map(|fact| {
+                    (
+                        scope.scope_key.clone(),
+                        file.symbols[fact.symbol].qualified_name.clone(),
+                        fact.relation.as_str(),
+                        fact.spelling.clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// T36d: every name in `extends` and `implements` is a type use contained
+    /// by the declared class, and a supertype fact in the declaring scope
+    /// whose span is exactly the use's.
+    #[test]
+    fn class_header_names_are_type_uses_and_supertype_facts() {
+        let source = "<?php\nnamespace App;\nuse Lib\\Base;\n\
+                      final class Sub extends Base implements \\Lib\\A, Sub\\B {}\n";
+        let file = extract(source);
+        let sub = Some("App\\Sub".to_string());
+        assert_eq!(
+            use_containers(&file)
+                .into_iter()
+                .filter(|(_, kind, _)| *kind == "type")
+                .collect::<Vec<_>>(),
+            vec![
+                ("Base".to_string(), "type", sub.clone()),
+                ("\\Lib\\A".to_string(), "type", sub.clone()),
+                ("Sub\\B".to_string(), "type", sub.clone()),
+            ]
+        );
+        assert_eq!(
+            supertype_facts(&file),
+            vec![
+                (
+                    "ns0:file".to_string(),
+                    "App\\Sub".to_string(),
+                    "extends",
+                    "Base".to_string()
+                ),
+                (
+                    "ns0:file".to_string(),
+                    "App\\Sub".to_string(),
+                    "implements",
+                    "\\Lib\\A".to_string()
+                ),
+                (
+                    "ns0:file".to_string(),
+                    "App\\Sub".to_string(),
+                    "implements",
+                    "Sub\\B".to_string()
+                ),
+            ]
+        );
+        for fact in file.scopes.iter().flat_map(|scope| &scope.facts.supertypes) {
+            assert!(
+                file.uses
+                    .iter()
+                    .any(|use_| use_.span == fact.span && use_.spelling == fact.spelling),
+                "{fact:?} has no use with the same span"
+            );
+        }
+        // The header uses live in the class's own scope, which chains to the
+        // namespace block that holds the `use` import.
+        let base = file
+            .uses
+            .iter()
+            .find(|use_| use_.spelling == "Base" && use_.ref_kind.as_str() == "type")
+            .expect("Base use");
+        let scope = file
+            .scopes
+            .iter()
+            .find(|scope| scope.scope_key == base.scope_key)
+            .expect("use scope");
+        assert_eq!(scope.parent_scope_key.as_deref(), Some("ns0:file"));
+    }
+
+    /// T36d: `implements A, B` and an interface's `extends I1, I2` each record
+    /// two uses and two facts; an enum's `implements` records one.
+    #[test]
+    fn interface_lists_and_enum_implements_are_recorded() {
+        let source = "<?php\ninterface I extends I1, I2 {}\n\
+                      class C implements A, B {}\n\
+                      enum E: string implements I { case X = 'x'; }\n";
+        let file = extract(source);
+        let summary: Vec<(String, &str)> = use_summary(&file)
+            .into_iter()
+            .map(|(spelling, kind, _, _)| (spelling, kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("I1".to_string(), "type"),
+                ("I2".to_string(), "type"),
+                ("A".to_string(), "type"),
+                ("B".to_string(), "type"),
+                ("I".to_string(), "type"),
+            ]
+        );
+        let facts: Vec<(String, &str, String)> = supertype_facts(&file)
+            .into_iter()
+            .map(|(_, owner, relation, spelling)| (owner, relation, spelling))
+            .collect();
+        assert_eq!(
+            facts,
+            vec![
+                ("I".to_string(), "extends", "I1".to_string()),
+                ("I".to_string(), "extends", "I2".to_string()),
+                ("C".to_string(), "implements", "A".to_string()),
+                ("C".to_string(), "implements", "B".to_string()),
+                ("E".to_string(), "implements", "I".to_string()),
+            ]
+        );
+    }
+
+    /// T36d: an anonymous class's `extends` and `implements` names are type
+    /// uses contained by the nearest named container; the anonymous class is
+    /// still not a symbol and records no supertype fact. A trait records
+    /// neither (it has no header clauses), and its `use` of another trait is
+    /// not a supertype.
+    #[test]
+    fn anonymous_class_headers_record_uses_but_no_symbol_or_fact() {
+        let source = "<?php\nclass Host {\n    public function make() {\n        \
+                      return new class(1) extends Base implements I { public function m() {} };\n    \
+                      }\n}\ntrait T { use U; }\n";
+        let file = extract(source);
+        let make = Some("Host::make".to_string());
+        let types: Vec<_> = use_containers(&file)
+            .into_iter()
+            .filter(|(_, kind, _)| *kind == "type")
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                ("Base".to_string(), "type", make.clone()),
+                ("I".to_string(), "type", make.clone()),
+            ]
+        );
+        let names: Vec<&str> = file
+            .symbols
+            .iter()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Host", "Host::make", "T"]);
+        assert!(supertype_facts(&file).is_empty());
+    }
+
+    /// T36d: the expression before `::` is walked as code in every scoped
+    /// form, so the uses inside it are recorded; the expression itself is
+    /// never a type use. A plain class name keeps its AF4 type use.
+    #[test]
+    fn expression_scopes_are_walked_without_a_type_use() {
+        let source = "<?php\nclass K {\n    public function f() {}\n    public function g($obj) {\n        \
+                      $obj::$prop; $obj::CONST; $obj::method(); $this->f()::$p; \
+                      (make())::$q; $this->f()::C; Foo::$r;\n    }\n}\n";
+        let file = extract(source);
+        let summary: Vec<(String, &str)> = use_summary(&file)
+            .into_iter()
+            .map(|(spelling, kind, _, _)| (spelling, kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("$prop".to_string(), "read"),
+                ("CONST".to_string(), "read"),
+                ("method".to_string(), "call"),
+                ("f".to_string(), "call"),
+                ("$p".to_string(), "read"),
+                ("make".to_string(), "call"),
+                ("$q".to_string(), "read"),
+                ("f".to_string(), "call"),
+                ("C".to_string(), "read"),
+                ("Foo".to_string(), "type"),
+                ("$r".to_string(), "read"),
+            ]
+        );
+        // `$this->f()` before `::` is recorded as the call it is, with its
+        // `$this` receiver evidence.
+        let calls: Vec<UseHint> = file
+            .uses
+            .iter()
+            .filter(|use_| use_.spelling == "f")
+            .map(|use_| use_.hint.clone())
+            .collect();
+        assert_eq!(calls, vec![UseHint::This, UseHint::This]);
     }
 }
