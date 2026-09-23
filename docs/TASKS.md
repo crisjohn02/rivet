@@ -8,11 +8,11 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | T36 |
-| Next task | T37 |
+| Last completed task | T37 |
+| Next task | T38 |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | T36: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 648 passed, 0 failed, 1 ignored (T36a); `python3 tests/gold/check_gold.py` verified 51 authored entries. Acceptance map: `crates/rivet-cli/tests/ACCEPTANCE.md`. |
+| Last checks | T37: `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --workspace` 648 passed, 0 failed, 1 ignored; `python3 tests/gold/check_gold.py` verified 51 authored entries. Results: `benchmark/results/T37-local/`. |
 | Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
@@ -167,7 +167,7 @@ Read: BENCHMARK pilot, isolation, collected metrics, and decision rules; IMPLEME
 
 | Done | ID | Small task | Done when |
 |---|---|---|---|
-| [ ] | T37 | Measure the local PHP slice on the pinned repository without an agent benchmark. | Record cold index, no-change query, one-file edit plus query, common-name refs, context output bytes, and index size with environment details. Separate content hashing from resolution costs. |
+| [x] | T37 | Measure the local PHP slice on the pinned repository without an agent benchmark. | Record cold index, no-change query, one-file edit plus query, common-name refs, context output bytes, and index size with environment details. Separate content hashing from resolution costs. |
 | [ ] | T38 | Define 4–6 objective B/C pilot tasks and their checks using available harness access. Estimate model usage/cost from available evidence. | Starting states and gold solutions pass their checks; prompts, run caps, and artifacts are defined. No paid runs are launched as part of planning. |
 | [ ] | T39 | Run the agreed small pilot, retaining successes, failures, token usage, wall time, and transcripts. | Both arms run under comparable limits, including indexing cost. If credentials, access, or an explicit run/spend budget are missing, record the blocker instead of consuming unspecified usage. |
 | [ ] | T40 | Write a short pilot result and choose the next smallest change. | Report reference usefulness, adoption, tokens, latency, and limitations. Choose fix/retest, proceed to TypeScript, or re-scope; do not label the pilot a passed confirmatory benchmark. |
