@@ -1,0 +1,337 @@
+{
+  "accounting": {
+    "B": {
+      "accounted": 3,
+      "attempts": 3,
+      "contaminated": 0,
+      "crash_or_invalid_answer": 0,
+      "evaluator_failures": 0,
+      "infrastructure_failures": 0,
+      "isolation_violations": 0,
+      "limit_reached": 0,
+      "missing": 0,
+      "rerun_attempts": 0,
+      "scheduled": 3,
+      "successful": 3,
+      "unscheduled_runs": 0
+    },
+    "C": {
+      "accounted": 3,
+      "attempts": 3,
+      "contaminated": 0,
+      "crash_or_invalid_answer": 0,
+      "evaluator_failures": 0,
+      "infrastructure_failures": 0,
+      "isolation_violations": 0,
+      "limit_reached": 0,
+      "missing": 0,
+      "rerun_attempts": 0,
+      "scheduled": 3,
+      "successful": 3,
+      "unscheduled_runs": 0
+    }
+  },
+  "adoption_c": {
+    "eligible_runs": 3,
+    "errors_by_exit": {},
+    "invocations_by_command": {
+      "refs": 4
+    },
+    "runs_invoking_rivet": 3,
+    "runs_with_known_commands": 3,
+    "runs_with_known_fallbacks": 3,
+    "text_fallbacks": 3
+  },
+  "analysis_version": "t38c-1",
+  "arm_means": {
+    "cost_usd": {
+      "all_tasks": {
+        "B": {
+          "mean": 0.10732400000000002,
+          "tasks": 1
+        },
+        "C": {
+          "mean": 0.07202466666666667,
+          "tasks": 1
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 0.10732400000000002,
+        "C": 0.07202466666666667
+      },
+      "paired_tasks": [
+        "p2"
+      ]
+    },
+    "input_tokens_total": {
+      "all_tasks": {
+        "B": {
+          "mean": 45543.333333333336,
+          "tasks": 1
+        },
+        "C": {
+          "mean": 28415.333333333332,
+          "tasks": 1
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 45543.333333333336,
+        "C": 28415.333333333332
+      },
+      "paired_tasks": [
+        "p2"
+      ]
+    },
+    "output_tokens": {
+      "all_tasks": {
+        "B": {
+          "mean": 1474.0,
+          "tasks": 1
+        },
+        "C": {
+          "mean": 1090.3333333333333,
+          "tasks": 1
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 1474.0,
+        "C": 1090.3333333333333
+      },
+      "paired_tasks": [
+        "p2"
+      ]
+    },
+    "success": {
+      "all_tasks": {
+        "B": {
+          "mean": 1.0,
+          "tasks": 1
+        },
+        "C": {
+          "mean": 1.0,
+          "tasks": 1
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 1.0,
+        "C": 1.0
+      },
+      "paired_tasks": [
+        "p2"
+      ]
+    },
+    "tool_calls_total": {
+      "all_tasks": {
+        "B": {
+          "mean": 5.0,
+          "tasks": 1
+        },
+        "C": {
+          "mean": 2.3333333333333335,
+          "tasks": 1
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 5.0,
+        "C": 2.3333333333333335
+      },
+      "paired_tasks": [
+        "p2"
+      ]
+    },
+    "wall_clock_seconds": {
+      "all_tasks": {
+        "B": {
+          "mean": 20.61110366666667,
+          "tasks": 1
+        },
+        "C": {
+          "mean": 16.393483666666665,
+          "tasks": 1
+        }
+      },
+      "missing_runs": {
+        "B": 0,
+        "C": 0
+      },
+      "paired": {
+        "B": 20.61110366666667,
+        "C": 16.393483666666665
+      },
+      "paired_tasks": [
+        "p2"
+      ]
+    }
+  },
+  "arms": [
+    "B",
+    "C"
+  ],
+  "comparisons": {
+    "cost_usd": {
+      "change_pct": -32.8904376778105,
+      "paired_tasks": 1,
+      "ratio_c_over_b": 0.671095623221895,
+      "reduction_pct": 32.8904376778105,
+      "undefined_reason": null
+    },
+    "input_tokens_total": {
+      "change_pct": -37.60813876893801,
+      "paired_tasks": 1,
+      "ratio_c_over_b": 0.6239186123106198,
+      "reduction_pct": 37.60813876893801,
+      "undefined_reason": null
+    },
+    "output_tokens": {
+      "change_pct": -26.02894617819992,
+      "paired_tasks": 1,
+      "ratio_c_over_b": 0.7397105382180008,
+      "reduction_pct": 26.02894617819992,
+      "undefined_reason": null
+    },
+    "success": {
+      "difference_pp": 0.0,
+      "paired_tasks": 1
+    },
+    "tool_calls_total": {
+      "change_pct": -53.333333333333336,
+      "paired_tasks": 1,
+      "ratio_c_over_b": 0.4666666666666667,
+      "reduction_pct": 53.333333333333336,
+      "undefined_reason": null
+    },
+    "wall_clock_seconds": {
+      "change_pct": -20.462853752081966,
+      "paired_tasks": 1,
+      "ratio_c_over_b": 0.7953714624791803,
+      "reduction_pct": 20.462853752081966,
+      "undefined_reason": null
+    }
+  },
+  "gates": {
+    "efficiency_point_estimate": "not_evaluated",
+    "evidence_of_reduction": "not_evaluated",
+    "reason": "pilot study; docs/BENCHMARK.md forbids treating the pilot as the confirmatory study",
+    "study_integrity": "not_evaluated",
+    "success_non_inferiority": "not_evaluated"
+  },
+  "inputs": {
+    "runs_csv_sha256": "3406d969c43264f27198b8d5e9b91b430ef52a7491af8bcc9a696226b071d1f0",
+    "study_manifest_sha256": "78d17ae97268da00f70f3a12c83baf97b426b04c7ac9ebeaad7e00ce29f3802e"
+  },
+  "intervals": "not computed (pilot; paired intervals are T48a)",
+  "per_task": {
+    "cost_usd": {
+      "p2": {
+        "B": {
+          "mean": 0.10732400000000002,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 0.07202466666666667,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "input_tokens_total": {
+      "p2": {
+        "B": {
+          "mean": 45543.333333333336,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 28415.333333333332,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "output_tokens": {
+      "p2": {
+        "B": {
+          "mean": 1474.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1090.3333333333333,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "success": {
+      "p2": {
+        "B": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 1.0,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "tool_calls_total": {
+      "p2": {
+        "B": {
+          "mean": 5.0,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 2.3333333333333335,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    },
+    "wall_clock_seconds": {
+      "p2": {
+        "B": {
+          "mean": 20.61110366666667,
+          "missing": 0,
+          "n": 3
+        },
+        "C": {
+          "mean": 16.393483666666665,
+          "missing": 0,
+          "n": 3
+        }
+      }
+    }
+  },
+  "spend": {
+    "attempts_with_unknown_cost": 0,
+    "cap_usd": 4.0,
+    "reported_usd_claude_code_estimate": 0.538046
+  },
+  "study_id": "pilot-04",
+  "study_kind": "pilot",
+  "weighting": "equal task weighting over included attempts; comparisons use tasks with a value in every arm"
+}

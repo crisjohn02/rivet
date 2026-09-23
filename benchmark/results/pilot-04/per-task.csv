@@ -1,0 +1,13 @@
+task_id,project,category,config,metric,task_mean,runs_with_value,runs_missing
+p2,timesheet,callers,B,input_tokens_total,45543.333333,3,0
+p2,timesheet,callers,B,success,1.000000,3,0
+p2,timesheet,callers,B,wall_clock_seconds,20.611104,3,0
+p2,timesheet,callers,B,tool_calls_total,5.000000,3,0
+p2,timesheet,callers,B,output_tokens,1474.000000,3,0
+p2,timesheet,callers,B,cost_usd,0.107324,3,0
+p2,timesheet,callers,C,input_tokens_total,28415.333333,3,0
+p2,timesheet,callers,C,success,1.000000,3,0
+p2,timesheet,callers,C,wall_clock_seconds,16.393484,3,0
+p2,timesheet,callers,C,tool_calls_total,2.333333,3,0
+p2,timesheet,callers,C,output_tokens,1090.333333,3,0
+p2,timesheet,callers,C,cost_usd,0.072025,3,0
