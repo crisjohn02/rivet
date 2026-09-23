@@ -481,6 +481,43 @@ fn outdated_block_is_replaced_preserving_surrounding_text() {
     }
 }
 
+/// The one sentence SN1 replaced; pilot-01 ran with the block that held it.
+const PILOT_01_SENTENCE: &str = "Add `--json` for structured results.";
+
+/// The sentence that replaced it (SN1).
+const SN1_SENTENCE: &str = "The default text output is compact and meant for you to read; \
+     `--json` emits the full machine contract at several times the size, so reserve it for \
+     scripts that parse the result.";
+
+#[test]
+fn pilot_01_block_is_upgraded_in_place_preserving_surrounding_text() {
+    let new_block = snippet();
+    assert_eq!(new_block.matches(SN1_SENTENCE).count(), 1);
+    assert!(!new_block.contains(PILOT_01_SENTENCE));
+    // The pilot-01 block differs from the shipped one by that sentence only.
+    let old_block = new_block.replacen(SN1_SENTENCE, PILOT_01_SENTENCE, 1);
+    assert_ne!(old_block, new_block);
+
+    let temp = initialized_repo("upgrade-pilot-01");
+    let root = temp.path();
+    let before = format!("# Project rules\n\nkeep me\n\n{old_block}\n## After\nkeep me too\n");
+    write(root, "AGENTS.md", before.as_bytes());
+
+    assert_eq!(
+        init_ok(root, &["--write-snippet"]),
+        reported(&[], &["AGENTS.md"], "AGENTS.md")
+    );
+    assert_eq!(
+        String::from_utf8(read(root, "AGENTS.md")).unwrap(),
+        format!("# Project rules\n\nkeep me\n\n{new_block}\n## After\nkeep me too\n")
+    );
+    assert_eq!(
+        init_ok(root, &["--write-snippet"]),
+        reported(&[], &[], "AGENTS.md"),
+        "repeat"
+    );
+}
+
 #[test]
 fn repeated_write_snippet_changes_no_byte() {
     let temp = bare_repo("repeat");
