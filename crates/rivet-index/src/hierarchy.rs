@@ -143,7 +143,9 @@ impl Hierarchy {
             .iter()
             .map(|row| (row.use_id, row.target_id.as_str()))
             .collect();
-        let resolver = Resolver::new(symbols, uses, scopes);
+        // Only scope facts are read (to name a supertype PHP's way); nothing
+        // is bound here.
+        let resolver = Resolver::scope_reader(symbols, uses, scopes);
 
         // A supertype is resolved exactly when its `type` use (same file and
         // span) is bound to an indexed class-like; otherwise it keeps PHP's

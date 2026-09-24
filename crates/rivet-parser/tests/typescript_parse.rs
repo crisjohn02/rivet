@@ -3,9 +3,9 @@
 //! `.ts` and `.d.ts` files parse with the TypeScript grammar and `.tsx` files
 //! with the TSX grammar, chosen by [`language_for_path`]. A tree with an
 //! ERROR or MISSING node is a parse failure ([`first_parse_error`]).
-//! TypeScript is not dispatched to its adapter until T43 flips
-//! `LanguageId::has_extractor`, so [`parse_file`] extracts nothing from these
-//! files and reports only the parse-policy diagnostic.
+//! Since T43 [`parse_file`] dispatches both variants to the TypeScript
+//! adapter, which extracts definitions, uses, and scopes, and a failing file
+//! yields exactly the parse-policy diagnostic.
 
 #![cfg(feature = "lang-typescript")]
 
@@ -143,17 +143,33 @@ fn broken_file_fails_under_both_grammars() {
     assert_eq!(policy("src/broken.tsx", BROKEN), Some(expected));
 }
 
-/// With no TypeScript adapter, a valid file yields no facts and no
-/// diagnostic, and a failing file yields exactly the parse-policy diagnostic.
+/// Both grammar variants dispatch to the TypeScript adapter (T43): a valid
+/// file yields definitions, uses, and scopes and no diagnostic, and a failing
+/// file yields no facts and exactly the parse-policy diagnostic.
 #[test]
-fn parse_file_extracts_nothing_until_an_adapter_exists() {
-    for (language, source) in [
-        (LanguageId::Typescript, VALID_TS),
-        (LanguageId::Tsx, VALID_TSX),
-        (LanguageId::Typescript, VALID_DTS),
+fn parse_file_dispatches_to_the_typescript_adapter() {
+    for (language, source, symbol, use_) in [
+        (LanguageId::Typescript, VALID_TS, "Greeter.label", "Base"),
+        (LanguageId::Tsx, VALID_TSX, "App", "Button"),
+        (LanguageId::Typescript, VALID_DTS, "Lib.version", "Lib"),
     ] {
         let extracted = parse_file(language, source.as_bytes());
-        assert_eq!(extracted, Default::default(), "{language:?}");
+        assert!(
+            extracted.diagnostics.is_empty(),
+            "{language:?}: {extracted:?}"
+        );
+        assert!(
+            extracted
+                .symbols
+                .iter()
+                .any(|found| found.qualified_name == symbol),
+            "{language:?}: {extracted:?}"
+        );
+        assert!(!extracted.scopes.is_empty(), "{language:?}");
+        // The `.d.ts` sample's `Lib` is a declaration, not a use.
+        let spelled = extracted.uses.iter().any(|found| found.spelling == use_);
+        assert_eq!(spelled, source != VALID_DTS, "{language:?}: {extracted:?}");
+        assert!(extracted.imports.is_empty(), "PHP `use` bindings only");
     }
 
     let extracted = parse_file(LanguageId::Typescript, BROKEN.as_bytes());

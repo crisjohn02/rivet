@@ -14,12 +14,10 @@
 //! too: [`parse_tree`] parses with a language's grammar and
 //! [`first_parse_error`] finds the first ERROR or MISSING node, which makes the
 //! file a parse failure. T42 adds the TypeScript definition adapter
-//! (`rivet_languages::typescript`), but TypeScript stays unindexed until T43
-//! adds uses: [`LanguageId::has_extractor`] is the one switch and stays off,
-//! and this crate does not dispatch to the adapter yet, so [`parse_file`]
-//! yields no facts for TypeScript, only the `parse_error` diagnostic of a
-//! failing tree. Refresh never calls it for such a language: it counts the
-//! file as `unsupported` without reading it.
+//! (`rivet_languages::typescript`), and T43 adds its uses, scopes, and
+//! imports, turns [`LanguageId::has_extractor`] on for TypeScript and TSX,
+//! and dispatches both grammar variants to the adapter here in the same
+//! change.
 
 use rivet_core::ExtractedFile;
 use rivet_languages::LanguageId;
@@ -110,12 +108,11 @@ pub fn first_parse_error(tree: &tree_sitter::Tree) -> Option<ParseFailure> {
 
 /// Dispatches a parsed tree to the language adapter's `extract`.
 ///
-/// A language whose [`LanguageId::has_extractor`] is false is not dispatched
-/// to an adapter: its file yields no facts, and a tree that fails the parse
-/// policy yields one `parse_error` diagnostic, as an adapter would report it.
-/// TypeScript's definition adapter exists (T42), but T43 replaces that arm
-/// with it and flips the switch in the same change, once uses exist; a test
-/// below fails if the two disagree.
+/// Every compiled language has an adapter: PHP, and TypeScript and TSX (T43),
+/// both of whose grammar variants the one TypeScript adapter extracts. A
+/// future language whose [`LanguageId::has_extractor`] is false would get an
+/// arm here that yields no facts; a test below fails if the switch and this
+/// dispatch disagree.
 fn dispatch(
     language: LanguageId,
     bytes: &[u8],
@@ -127,25 +124,9 @@ fn dispatch(
         #[cfg(feature = "lang-php")]
         LanguageId::Php => rivet_languages::php::extract_with_limits(bytes, tree, limits),
         #[cfg(feature = "lang-typescript")]
-        LanguageId::Typescript | LanguageId::Tsx => without_extractor(tree),
-    }
-}
-
-/// The result for a language with no adapter: no facts, and the parse-policy
-/// diagnostic when the tree fails it.
-#[cfg(feature = "lang-typescript")]
-fn without_extractor(tree: &tree_sitter::Tree) -> ExtractedFile {
-    let diagnostics = first_parse_error(tree)
-        .map(|failure| rivet_core::Diagnostic {
-            code: "parse_error".to_string(),
-            detail: format!("{} at byte {}", failure.kind, failure.start_byte),
-            start_byte: Some(failure.start_byte),
-        })
-        .into_iter()
-        .collect();
-    ExtractedFile {
-        diagnostics,
-        ..ExtractedFile::default()
+        LanguageId::Typescript | LanguageId::Tsx => {
+            rivet_languages::typescript::extract_with_limits(bytes, tree, limits)
+        }
     }
 }
 
@@ -277,9 +258,9 @@ mod tests {
     }
 
     /// The extractor switch and the dispatch agree: a language whose switch
-    /// is on extracts a declared function, and one whose switch is off
-    /// extracts nothing from a valid file. T43 must flip the TypeScript switch
-    /// and add its dispatch arm together.
+    /// is on extracts a declared function, and one whose switch is off would
+    /// extract nothing from a valid file. T43 flipped the TypeScript switch and
+    /// added its dispatch arm together.
     #[test]
     fn extractor_switch_matches_dispatch() {
         #[cfg_attr(not(feature = "lang-typescript"), allow(unused_mut))]

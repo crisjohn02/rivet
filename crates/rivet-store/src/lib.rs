@@ -861,6 +861,18 @@ impl Store {
         })
     }
 
+    /// Returns every file's path and stored language, ordered by path bytes,
+    /// without reading source bytes (T43). The language decides which
+    /// identifier comparison and which binding rules apply to a file's rows.
+    pub fn list_file_languages(&self) -> Result<Vec<(String, Option<String>)>, Error> {
+        self.read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT path, language FROM files ORDER BY path COLLATE BINARY")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()?)
+        })
+    }
+
     /// Deletes the `files` row for `path`; dependent facts cascade.
     pub fn delete_file(&self, path: &str) -> Result<(), Error> {
         let tx = self.conn.unchecked_transaction()?;

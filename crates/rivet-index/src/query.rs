@@ -14,7 +14,10 @@
 //! 5. a short name, matched against the persisted `lookup_name`.
 //!
 //! Every case-insensitive comparison folds ASCII letters only, as PHP does and
-//! as the persisted `lookup_name` is folded (AF2).
+//! as the persisted `lookup_name` is folded (AF2). Case folding is PHP's rule
+//! alone: a TypeScript declaration (T43), or one of any other language, is
+//! only ever matched exactly ([`folds_case`]), so `rivet symbol foo` finds a
+//! PHP class `Foo` but not a TypeScript class `Foo`.
 //!
 //! Canonical IDs and native qualified names are tried before `file:line` so a
 //! native `Foo::bar` is never misread as a path. Everything here works from
@@ -29,10 +32,27 @@
 //! which symbol encloses the line (a line past the end of the file encloses
 //! nothing).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use rivet_core::{ParseStatus, SymbolId, SymbolKind};
 use rivet_store::{Error, Store, SymbolRow};
+
+/// The language whose identifiers fold ASCII case for some kinds.
+const PHP: &str = "php";
+
+/// Every stored file's language, by path (T43).
+fn file_languages(store: &Store) -> Result<HashMap<String, String>, Error> {
+    Ok(store
+        .list_file_languages()?
+        .into_iter()
+        .filter_map(|(path, language)| Some((path, language?)))
+        .collect())
+}
+
+/// The stored language of the file that declares `row`.
+fn language_of<'m>(languages: &'m HashMap<String, String>, row: &SymbolRow) -> Option<&'m str> {
+    languages.get(&row.file).map(String::as_str)
+}
 
 /// The outcome of resolving one query against the persisted symbols.
 #[derive(Debug)]
@@ -128,11 +148,13 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
             return Ok(QueryOutcome::Symbols(sort_rows(exact)));
         }
         let folded = query.to_ascii_lowercase();
+        let languages = file_languages(store)?;
         let case_folded: Vec<SymbolRow> = store
             .list_symbols()?
             .into_iter()
             .filter(|row| {
-                case_insensitive_kind(row.kind) && row.qualified_name.to_ascii_lowercase() == folded
+                folds_case(language_of(&languages, row), row.kind)
+                    && row.qualified_name.to_ascii_lowercase() == folded
             })
             .collect();
         if !case_folded.is_empty() {
@@ -153,8 +175,8 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
 
     // (4) Dotted path: normalize every separator to `.` on both sides and match
     // complete trailing components. A case-insensitive retry only considers
-    // kinds PHP treats case-insensitively, so a wrong-case property never
-    // matches.
+    // kinds PHP treats case-insensitively, in PHP files, so a wrong-case
+    // property or TypeScript name never matches.
     let normalized_query = normalize_separators(query);
     if normalized_query.contains('.') {
         let rows = store.list_symbols()?;
@@ -172,10 +194,11 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
             return Ok(QueryOutcome::Symbols(sort_rows(exact)));
         }
         let folded = normalized_query.to_ascii_lowercase();
+        let languages = file_languages(store)?;
         let case_folded: Vec<SymbolRow> = rows
             .into_iter()
             .filter(|row| {
-                case_insensitive_kind(row.kind)
+                folds_case(language_of(&languages, row), row.kind)
                     && ends_with_component(
                         &normalize_separators(&row.qualified_name).to_ascii_lowercase(),
                         &folded,
@@ -193,7 +216,9 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
     // folded (`rivet_languages::php::lookup_name`), because PHP folds only
     // ASCII letters (AF2). Every candidate is accepted by
     // [`lookup_name_matches`], the comparison the `refs` matcher also uses
-    // (AF4), so the two cannot disagree about case.
+    // (AF4), so the two cannot disagree about case. A TypeScript declaration
+    // matches only its exact spelling (T43).
+    let languages = file_languages(store)?;
     let mut short: Vec<SymbolRow> = Vec::new();
     let lowered = query.to_ascii_lowercase();
     let mut spellings = vec![query];
@@ -202,8 +227,12 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
     }
     for spelling in spellings {
         for row in store.find_symbols_by_lookup_name(spelling)? {
-            if lookup_name_matches(query, row.kind, &row.lookup_name)
-                && !short.iter().any(|existing| existing.id == row.id)
+            if lookup_name_matches(
+                query,
+                language_of(&languages, &row),
+                row.kind,
+                &row.lookup_name,
+            ) && !short.iter().any(|existing| existing.id == row.id)
             {
                 short.push(row);
             }
@@ -213,21 +242,35 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
 }
 
 /// Whether the short name `name` (a query, or a use's persisted lookup name)
-/// can name a declaration of `kind` whose persisted lookup name is
-/// `lookup_name` (AF4).
+/// can name a declaration of `kind` in a file of `language` whose persisted
+/// lookup name is `lookup_name` (AF4; T43).
 ///
-/// The comparison folds according to the *declaration's* kind, so a name whose
-/// own kind is unknown (a bare identifier) is compared correctly against both
-/// case-sensitive and case-insensitive declarations:
+/// For a PHP declaration the comparison folds according to the
+/// *declaration's* kind, so a name whose own kind is unknown (a bare
+/// identifier) is compared correctly against both case-sensitive and
+/// case-insensitive declarations:
 ///
 /// - a property compares case-sensitively with any leading `$` removed from
 ///   both sides, because a declaration keeps its `$` and `$x->name` omits it;
 /// - a constant (including an enum case) compares case-sensitively;
-/// - a type alias, which only TypeScript declares, compares case-sensitively,
-///   as TypeScript identifiers do (T42);
+/// - a type alias compares case-sensitively (T42);
 /// - every other kind (class, interface, trait, enum, function, method,
 ///   namespace) compares by ASCII case folding, as PHP does (AF2).
-pub fn lookup_name_matches(name: &str, kind: SymbolKind, lookup_name: &str) -> bool {
+///
+/// A declaration in any other language, TypeScript included, compares
+/// exactly: TypeScript identifiers are case-sensitive for every kind, and its
+/// lookup names keep `$` and `#` as written (T43). A caller comparing a use
+/// with a declaration also requires both to be in the same language; this
+/// function only knows the declaration's.
+pub fn lookup_name_matches(
+    name: &str,
+    language: Option<&str>,
+    kind: SymbolKind,
+    lookup_name: &str,
+) -> bool {
+    if language != Some(PHP) {
+        return name == lookup_name;
+    }
     match kind {
         SymbolKind::Property => {
             name.strip_prefix('$').unwrap_or(name)
@@ -372,16 +415,18 @@ fn line_distance(row: &SymbolRow, line: u32) -> u32 {
 /// Suggestions are ordered by the Unicode-scalar Levenshtein distance between
 /// the query's last component and the symbol's short name, then by
 /// qualified-name bytes (OUTPUT-CONTRACT "Ordering and versioning"). The
-/// distance is case-insensitive for kinds PHP treats case-insensitively.
+/// distance is case-insensitive for kinds PHP treats case-insensitively, in
+/// PHP files only (T43).
 pub fn suggestions(store: &Store, query: &str) -> Result<Vec<String>, Error> {
     let needle = last_component(query);
+    let languages = file_languages(store)?;
     let mut seen = BTreeSet::new();
     let mut ranked: Vec<(usize, String)> = Vec::new();
     for row in store.list_symbols()? {
         if !seen.insert(row.qualified_name.clone()) {
             continue;
         }
-        let distance = if case_insensitive_kind(row.kind) {
+        let distance = if folds_case(language_of(&languages, &row), row.kind) {
             levenshtein(&needle.to_ascii_lowercase(), &row.name.to_ascii_lowercase())
         } else {
             levenshtein(&needle, &row.name)
@@ -422,9 +467,15 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     previous[b.len()]
 }
 
-/// Reports whether `kind` names an identifier PHP treats case-insensitively.
-fn case_insensitive_kind(kind: SymbolKind) -> bool {
-    !matches!(kind, SymbolKind::Property | SymbolKind::Const)
+/// Whether a declaration of `kind` in a file of `language` is compared by
+/// ASCII case folding: only in PHP, and only for kinds PHP treats
+/// case-insensitively (T43). Every TypeScript identifier is case-sensitive.
+pub fn folds_case(language: Option<&str>, kind: SymbolKind) -> bool {
+    language == Some(PHP)
+        && !matches!(
+            kind,
+            SymbolKind::Property | SymbolKind::Const | SymbolKind::TypeAlias
+        )
 }
 
 /// Replaces every language-native path separator with `.`, collapses runs of
@@ -487,26 +538,54 @@ mod tests {
     use rivet_store::{FileRow, Store, SymbolRow};
 
     /// A type alias compares case-sensitively, as TypeScript identifiers do;
-    /// a class still folds ASCII case, as PHP does (T42).
+    /// a PHP class still folds ASCII case (T42). Every TypeScript
+    /// declaration compares exactly, whatever its kind, and so does one of an
+    /// unknown language (T43).
     #[test]
-    fn type_alias_lookup_is_case_sensitive() {
-        use super::lookup_name_matches;
+    fn lookup_is_case_sensitive_outside_php() {
+        use super::{folds_case, lookup_name_matches};
 
+        let php = Some("php");
+        let ts = Some("typescript");
         assert!(lookup_name_matches(
             "SurveyId",
+            ts,
             SymbolKind::TypeAlias,
             "SurveyId"
         ));
         assert!(!lookup_name_matches(
             "surveyid",
+            ts,
             SymbolKind::TypeAlias,
             "SurveyId"
         ));
         assert!(lookup_name_matches(
             "SurveyId",
+            php,
             SymbolKind::Class,
             "surveyid"
         ));
+        for kind in [
+            SymbolKind::Class,
+            SymbolKind::Function,
+            SymbolKind::Method,
+            SymbolKind::Interface,
+            SymbolKind::Enum,
+            SymbolKind::Module,
+            SymbolKind::Property,
+            SymbolKind::Const,
+        ] {
+            assert!(lookup_name_matches("Foo", ts, kind, "Foo"), "{kind:?}");
+            assert!(!lookup_name_matches("foo", ts, kind, "Foo"), "{kind:?}");
+            assert!(!lookup_name_matches("FOO", None, kind, "Foo"), "{kind:?}");
+            assert!(!folds_case(ts, kind), "{kind:?}");
+            assert!(!folds_case(None, kind), "{kind:?}");
+        }
+        // A TypeScript `$` is part of the name, unlike a PHP property's.
+        assert!(!lookup_name_matches("$el", ts, SymbolKind::Property, "el"));
+        assert!(lookup_name_matches("$el", php, SymbolKind::Property, "el"));
+        assert!(folds_case(php, SymbolKind::Class));
+        assert!(!folds_case(php, SymbolKind::Property));
     }
 
     #[test]

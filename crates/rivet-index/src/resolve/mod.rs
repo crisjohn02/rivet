@@ -13,6 +13,18 @@
 //! [`resolve_all`] is the one-shot entry point for a committed snapshot. The
 //! refresh path builds a [`Resolver`] directly over the rows it is about to
 //! publish, so resolved links land in the same publication transaction.
+//!
+//! Language guard (T43). The rules above are PHP's: they read PHP's name
+//! resolution, case folding, and receiver syntax. [`rules_for`] is the one
+//! place resolution dispatches on a file's language: a use in a file of a
+//! language with no rule set (TypeScript until T44/T45) is never bound and
+//! gets no receiver class, and each rule set sees only the declarations of
+//! its own language, so a PHP use can never bind a TypeScript declaration
+//! either. Without the guard the PHP rules would bind TypeScript uses by
+//! accident: the global function fallback binds `double()` to any unique
+//! function `double`, the class lookup binds a `type` use or a `new` target
+//! to any unique class of that name, and a typed or `new` receiver hint binds
+//! a member call, all as if PHP's name resolution applied.
 
 pub(crate) mod rules;
 
@@ -25,20 +37,38 @@ use rivet_store::{
 };
 use serde::Deserialize;
 
+/// The stored `files.language` whose rule set [`RULES`] is.
+const PHP: &str = "php";
+
 /// The canonical ID of the one declaration a rule selected.
 pub(crate) type SymbolId = String;
 
 /// The signature every resolution rule implements.
 pub(crate) type RuleFn = fn(&RuleCtx<'_>, &UseRow, &ScopeFacts) -> Option<(SymbolId, Resolution)>;
 
-/// The ordered rule list. The first single-candidate rule wins. T20 registers
-/// `receivers` and T21 registers `new_expr` after these entries.
+/// The ordered PHP rule list. The first single-candidate rule wins. T20
+/// registers `receivers` and T21 registers `new_expr` after these entries.
 const RULES: &[RuleFn] = &[
     rules::imports::resolve,
     rules::functions::resolve,
     rules::receivers::resolve,
     rules::new_expr::resolve,
 ];
+
+/// The ordered rule set for uses in files of `language` (the stored
+/// `files.language`), or no rules at all (T43).
+///
+/// This is the one place resolution dispatches on language. Only PHP has
+/// rules in v0.1; T44 and T45 add TypeScript's here, each seeing only
+/// TypeScript declarations. A use whose language has no rules keeps no
+/// binding and no receiver class, so it stays `name_match` wherever it is
+/// listed; a file with no stored language is never bound either.
+fn rules_for(language: Option<&str>) -> &'static [RuleFn] {
+    match language {
+        Some(PHP) => RULES,
+        _ => &[],
+    }
+}
 
 /// Lexical facts visible from one use, gathered along its scope chain.
 pub(crate) struct ScopeFacts {
@@ -201,7 +231,9 @@ struct PersistedParameterList {
 /// Folding is ASCII-only, as PHP folds identifiers (AF2): `Ä` and `ä` are
 /// different names.
 pub(crate) struct RuleCtx<'a> {
-    symbols: &'a [SymbolRow],
+    /// The declarations the rules may bind: those of the rule set's language
+    /// only (T43).
+    symbols: Vec<&'a SymbolRow>,
     by_id: HashMap<&'a str, usize>,
     by_qname_exact: HashMap<&'a str, Vec<usize>>,
     by_qname_folded: HashMap<String, Vec<usize>>,
@@ -223,8 +255,9 @@ pub(crate) struct RuleCtx<'a> {
 }
 
 impl<'a> RuleCtx<'a> {
-    /// Builds the symbol indexes for one snapshot.
-    fn new(symbols: &'a [SymbolRow]) -> RuleCtx<'a> {
+    /// Builds the symbol indexes over `symbols`, the declarations of one
+    /// rule set's language.
+    fn new(symbols: Vec<&'a SymbolRow>) -> RuleCtx<'a> {
         let mut by_id = HashMap::with_capacity(symbols.len());
         let mut by_qname_exact: HashMap<&str, Vec<usize>> = HashMap::new();
         let mut by_qname_folded: HashMap<String, Vec<usize>> = HashMap::new();
@@ -265,7 +298,7 @@ impl<'a> RuleCtx<'a> {
 
     /// Returns the symbol with canonical ID `id`, if present.
     pub(crate) fn symbol_by_id(&self, id: &str) -> Option<&'a SymbolRow> {
-        self.by_id.get(id).map(|&index| &self.symbols[index])
+        self.by_id.get(id).map(|&index| self.symbols[index])
     }
 
     /// Returns the sole symbol matching `qname` under `kinds`.
@@ -285,7 +318,7 @@ impl<'a> RuleCtx<'a> {
         }?;
         let mut found: Option<&SymbolRow> = None;
         for &index in indices {
-            let row = &self.symbols[index];
+            let row = self.symbols[index];
             if !kinds.is_empty() && !kinds.contains(&row.kind) {
                 continue;
             }
@@ -348,7 +381,7 @@ impl<'a> RuleCtx<'a> {
         member: MemberUse,
     ) -> Option<&'a SymbolRow> {
         let mut found: Option<&SymbolRow> = None;
-        for row in self.symbols {
+        for &row in &self.symbols {
             if row.parent_id.as_deref() != Some(class_id)
                 || !member.accepts(row.kind)
                 || !member_name_matches(row.kind, &row.name, spelling)
@@ -394,30 +427,70 @@ pub struct ResolvedLinks {
 
 /// Resolves every persisted use for one snapshot.
 pub struct Resolver<'a> {
+    /// The PHP rules' view of the snapshot: PHP declarations only (T43).
     ctx: RuleCtx<'a>,
     uses: &'a [UseRow],
     scopes: HashMap<(&'a str, &'a str), ScopeData<'a>>,
+    /// Each file's stored language, which picks its rule set ([`rules_for`]).
+    languages: HashMap<&'a str, &'a str>,
 }
 
 impl<'a> Resolver<'a> {
     /// Builds a resolver over already-loaded snapshot rows.
+    ///
+    /// `files` gives each file's stored language, which decides which rule
+    /// set, if any, may bind a use in it and which declarations that rule set
+    /// sees (T43). A use or declaration in a file `files` does not list, or
+    /// lists with no language, is never bound and never bound to.
     pub fn new(
+        files: &'a [FileRow],
         symbols: &'a [SymbolRow],
         uses: &'a [UseRow],
         scopes: &'a [ScopeRow],
     ) -> Resolver<'a> {
-        let mut ctx = RuleCtx::new(symbols);
+        let languages: HashMap<&str, &str> = files
+            .iter()
+            .filter_map(|file| Some((file.path.as_str(), file.language.as_deref()?)))
+            .collect();
+        let php_symbols = symbols
+            .iter()
+            .filter(|row| languages.get(row.file.as_str()).copied() == Some(PHP))
+            .collect();
+        Resolver::build(languages, php_symbols, uses, scopes)
+    }
+
+    /// A resolver that only reads scope facts ([`Resolver::scope_facts_for`])
+    /// and binds nothing: it knows no file's language, so no rule set applies
+    /// to any use. Its symbol lookups see every declaration, which is safe
+    /// because a scope only names declarations of its own file.
+    pub(crate) fn scope_reader(
+        symbols: &'a [SymbolRow],
+        uses: &'a [UseRow],
+        scopes: &'a [ScopeRow],
+    ) -> Resolver<'a> {
+        Resolver::build(HashMap::new(), symbols.iter().collect(), uses, scopes)
+    }
+
+    fn build(
+        languages: HashMap<&'a str, &'a str>,
+        rule_symbols: Vec<&'a SymbolRow>,
+        uses: &'a [UseRow],
+        scopes: &'a [ScopeRow],
+    ) -> Resolver<'a> {
+        let mut ctx = RuleCtx::new(rule_symbols);
         let mut scope_map = HashMap::with_capacity(scopes.len());
         for row in scopes {
             let parsed =
                 serde_json::from_str::<PersistedScopeFacts>(&row.facts_json).unwrap_or_default();
-            // Snapshot-wide facts (AF3): any scope's parameter lists and
-            // global rebinding facts apply to uses in every file.
-            for list in parsed.parameter_lists {
-                ctx.parameter_lists.insert(list.symbol, list.by_ref);
+            // Snapshot-wide facts (AF3): any PHP scope's parameter lists and
+            // global rebinding facts apply to PHP uses in every file.
+            if languages.get(row.file.as_str()).copied() == Some(PHP) {
+                for list in parsed.parameter_lists {
+                    ctx.parameter_lists.insert(list.symbol, list.by_ref);
+                }
+                ctx.global_names.extend(parsed.global_names);
+                ctx.dynamic_global_write |= parsed.dynamic_global_write;
             }
-            ctx.global_names.extend(parsed.global_names);
-            ctx.dynamic_global_write |= parsed.dynamic_global_write;
             scope_map.insert(
                 (row.file.as_str(), row.scope_key.as_str()),
                 ScopeData {
@@ -443,6 +516,7 @@ impl<'a> Resolver<'a> {
             ctx,
             uses,
             scopes: scope_map,
+            languages,
         }
     }
 
@@ -471,7 +545,8 @@ impl<'a> Resolver<'a> {
     /// Uses are visited in `(file bytes, start_byte, end_byte, ref_kind)` order
     /// so the result is deterministic and independent of input order. A use
     /// with no SQLite ID is skipped: it is not a committed row and cannot be
-    /// the target of a foreign key.
+    /// the target of a foreign key. A use in a file whose language has no rule
+    /// set ([`rules_for`]) is skipped too: no binding and no receiver class.
     ///
     /// A receiver class is recorded under the same conditions the receiver
     /// rules apply before binding (the enclosing class of `$this`/`self`, a
@@ -496,13 +571,17 @@ impl<'a> Resolver<'a> {
             let Some(use_id) = use_row.use_id else {
                 continue;
             };
+            let rules = rules_for(self.languages.get(use_row.file.as_str()).copied());
+            if rules.is_empty() {
+                continue;
+            }
             let facts = self.scope_facts_for(use_row);
             // A use no single namespace block owns has no trustworthy lexical
             // context; never guess one (AF1).
             if facts.namespace_unattributed {
                 continue;
             }
-            let bound = RULES
+            let bound = rules
                 .iter()
                 .find_map(|rule| rule(&self.ctx, use_row, &facts));
             if let Some((target_id, resolution)) = bound {
@@ -623,7 +702,7 @@ pub fn resolve_all_links(store: &Store) -> Result<ResolvedLinks, Error> {
         uses.extend(store.list_uses_for_file(&file.path)?);
         scopes.extend(store.list_scopes_for_file(&file.path)?);
     }
-    let resolver = Resolver::new(&symbols, &uses, &scopes)
+    let resolver = Resolver::new(&files, &symbols, &uses, &scopes)
         .with_unindexed_php_files(unindexed_php_files(&files));
     Ok(resolver.resolve_links())
 }
@@ -1202,6 +1281,20 @@ mod tests {
         assert!(resolve_all(&store).expect("resolve").is_empty());
     }
 
+    /// A PHP `files` row for every path the rows name, as the refresh path
+    /// passes them to [`Resolver::new`].
+    fn php_files(symbols: &[SymbolRow], uses: &[UseRow], scopes: &[ScopeRow]) -> Vec<FileRow> {
+        let mut paths: Vec<&str> = symbols
+            .iter()
+            .map(|row| row.file.as_str())
+            .chain(uses.iter().map(|row| row.file.as_str()))
+            .chain(scopes.iter().map(|row| row.file.as_str()))
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+        paths.into_iter().map(file).collect()
+    }
+
     /// The rows of a namespaced `launch()` call in `App` with a global
     /// `launch` indexed and, optionally, `App\launch` indexed too.
     fn fallback_rows(with_namespaced: bool) -> (Vec<SymbolRow>, Vec<UseRow>, Vec<ScopeRow>) {
@@ -1222,11 +1315,12 @@ mod tests {
     #[test]
     fn global_fallback_is_suppressed_when_a_php_file_is_unindexed() {
         let (symbols, uses, scopes) = fallback_rows(false);
-        let complete = Resolver::new(&symbols, &uses, &scopes).resolve();
+        let files = php_files(&symbols, &uses, &scopes);
+        let complete = Resolver::new(&files, &symbols, &uses, &scopes).resolve();
         assert_eq!(complete.len(), 1);
         assert_eq!(complete[0].target_id, "util.php#launch");
 
-        let partial = Resolver::new(&symbols, &uses, &scopes)
+        let partial = Resolver::new(&files, &symbols, &uses, &scopes)
             .with_unindexed_php_files(true)
             .resolve();
         assert!(partial.is_empty(), "{partial:?}");
@@ -1235,7 +1329,8 @@ mod tests {
     #[test]
     fn indexed_namespaced_function_still_wins_when_a_php_file_is_unindexed() {
         let (symbols, uses, scopes) = fallback_rows(true);
-        let partial = Resolver::new(&symbols, &uses, &scopes)
+        let files = php_files(&symbols, &uses, &scopes);
+        let partial = Resolver::new(&files, &symbols, &uses, &scopes)
             .with_unindexed_php_files(true)
             .resolve();
         assert_eq!(partial.len(), 1);
@@ -1250,10 +1345,113 @@ mod tests {
         let symbols = vec![symbol("util.php", "launch", SymbolKind::Function)];
         let uses = vec![call];
         let scopes = vec![scope("c.php", "top:file", &[], &[])];
-        let bindings = Resolver::new(&symbols, &uses, &scopes)
+        let files = php_files(&symbols, &uses, &scopes);
+        let bindings = Resolver::new(&files, &symbols, &uses, &scopes)
             .with_unindexed_php_files(true)
             .resolve();
         assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].target_id, "util.php#launch");
+    }
+
+    /// A `files` row of language `language` for `path`.
+    fn file_in(path: &str, language: Option<&str>) -> FileRow {
+        let mut row = file(path);
+        row.language = language.map(str::to_string);
+        row
+    }
+
+    /// T43: every PHP rule would bind these TypeScript uses by accident (the
+    /// global function fallback, the class lookup for a `type` use, the
+    /// typed-receiver and `new` rules), but no rule set exists for TypeScript,
+    /// so nothing is bound and no receiver class is recorded.
+    #[test]
+    fn typescript_uses_are_never_bound() {
+        let function = symbol("util.ts", "double", SymbolKind::Function);
+        let class = symbol("svc.ts", "Svc", SymbolKind::Class);
+        let mut method = symbol("svc.ts", "Svc.launch", SymbolKind::Method);
+        method.id = "svc.ts#Svc.launch".to_string();
+        method.name = "launch".to_string();
+        method.lookup_name = "launch".to_string();
+        method.parent_id = Some(class.id.clone());
+        let mut uses = vec![
+            use_row("app.ts", "double", RefKind::Call, None, "top:file", 10),
+            use_row("app.ts", "Svc", RefKind::Type, None, "top:file", 30),
+            use_row("app.ts", "launch", RefKind::Call, Some("svc"), "0:1", 50),
+            use_row(
+                "app.ts",
+                "launch",
+                RefKind::Call,
+                Some("created"),
+                "0:1",
+                70,
+            ),
+        ];
+        uses[2].hint_json =
+            "{\"kind\":\"typed\",\"type_spelling\":\"Svc\",\"origin\":\"parameter\"}".to_string();
+        uses[3].hint_json = "{\"kind\":\"new_expr\",\"class_spelling\":\"Svc\"}".to_string();
+        for (index, row) in uses.iter_mut().enumerate() {
+            row.use_id = Some(index as i64 + 1);
+        }
+        let mut function_scope = scope("app.ts", "0:1", &[], &[]);
+        function_scope.parent_scope_key = Some("top:file".to_string());
+        let scopes = vec![scope("app.ts", "top:file", &[], &[]), function_scope];
+        let symbols = vec![function, class, method];
+        let typescript = vec![
+            file_in("app.ts", Some("typescript")),
+            file_in("svc.ts", Some("typescript")),
+            file_in("util.ts", Some("typescript")),
+        ];
+        let links = Resolver::new(&typescript, &symbols, &uses, &scopes).resolve_links();
+        assert_eq!(links, super::ResolvedLinks::default(), "{links:?}");
+
+        // The same rows labelled PHP bind, so the guard is what stops them.
+        let php = php_files(&symbols, &uses, &scopes);
+        let bound = Resolver::new(&php, &symbols, &uses, &scopes).resolve();
+        assert!(bound.len() >= 2, "{bound:?}");
+
+        // A file with no stored language binds nothing either, and a file the
+        // rows do not list at all is never bound.
+        let unlabelled: Vec<FileRow> = php.iter().map(|row| file_in(&row.path, None)).collect();
+        assert!(
+            Resolver::new(&unlabelled, &symbols, &uses, &scopes)
+                .resolve()
+                .is_empty()
+        );
+        assert!(
+            Resolver::new(&[], &symbols, &uses, &scopes)
+                .resolve()
+                .is_empty()
+        );
+    }
+
+    /// T43: a PHP rule sees only PHP declarations, so a TypeScript function of
+    /// the same name neither becomes a PHP use's target nor makes the PHP
+    /// function ambiguous.
+    #[test]
+    fn php_uses_never_bind_typescript_declarations() {
+        let mut call = use_row("c.php", "launch", RefKind::Call, None, "top:file", 40);
+        call.use_id = Some(1);
+        let uses = vec![call];
+        let scopes = vec![scope("c.php", "top:file", &[], &[])];
+        let files = vec![
+            file_in("c.php", Some("php")),
+            file_in("util.php", Some("php")),
+            file_in("launch.ts", Some("typescript")),
+        ];
+
+        let only_typescript = vec![symbol("launch.ts", "launch", SymbolKind::Function)];
+        assert!(
+            Resolver::new(&files, &only_typescript, &uses, &scopes)
+                .resolve()
+                .is_empty()
+        );
+
+        let both = vec![
+            symbol("launch.ts", "launch", SymbolKind::Function),
+            symbol("util.php", "launch", SymbolKind::Function),
+        ];
+        let bindings = Resolver::new(&files, &both, &uses, &scopes).resolve();
+        assert_eq!(bindings.len(), 1, "{bindings:?}");
         assert_eq!(bindings[0].target_id, "util.php#launch");
     }
 

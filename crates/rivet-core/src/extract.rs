@@ -5,7 +5,9 @@
 //! [`Span`]s and plain strings only, never borrowed Tree-sitter `Node` handles
 //! or database identifiers. T11 added named definitions and parse diagnostics;
 //! T17 adds lexical uses, imports, and receiver hints; T18 adds owned lexical
-//! scope facts. Resolution and persistence are later tasks.
+//! scope facts. T43 adds the TypeScript scope facts: [`LocalBinding`]s in
+//! their [`BindingSpace`], and [`ModuleImport`]s. Resolution and persistence
+//! are later tasks.
 //!
 //! The T17 records derive `serde` so the store can persist a use's
 //! [`UseHint`] as JSON and a scope's [`ScopeFacts`] as JSON without the
@@ -142,7 +144,12 @@ pub enum TypedOrigin {
     #[default]
     Parameter,
     /// A typed property (declared or promoted), read through `$this->name`.
+    /// For TypeScript (T43), a class field or constructor parameter property
+    /// read through `this.name`.
     Property,
+    /// A variable declared with an explicit type annotation (T43, TypeScript:
+    /// `const x: Foo = ...`). The PHP adapter never records it.
+    Variable,
 }
 
 /// One extracted identifier use.
@@ -437,13 +444,103 @@ pub struct AnonymousSupertype {
     pub span: Span,
 }
 
+/// Which declaration space a lexically bound name occupies (T43).
+///
+/// TypeScript keeps values and types apart: a local `const Foo` hides an
+/// imported `Foo` from a value use but not from a `type` use, and a type
+/// parameter `T` hides only types. The PHP adapter records no
+/// [`LocalBinding`], so it never uses this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingSpace {
+    /// A value only: a variable, parameter, `catch` parameter, function, or
+    /// enum member.
+    Value,
+    /// A type only: an interface, a type alias, a type parameter, or an
+    /// `infer` or mapped-type name.
+    Type,
+    /// Both a value and a type (or namespace): a class, an enum, a namespace,
+    /// or an `import X = ...` alias.
+    Both,
+}
+
+/// One name a lexical scope binds directly (T43, TypeScript).
+///
+/// Every declared name is recorded, whether or not it is a symbol: a local
+/// `const`, a parameter, a type parameter, a top-level function. A name
+/// binds for the whole scope, wherever in the scope it is declared, so the
+/// span says where the declaration is, not where the binding starts.
+/// Import bindings are not locals; they are [`ModuleImport`]s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalBinding {
+    /// The declared name exactly as written.
+    pub name: String,
+    /// The declaration space the name occupies.
+    pub space: BindingSpace,
+    /// The declared name's byte range.
+    pub span: Span,
+}
+
+/// The form of one TypeScript import or re-export (T43).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleImportKind {
+    /// `import { a } from "m"`, `import { a as b } from "m"`, and
+    /// `import { default as b } from "m"`: binds one named export.
+    Named,
+    /// `import b from "m"`: binds the default export.
+    Default,
+    /// `import * as b from "m"`: binds the module namespace object.
+    Namespace,
+    /// `import b = require("m")`: CommonJS interop, which v0.1 never resolves.
+    Require,
+    /// `export { a } from "m"` and `export { a as b } from "m"`: re-exports one
+    /// export and binds no local name.
+    ReExport,
+    /// `export * from "m"` and `export * as b from "m"`: re-exports every
+    /// export and binds no local name.
+    ReExportAll,
+}
+
+/// One TypeScript import binding or re-export, as written (T43).
+///
+/// The adapter records the specifier exactly as written, relative or not
+/// (`./util`, `@/util`, `lodash`), and never resolves it: which module a
+/// specifier names, and which declaration an export names, is resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleImport {
+    /// The import or re-export form.
+    pub kind: ModuleImportKind,
+    /// The local binding name (the alias when there is one), or `None` for a
+    /// re-export, which binds no local name.
+    pub local: Option<String>,
+    /// The export name taken from the module as written (`double`; `default`
+    /// for a default import), or `None` for a namespace import, a `require`
+    /// import, and `export *`.
+    pub imported: Option<String>,
+    /// For a re-export, the name this module exports it under (`twice` in
+    /// `export { double as twice } from "./util"`; `ns` in `export * as ns`);
+    /// `None` for an import and for a bare `export *`.
+    pub exported: Option<String>,
+    /// The module specifier exactly as written, without its quotes.
+    pub specifier: String,
+    /// Whether the binding is type-only: `import type`, `export type`, or a
+    /// `type` modifier on one specifier.
+    pub type_only: bool,
+    /// The span of the identifier the `import` use sits on: the local binding
+    /// for an import, the re-exported name for a re-export specifier, the
+    /// exported name of `export * as ns`, and the `*` of a bare `export *`.
+    pub span: Span,
+}
+
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
 /// `new_bindings`, `call_args`, `unanalysable`, `namespace_unattributed`,
 /// `class_constant_accesses`, `global_scope`, `call_sites`, `goto_present`,
 /// `global_names`, `dynamic_global_write`, `parameter_lists`, `supertypes`,
-/// `anonymous_supertypes`, and `declares`.
+/// `anonymous_supertypes`, and `declares` for a PHP scope, and `locals`,
+/// `module_imports`, and `declares` for a TypeScript scope (T43).
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -525,7 +622,25 @@ pub struct ScopeFacts {
     /// uses belong to this scope (LR2), in source order.
     #[serde(default)]
     pub anonymous_supertypes: Vec<AnonymousSupertype>,
+    /// Every name this scope binds directly, in source order (T43,
+    /// TypeScript). A use's scope chain is its scope, then each
+    /// `parent_scope_key`; the nearest scope that binds the use's name in the
+    /// use's declaration space holds the declaration it names, so a local
+    /// recorded here hides a same-name import of an enclosing scope.
+    #[serde(default)]
+    pub locals: Vec<LocalBinding>,
+    /// TypeScript import bindings and re-exports written directly in this
+    /// scope, in source order (T43): the module scope, or the body of a
+    /// string-named ambient module.
+    #[serde(default)]
+    pub module_imports: Vec<ModuleImport>,
     /// Indices of declarations introduced directly in this scope.
+    ///
+    /// For PHP, every symbol, members under their class-like's scope. For
+    /// TypeScript (T43), the symbols among this scope's [`locals`](Self::locals):
+    /// a top-level or namespace-member declaration, or an enum member in its
+    /// enum's scope. A class or interface member is in no TypeScript scope's
+    /// `declares`, because a bare name never reaches it.
     pub declares: Vec<usize>,
 }
 
@@ -551,7 +666,10 @@ pub struct ExtractedFile {
     pub symbols: Vec<ExtractedSymbol>,
     /// Extracted identifier uses, sorted deterministically.
     pub uses: Vec<ExtractedUse>,
-    /// Import bindings created by `use` declarations, in source order.
+    /// Import bindings created by PHP `use` declarations, in source order.
+    /// TypeScript import bindings are [`ScopeFacts::module_imports`] of the
+    /// scope they are written in (T43); the TypeScript adapter leaves this
+    /// empty.
     pub imports: Vec<ExtractedImport>,
     /// Lexical scopes with owned facts, sorted by `scope_key`.
     pub scopes: Vec<ExtractedScope>,

@@ -5,8 +5,7 @@
 //! which files a build can handle. T41 adds [`LanguageId::has_extractor`], the
 //! one switch that says whether a language's files can be indexed. The PHP
 //! adapter lives in [`php`]. The TypeScript/TSX adapter lives in `typescript`
-//! (T42 definitions); it is not yet reachable from indexing, because its
-//! switch stays off until T43 adds uses.
+//! (T42 definitions, T43 uses, scopes, and imports); T43 turns its switch on.
 
 use std::path::Path;
 
@@ -57,18 +56,18 @@ impl LanguageId {
     /// CLI's refresh and cached-coverage paths consult this method directly;
     /// nothing else decides it.
     ///
-    /// TypeScript and TSX parse with their grammars (T41), and T42 adds their
-    /// definition extractor (`typescript::extract`), but their arm stays
-    /// `false`: indexing definitions without uses would make `refs` return
-    /// misleadingly empty results. T43 adds uses and imports, flips this arm,
-    /// and dispatches them to the adapter in `rivet_parser` in the same
-    /// change. `rivet_parser`'s tests fail if the two disagree.
+    /// TypeScript and TSX parse with their grammars (T41), T42 adds their
+    /// definition extractor, and T43 adds uses, scopes, and imports and turns
+    /// their arm on, together with their dispatch arm in `rivet_parser`.
+    /// `rivet_parser`'s tests fail if the two disagree. Every compiled
+    /// language now has an adapter; the switch stays the one place a future
+    /// language without one is kept unindexed.
     pub const fn has_extractor(self) -> bool {
         match self {
             #[cfg(feature = "lang-php")]
             LanguageId::Php => true,
             #[cfg(feature = "lang-typescript")]
-            LanguageId::Typescript | LanguageId::Tsx => false,
+            LanguageId::Typescript | LanguageId::Tsx => true,
         }
     }
 }
@@ -171,6 +170,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **12** — T43: TypeScript and TSX files are indexed. Their facts are new
+///   (symbols with case-sensitive lookup names, uses, scopes with
+///   `locals` and `module_imports`, and `UseHint::Typed` with the new
+///   `TypedOrigin::Variable`), and a cache written before T43 recorded every
+///   `.ts`/`.tsx` file as `unsupported` with no content hash. Metadata-mode
+///   refresh would otherwise reuse that stored status for an unchanged file,
+///   so the bump makes every enabled-language file reparse.
 /// - **11** — LR2: `ScopeFacts` gained `anonymous_supertypes`, the names in
 ///   each anonymous class's `extends`/`implements` clauses.
 /// - **10** — T36d: the names in a class's `extends`/`implements` clauses, an
@@ -221,13 +227,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=11";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=12";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=11";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=12";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=11";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=12";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";
@@ -263,8 +269,8 @@ pub fn grammar(id: LanguageId) -> tree_sitter::Language {
 /// Returns `None` when the language has no collapsed-form renderer, so a
 /// caller can treat the signature form as unavailable rather than emit an
 /// empty one. TypeScript has none yet: T42 records each definition's own
-/// signature, not the container form, and no TypeScript symbol is indexed
-/// until T43 flips [`LanguageId::has_extractor`].
+/// signature, not the container form, so a TypeScript `context` segment has
+/// no signature form (its full form is still available).
 pub fn signature_summary(
     language: LanguageId,
     symbol: &rivet_core::ExtractedSymbol,
@@ -412,16 +418,16 @@ mod tests {
         }
     }
 
-    /// Only PHP is indexed. TypeScript and TSX have a definition extractor
-    /// (T42), but their switch stays off until T43 adds uses.
+    /// Every compiled language is indexed: PHP, and TypeScript and TSX from
+    /// T43.
     #[test]
-    fn only_php_has_an_extractor() {
+    fn every_compiled_language_has_an_extractor() {
         #[cfg(feature = "lang-php")]
         assert!(super::LanguageId::Php.has_extractor());
         #[cfg(feature = "lang-typescript")]
         {
-            assert!(!super::LanguageId::Typescript.has_extractor());
-            assert!(!super::LanguageId::Tsx.has_extractor());
+            assert!(super::LanguageId::Typescript.has_extractor());
+            assert!(super::LanguageId::Tsx.has_extractor());
         }
     }
 

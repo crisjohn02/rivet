@@ -1,13 +1,16 @@
 //! Integration tests for AF5: contract and coverage honesty.
 //!
 //! Each test drives the built binary against a temporary repository and
-//! asserts exact JSON values for one audit item: TypeScript files without an
-//! extractor are not reported as indexed (finding 14), index-dependent errors
-//! carry `index` once a snapshot was acquired (15), `updated` counts files
-//! whose facts were regenerated (16), the non-UTF-8 path diagnostic is
-//! repository-relative (17), and `--no-refresh` refuses a cache built by other
-//! extractor or resolver rules (the audit's second unverified suspicion). T41
-//! adds that indexing the authored TypeScript fixture changes nothing.
+//! asserts exact JSON values for one audit item: a file is reported as indexed
+//! only when an extractor produced its facts (finding 14; since T43 TypeScript
+//! has one, so a valid `.ts`/`.tsx` file is indexed and a broken one is a
+//! parse error), index-dependent errors carry `index` once a snapshot was
+//! acquired (15), `updated` counts files whose facts were regenerated (16),
+//! the non-UTF-8 path diagnostic is repository-relative (17), and
+//! `--no-refresh` refuses a cache built by other extractor or resolver rules
+//! (the audit's second unverified suspicion). T41 added that indexing the
+//! authored TypeScript fixture changed nothing; T43 replaces that with PHP
+//! answers staying unchanged while the TypeScript files are indexed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -144,15 +147,6 @@ fn set_meta(root: &Path, key: &str, value: &str) {
     store.set_meta(key, value).expect("set meta");
 }
 
-/// The diagnostic an enabled-language file without an extractor reports.
-fn no_extractor(file: &str) -> Value {
-    json!({
-        "file": file,
-        "code": "unsupported_language",
-        "detail": "typescript extraction is not implemented in this build",
-    })
-}
-
 /// A Git root holding one valid PHP file; each test adds its other files.
 fn typescript_repo(label: &str) -> TempDir {
     let temp = git_repo(label);
@@ -161,11 +155,12 @@ fn typescript_repo(label: &str) -> TempDir {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 14: a TypeScript file is not indexed while nothing extracts it.
+// Finding 14: a file counts as indexed only when an extractor produced its
+// facts. Since T43 TypeScript has an extractor.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn invalid_typescript_file_is_unsupported_not_indexed() {
+fn invalid_typescript_file_is_a_parse_error() {
     let temp = typescript_repo("ts-invalid");
     write(
         temp.path(),
@@ -181,18 +176,26 @@ fn invalid_typescript_file_is_unsupported_not_indexed() {
             "files_seen": 2,
             "files_indexed": 1,
             "skipped": {
-                "unsupported": 1,
+                "unsupported": 0,
                 "binary": 0,
                 "size": 0,
                 "encoding": 0,
-                "parse_error": 0,
+                "parse_error": 1,
                 "resource_limit": 0,
             },
         })
     );
-    assert_eq!(
-        value["index"]["diagnostics"],
-        json!({"total": 1, "truncated": false, "items": [no_extractor("src/bad.ts")]})
+    let items = value["index"]["diagnostics"]["items"]
+        .as_array()
+        .expect("items");
+    assert_eq!(items.len(), 1, "{value}");
+    assert_eq!(items[0]["file"], "src/bad.ts");
+    assert_eq!(items[0]["code"], "parse_error");
+    assert!(
+        items[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains(" at byte ")),
+        "{value}"
     );
     assert_eq!(value["symbols"], 1);
 
@@ -206,13 +209,18 @@ fn invalid_typescript_file_is_unsupported_not_indexed() {
     assert_eq!(cached["index"]["freshness"], "cached");
     assert_eq!(cached["index"]["coverage"], value["index"]["coverage"]);
     assert_eq!(
-        cached["index"]["diagnostics"],
-        value["index"]["diagnostics"]
+        cached["index"]["diagnostics"]["items"][0]["code"],
+        "parse_error"
     );
+
+    // Addressing the broken file is a parse failure (exit 6), never
+    // `unsupported_language`.
+    let error = parse_error(&run(temp.path(), &["symbol", "src/bad.ts:1", "--json"]), 6);
+    assert_eq!(error["error"], "parse_failure");
 }
 
 #[test]
-fn valid_typescript_file_is_unsupported_not_indexed() {
+fn valid_typescript_files_are_indexed() {
     let temp = typescript_repo("ts-valid");
     write(
         temp.path(),
@@ -226,15 +234,28 @@ fn valid_typescript_file_is_unsupported_not_indexed() {
     );
 
     let value = parse_success(&run(temp.path(), &["index", "--json"]));
-    assert_eq!(value["index"]["coverage"]["complete"], false);
-    assert_eq!(value["index"]["coverage"]["files_seen"], 3);
-    assert_eq!(value["index"]["coverage"]["files_indexed"], 1);
-    assert_eq!(value["index"]["coverage"]["skipped"]["unsupported"], 2);
-    assert_eq!(value["index"]["coverage"]["skipped"]["parse_error"], 0);
     assert_eq!(
-        value["index"]["diagnostics"]["items"],
-        json!([no_extractor("src/ok.ts"), no_extractor("src/view.tsx")])
+        value["index"]["coverage"],
+        json!({
+            "complete": true,
+            "files_seen": 3,
+            "files_indexed": 3,
+            "skipped": {
+                "unsupported": 0,
+                "binary": 0,
+                "size": 0,
+                "encoding": 0,
+                "parse_error": 0,
+                "resource_limit": 0,
+            },
+        })
     );
+    assert_eq!(
+        value["index"]["diagnostics"],
+        json!({"total": 0, "truncated": false, "items": []})
+    );
+    // `one`, and `Ok`, `Ok.run`, and `View`.
+    assert_eq!(value["symbols"], 4);
 
     // Metadata mode reports the same coverage on a no-change refresh.
     let metadata = parse_success(&run(
@@ -250,6 +271,11 @@ fn valid_typescript_file_is_unsupported_not_indexed() {
         (&metadata["updated"], &metadata["unchanged"]),
         (&json!(0), &json!(3))
     );
+    // Both grammar variants are addressable.
+    for query in ["src/ok.ts#Ok.run", "src/view.tsx:1"] {
+        let found = parse_success(&run(temp.path(), &["symbol", query, "--json"]));
+        assert_eq!(found["symbol"]["language"], "typescript", "{query}");
+    }
 }
 
 #[test]
@@ -333,68 +359,64 @@ fn without_index(output: &Output) -> Value {
     value
 }
 
-// T41: adding the TypeScript fixture, which parses with its grammars but has
-// no extractor yet, changes nothing rivet reports for PHP, and its files stay
-// `unsupported` with `unsupported_language` diagnostics.
+// T43: adding the TypeScript fixture indexes its twelve `.ts`/`.d.ts`/`.tsx`
+// files and reports its broken one as a parse error, and changes nothing rivet
+// reports for PHP.
 #[test]
-fn typescript_fixture_leaves_indexing_unchanged() {
-    let php_only = fixture_repo("t41-php");
-    let mixed = mixed_fixture_repo("t41-mixed");
+fn typescript_fixture_is_indexed_beside_unchanged_php() {
+    let php_only = fixture_repo("t43-php");
+    let mixed = mixed_fixture_repo("t43-mixed");
     let before = parse_success(&run(php_only.path(), &["index", "--json"]));
     let value = parse_success(&run(mixed.path(), &["index", "--json"]));
 
-    // 13 `.ts`/`.d.ts`/`.tsx` files, the broken one included, are unsupported
-    // with a diagnostic; README.md, tsconfig.json, `.js`, and `.mts` are
-    // ordinary unsupported files, counted only. Nothing is a parse error.
+    // README.md (twice), tsconfig.json, `.js`, and `.mts` are ordinary
+    // unsupported files, counted only; `src/broken.ts` is the one parse error.
     assert_eq!(
         value["index"]["coverage"],
         json!({
             "complete": false,
             "files_seen": 27,
-            "files_indexed": 9,
+            "files_indexed": 21,
             "skipped": {
-                "unsupported": 18,
+                "unsupported": 5,
                 "binary": 0,
                 "size": 0,
                 "encoding": 0,
-                "parse_error": 0,
+                "parse_error": 1,
                 "resource_limit": 0,
             },
         })
     );
-    let typescript = [
-        "typescript/src/anonymous.ts",
-        "typescript/src/barrel.ts",
-        "typescript/src/broken.ts",
-        "typescript/src/components/App.tsx",
-        "typescript/src/components/Button.tsx",
-        "typescript/src/models.ts",
-        "typescript/src/pick.ts",
-        "typescript/src/pick/index.ts",
-        "typescript/src/report.ts",
-        "typescript/src/services/survey.ts",
-        "typescript/src/types.d.ts",
-        "typescript/src/unresolved.ts",
-        "typescript/src/util.ts",
-    ];
-    let items: Vec<Value> = typescript.iter().map(|file| no_extractor(file)).collect();
-    assert_eq!(
-        value["index"]["diagnostics"],
-        json!({"total": 13, "truncated": false, "items": items})
-    );
+    let items = value["index"]["diagnostics"]["items"]
+        .as_array()
+        .expect("items");
+    assert_eq!(value["index"]["diagnostics"]["total"], 1, "{value}");
+    assert_eq!(items[0]["file"], "typescript/src/broken.ts");
+    assert_eq!(items[0]["code"], "parse_error");
 
-    // PHP facts and answers are the PHP-only repository's.
+    // The TypeScript fixture adds its 82 gold declarations and 138 uses, and
+    // no binding: TypeScript uses stay unresolved until T44/T45.
     assert_eq!(
-        (&value["symbols"], &value["uses"], &value["bindings"]),
-        (&before["symbols"], &before["uses"], &before["bindings"])
-    );
-    assert_eq!(
-        (&value["symbols"], &value["uses"], &value["bindings"]),
+        (&before["symbols"], &before["uses"], &before["bindings"]),
         (&json!(50), &json!(14), &json!(13))
     );
+    assert_eq!(
+        (&value["symbols"], &value["uses"], &value["bindings"]),
+        (&json!(132), &json!(152), &json!(13))
+    );
+
+    // PHP answers are the PHP-only repository's.
     for args in [
         &["refs", "App\\Services\\SurveyService::launch", "--json"][..],
+        &[
+            "refs",
+            "App\\Services\\SurveyService::launch",
+            "--mode",
+            "candidates",
+            "--json",
+        ][..],
         &["symbol", "App\\Reporting\\ReportService", "--json"][..],
+        &["context", "App\\Services\\SurveyService::launch", "--json"][..],
     ] {
         assert_eq!(
             without_index(&run(mixed.path(), args)),
@@ -403,24 +425,29 @@ fn typescript_fixture_leaves_indexing_unchanged() {
         );
     }
 
-    // A TypeScript file, even the broken one, is `unsupported_language`
-    // (exit 7), never a parse failure, while no extractor exists.
-    for query in [
-        "typescript/src/broken.ts:2",
-        "typescript/src/util.ts#double",
-    ] {
-        let error = parse_error(&run(mixed.path(), &["symbol", query, "--json"]), 7);
-        assert_eq!(error["error"], "unsupported_language", "{query}");
-        assert_eq!(error["language"], "typescript", "{query}");
-    }
+    // The broken file is a parse failure (exit 6); an indexed one resolves.
+    let error = parse_error(
+        &run(
+            mixed.path(),
+            &["symbol", "typescript/src/broken.ts:2", "--json"],
+        ),
+        6,
+    );
+    assert_eq!(error["error"], "parse_failure");
+    let found = parse_success(&run(
+        mixed.path(),
+        &["symbol", "typescript/src/util.ts#double", "--json"],
+    ));
+    assert_eq!(found["symbol"]["kind"], "function");
+    assert_eq!(found["symbol"]["language"], "typescript");
 
-    // The human coverage line names the diagnostics by code (CV1).
+    // The human coverage line names the one diagnostic (CV1).
     let human = run(mixed.path(), &["index"]);
     assert_eq!(human.status.code(), Some(0));
     assert!(
         String::from_utf8_lossy(&human.stdout).ends_with(
-            "coverage incomplete: 9/27 files indexed; skipped 18 unsupported; \
-             13 diagnostics (13 unsupported_language)\n"
+            "coverage incomplete: 21/27 files indexed; skipped 5 unsupported, 1 parse_error; \
+             1 diagnostic: typescript/src/broken.ts (parse_error)\n"
         ),
         "{}",
         String::from_utf8_lossy(&human.stdout)

@@ -1,4 +1,5 @@
-//! T42 TypeScript/TSX named-definition extraction: adversarial cases.
+//! T42 TypeScript/TSX named-definition extraction: adversarial cases. T43's
+//! use, scope, and import cases are in `typescript_uses.rs`.
 //!
 //! The authored fixture is compared with its gold in `typescript_gold.rs`.
 //! These tests pin the rules the fixture does not reach on its own: overload
@@ -139,8 +140,33 @@ fn check_invariants(source: &str, extracted: &ExtractedFile) {
             );
         }
     }
-    assert!(extracted.uses.is_empty() && extracted.imports.is_empty());
-    assert!(extracted.scopes.is_empty());
+    // T43: every use is its spelling's bytes, in a recorded scope whose
+    // parent chain reaches the module scope; PHP's import list stays empty.
+    assert!(extracted.imports.is_empty());
+    let keys: std::collections::BTreeMap<&str, Option<&str>> = extracted
+        .scopes
+        .iter()
+        .map(|scope| (scope.scope_key.as_str(), scope.parent_scope_key.as_deref()))
+        .collect();
+    for use_ in &extracted.uses {
+        assert_eq!(slice(source, use_.span), use_.spelling, "{use_:?}");
+        let mut key = Some(use_.scope_key.as_str());
+        let mut depth = 0;
+        while let Some(current) = key {
+            assert!(keys.contains_key(current), "{use_:?}: no scope {current}");
+            key = keys[current];
+            depth += 1;
+            assert!(depth <= keys.len(), "{use_:?}: scope cycle");
+        }
+        if let Some(container) = use_.containing_symbol_index {
+            let container = &symbols[container];
+            assert!(
+                container.span.start_byte() <= use_.span.start_byte()
+                    && use_.span.end_byte() <= container.span.end_byte(),
+                "{use_:?}"
+            );
+        }
+    }
 }
 
 /// An overload set with an implementation is one symbol: the
