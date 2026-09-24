@@ -275,6 +275,17 @@ impl RefreshMode {
 ///
 /// History, newest first:
 ///
+/// - **php-rules-v4;ts-rules-v1** — T44: the first TypeScript rules. Only
+///   TypeScript's rules changed: direct relative named, aliased, default, and
+///   `import type` imports bind to the declaration the module exports
+///   (following the module's own `export { x as a }` renames); a namespace
+///   import's `ns.member` binds to the export `member`; and a use lexically
+///   bound, with shadowing and value/type spaces accounted for, to one
+///   module-local declaration in its own file binds to it; all `exact`.
+///   Re-exports, `export *`, path aliases, packages, `require`, ambiguous or
+///   unindexed modules, globals, and receivers stay unresolved, and no
+///   TypeScript use gets a receiver class. The PHP rules are exactly
+///   php-rules-v4's, so PHP bindings are unchanged.
 /// - **php-rules-v4** — T43: resolution dispatches on each file's stored
 ///   language (`rivet_index::resolve`'s rule table). The PHP rules bind only
 ///   uses in PHP files and see only PHP declarations, so a TypeScript use is
@@ -297,7 +308,7 @@ impl RefreshMode {
 ///   binding nothing (AF4).
 /// - **php-rules-v1** — T19: the first real binding rules (imports and
 ///   functions), later extended by T20/T21 receivers under the same value.
-const RESOLVER_FINGERPRINT: &str = "php-rules-v4";
+const RESOLVER_FINGERPRINT: &str = "php-rules-v4;ts-rules-v1";
 
 /// The `meta` key recording whether the committed bindings were resolved with
 /// the global function fallback suppressed because an enabled PHP file was not
@@ -857,8 +868,8 @@ fn refresh_inventory(
     }
     let (links, binding_count) = if resolve_needed {
         // Each file's language picks the rule set that may bind its uses
-        // (T43): PHP rules for PHP uses over PHP declarations, and none yet
-        // for TypeScript.
+        // (T43): PHP rules for PHP uses over PHP declarations, TypeScript
+        // rules for TypeScript uses over TypeScript declarations (T44).
         let links = rivet_index::Resolver::new(&files, &symbols, &uses, &scopes)
             .with_unindexed_php_files(php_unindexed)
             .resolve_links();
@@ -1377,21 +1388,27 @@ fn declared_ids<'a>(declares: &[usize], ids: &'a [String]) -> Vec<&'a str> {
 }
 
 /// TypeScript scope rows (T43): each scope's bound names, its import
-/// bindings and re-exports, and the canonical IDs of the symbols among its
-/// names. No PHP-only field is written.
+/// bindings and re-exports, its module's own exports, the spans of its
+/// value-position `type` uses, and whether it is an ambient module body
+/// (T44), and the canonical IDs of the symbols among its names. No PHP-only
+/// field is written.
 #[cfg(feature = "lang-typescript")]
 fn typescript_scope_rows(
     path: &str,
     extracted: &rivet_core::ExtractedFile,
     ids: &[String],
 ) -> Vec<ScopeRow> {
-    use rivet_core::extract::{LocalBinding, ModuleImport};
+    use rivet_core::Span;
+    use rivet_core::extract::{LocalBinding, ModuleExport, ModuleImport};
 
     /// The exact persisted `scopes.facts_json` shape of a TypeScript scope.
     #[derive(serde::Serialize)]
     struct PersistedScopeFacts<'a> {
         locals: &'a [LocalBinding],
         module_imports: &'a [ModuleImport],
+        module_exports: &'a [ModuleExport],
+        value_type_uses: &'a [Span],
+        ambient_module: bool,
         declares: Vec<&'a str>,
     }
 
@@ -1402,6 +1419,9 @@ fn typescript_scope_rows(
             let facts = PersistedScopeFacts {
                 locals: &scope.facts.locals,
                 module_imports: &scope.facts.module_imports,
+                module_exports: &scope.facts.module_exports,
+                value_type_uses: &scope.facts.value_type_uses,
+                ambient_module: scope.facts.ambient_module,
                 declares: declared_ids(&scope.facts.declares, ids),
             };
             ScopeRow {

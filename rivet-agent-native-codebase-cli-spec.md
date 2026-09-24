@@ -395,7 +395,7 @@ Apply the following only within supported lexical scopes:
 1. `this` / `self` / `$this` inside a class body → `scoped`.
 2. A local assigned from `new Foo(...)` before the use, with no intervening reassignment or uncertain control flow → `scoped`.
 3. A visible explicit parameter/property/variable type → `scoped`.
-4. A direct import with a supported module/export lookup and no shadowing → `exact` for the imported declaration; member access still requires receiver evidence.
+4. A direct import with a supported module/export lookup and no shadowing → `exact` for the imported declaration; member access still requires receiver evidence. A TypeScript namespace import's `ns.member` is a lexical module-qualified name, not member access on an object, so the receiver-evidence clause does not apply: it binds `member` to the declaration the module exports under that name → `exact`, and only that member (`ns.member.deeper` binds `member` alone).
 5. Unique spelling across the index → `name_match`, never an automatic tier upgrade.
 
 Reject conflicting hints and multiple candidates. No inferred types, inheritance traversal for binding, interface-to-implementation mapping, PHP late-static dispatch resolution, or TypeScript path-alias/re-export/package resolution in v0.1. Declared supertypes are stored, but only reference-mode exclusion (§11.5) reads them; they never bind a use or change a tier. Unsupported forms stay visible as candidates; the language support matrix in [ADDING-A-LANGUAGE](docs/ADDING-A-LANGUAGE.md) defines the boundary.

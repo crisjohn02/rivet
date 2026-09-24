@@ -6,8 +6,10 @@
 //! or database identifiers. T11 added named definitions and parse diagnostics;
 //! T17 adds lexical uses, imports, and receiver hints; T18 adds owned lexical
 //! scope facts. T43 adds the TypeScript scope facts: [`LocalBinding`]s in
-//! their [`BindingSpace`], and [`ModuleImport`]s. Resolution and persistence
-//! are later tasks.
+//! their [`BindingSpace`], and [`ModuleImport`]s. T44 adds each module's
+//! [`ModuleExport`]s and the `type` uses that name values
+//! ([`ScopeFacts::value_type_uses`]). Resolution and persistence are later
+//! tasks.
 //!
 //! The T17 records derive `serde` so the store can persist a use's
 //! [`UseHint`] as JSON and a scope's [`ScopeFacts`] as JSON without the
@@ -533,6 +535,39 @@ pub struct ModuleImport {
     pub span: Span,
 }
 
+/// One name a TypeScript module exports from its own module scope (T44).
+///
+/// Recorded for `export` on a declaration (one entry per declared name),
+/// `export default` on a named declaration, `export default <identifier>`,
+/// and each specifier of a local `export { a, b as c, d as default }`.
+/// `export default <expression>` and an anonymous default export are recorded
+/// with no [`local`](Self::local): they export a value no declaration
+/// identifies. Re-exports (`export { a } from "m"`, `export * from "m"`) are
+/// [`ModuleImport`]s, not entries here, and `export =` and `export as
+/// namespace` are not ES exports, so neither is recorded. Like a
+/// [`ModuleImport`], the entry records names only: which declaration a local
+/// name identifies is resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleExport {
+    /// The name importers use: the declared name, the alias of
+    /// `export { a as b }`, or `default`.
+    pub exported: String,
+    /// The module-scope name the export refers to, exactly as written: the
+    /// declared name, `a` in `export { a as b }`, or the identifier of
+    /// `export default a`. `None` when the export identifies no declaration:
+    /// `export default <expression>` or an anonymous default class or
+    /// function.
+    pub local: Option<String>,
+    /// Whether the export is type-only: `export type { a }`, or a `type`
+    /// modifier on one specifier.
+    pub type_only: bool,
+    /// The span of [`local`](Self::local) where the export statement writes
+    /// it (the declared name, or the identifier after `export default`, or
+    /// the local name of a specifier); the `default` keyword when there is no
+    /// local name.
+    pub span: Span,
+}
+
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
@@ -540,7 +575,9 @@ pub struct ModuleImport {
 /// `class_constant_accesses`, `global_scope`, `call_sites`, `goto_present`,
 /// `global_names`, `dynamic_global_write`, `parameter_lists`, `supertypes`,
 /// `anonymous_supertypes`, and `declares` for a PHP scope, and `locals`,
-/// `module_imports`, and `declares` for a TypeScript scope (T43).
+/// `module_imports`, `module_exports`, `value_type_uses`, `ambient_module`,
+/// and `declares` for a TypeScript scope (T43; T44 adds `module_exports`,
+/// `value_type_uses`, and `ambient_module`).
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -634,13 +671,40 @@ pub struct ScopeFacts {
     /// string-named ambient module.
     #[serde(default)]
     pub module_imports: Vec<ModuleImport>,
+    /// What the module whose scope this is exports from its own
+    /// declarations, in source order (T44, TypeScript): recorded only in the
+    /// module scope and in the body of a string-named ambient module, never
+    /// for a namespace member's `export` or inside `declare global`.
+    #[serde(default)]
+    pub module_exports: Vec<ModuleExport>,
+    /// The name span of every [`RefKind::Type`] use recorded in this scope
+    /// whose name is looked up among values rather than types, in source
+    /// order (T44, TypeScript): a `new` target, the class operand of
+    /// `instanceof`, the operand of a type-position `typeof`, and a class's
+    /// `extends` expression. T43 records all of them as `type` uses, as PHP
+    /// does, but in TypeScript each names a value: `typeof Foo` beside an
+    /// `interface Foo` and a `const Foo` names the const.
+    #[serde(default)]
+    pub value_type_uses: Vec<Span>,
+    /// True for the body of a string-named ambient module (`declare module
+    /// "x" { ... }`, T44, TypeScript). Such a body also sees the exports of
+    /// the module it declares or augments, which the index cannot always
+    /// know, so a name the body does not bind itself is never looked up past
+    /// it.
+    #[serde(default)]
+    pub ambient_module: bool,
     /// Indices of declarations introduced directly in this scope.
     ///
     /// For PHP, every symbol, members under their class-like's scope. For
-    /// TypeScript (T43), the symbols among this scope's [`locals`](Self::locals):
-    /// a top-level or namespace-member declaration, or an enum member in its
-    /// enum's scope. A class or interface member is in no TypeScript scope's
-    /// `declares`, because a bare name never reaches it.
+    /// TypeScript (T43), the module-local symbols among this scope's
+    /// [`locals`](Self::locals): a top-level or namespace-member declaration,
+    /// or an enum member in its enum's scope. A class or interface member is
+    /// in no TypeScript scope's `declares`, because a bare name never reaches
+    /// it. Since T44 a global declaration is in no scope's `declares` either:
+    /// every declaration of a script file (one with no top-level `import` or
+    /// `export`) and every declaration inside `declare global`, because a
+    /// global can merge with declarations in other files, indexed or not. Its
+    /// name is still a local, so it still hides an outer binding.
     pub declares: Vec<usize>,
 }
 

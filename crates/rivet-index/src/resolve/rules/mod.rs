@@ -3,7 +3,13 @@
 //! T19 provides [`imports`] and [`functions`]. T20 adds [`receivers`] and T21
 //! adds [`new_expr`]; each is registered in `resolve/mod.rs` in that order.
 //! [`rebinding`] is not a rule: it holds the local-variable rebinding checks
-//! that [`receivers`] and [`new_expr`] share (AF3).
+//! that [`receivers`] and [`new_expr`] share (AF3). These are PHP's rules.
+//!
+//! T44 adds the TypeScript rule set, registered separately under the
+//! `typescript` language: [`ts_lexical`] (direct imports and same-file
+//! lexical bindings) and [`ts_namespace`] (namespace-import members).
+//! [`ts_scopes`] is not a rule: it holds the scope-chain, module-lookup, and
+//! export lookups both share.
 
 pub(crate) mod functions;
 pub(crate) mod imports;
@@ -11,6 +17,9 @@ pub(crate) mod new_expr;
 pub(crate) mod php_builtins;
 pub(crate) mod rebinding;
 pub(crate) mod receivers;
+pub(crate) mod ts_lexical;
+pub(crate) mod ts_namespace;
+pub(crate) mod ts_scopes;
 
 use std::collections::BTreeSet;
 

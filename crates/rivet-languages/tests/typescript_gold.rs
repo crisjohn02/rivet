@@ -23,9 +23,12 @@
 //! alike, with the extracted symbols. T43's harness,
 //! [`t43_entries_match_the_extractor`], compares every `[[use]]` and
 //! `[[not_a_use]]` with the extracted uses, and requires the extracted uses of
-//! the focus names to be exactly the gold's. `tests/gold/check_gold.py`
-//! checks only the recorded spans and names these tests (and, for T43, the
-//! CLI's `typescript_index.rs`) as the owners of the comparison.
+//! the focus names to be exactly the gold's. T44's `[[binding]]` entries need
+//! the resolver, so their harnesses are `rivet-index/tests/typescript_gold.rs`
+//! (extractor and resolver) and the CLI's `typescript_index.rs` (end to end);
+//! this file checks only that they are well formed. `tests/gold/check_gold.py`
+//! checks only the recorded spans and names these tests (and, for T43 and
+//! T44, the CLI's `typescript_index.rs`) as the owners of the comparison.
 
 #![cfg(feature = "lang-typescript")]
 

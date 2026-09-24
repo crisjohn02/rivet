@@ -1,4 +1,4 @@
-//! T43: TypeScript indexed end to end.
+//! T43: TypeScript indexed end to end; T44: its bindings end to end.
 //!
 //! These tests drive the built binary over the authored TypeScript fixture
 //! and small temporary repositories:
@@ -8,7 +8,13 @@
 //!   the gold's uses of each focus name (this is the end-to-end half of the
 //!   T43 gold harness; `rivet-languages/tests/typescript_gold.rs` is the
 //!   extractor half);
-//! - no TypeScript use is bound, and none has a receiver class;
+//! - every T44 gold `[[binding]]` holds in the published index and in `refs`
+//!   (the end-to-end half of the T44 gold harness;
+//!   `rivet-index/tests/typescript_gold.rs` is the extractor-and-resolver
+//!   half), no T45 entry is bound yet, and no TypeScript use has a receiver
+//!   class;
+//! - removing an export unbinds its dependents on the next refresh, with no
+//!   other file reparsed;
 //! - reference mode excludes nothing by evidence for a TypeScript target;
 //! - PHP and TypeScript declarations of one name are different symbols,
 //!   TypeScript lookup is case-sensitive, and a use matches only a target of
@@ -16,7 +22,8 @@
 //! - a cache written before T43 (TypeScript stored as `unsupported`) is
 //!   refreshed to the new facts, and `--no-refresh` refuses it;
 //! - editing one `.ts` file re-extracts that file only; and
-//! - query output is byte-identical across `--force` and file creation order.
+//! - query output and bindings are byte-identical across `--force` and file
+//!   creation order.
 
 mod support;
 
@@ -176,21 +183,41 @@ fn typescript_rows(root: &Path, table: &str) -> i64 {
         .expect("count rows")
 }
 
-/// The `(file, start_byte, end_byte)` of every reference in a refs response,
-/// checking that each is `name_match` with no resolved target.
-fn unresolved_spans(value: &Value) -> BTreeSet<(String, i64, i64)> {
+/// The `(file, start_byte, end_byte)` of every reference in a refs response
+/// for `target`, checking each one's tier and resolved target against the
+/// gold: a use the gold binds to `target` is `exact` with that target, and
+/// every other use is `name_match` and unbound (T44 binds no focus-name use
+/// to another declaration, and T45's receivers are not bound yet).
+fn checked_spans(
+    value: &Value,
+    target: &str,
+    links: &BTreeMap<UseKey, Option<(String, String)>>,
+) -> BTreeSet<(String, i64, i64)> {
     value["references"]
         .as_array()
         .expect("references")
         .iter()
         .map(|item| {
-            assert_eq!(item["resolution"], "name_match", "{item}");
-            assert!(item["resolved_target"].is_null(), "{item}");
-            (
+            let key = (
                 item["file"].as_str().expect("file").to_string(),
                 item["start_byte"].as_i64().expect("start"),
                 item["end_byte"].as_i64().expect("end"),
-            )
+            );
+            let want = links
+                .get(&key)
+                .unwrap_or_else(|| panic!("focus use {key:?} has no gold binding entry"));
+            match want {
+                Some((bound, tier)) if bound == target => {
+                    assert_eq!(item["resolution"], tier.as_str(), "{item}");
+                    assert_eq!(item["resolved_target"], target, "{item}");
+                }
+                Some(other) => panic!("{key:?} is bound to {other:?}, not {target}"),
+                None => {
+                    assert_eq!(item["resolution"], "name_match", "{item}");
+                    assert!(item["resolved_target"].is_null(), "{item}");
+                }
+            }
+            key
         })
         .collect()
 }
@@ -211,10 +238,10 @@ fn no_exclusion(value: &Value) {
 fn every_t43_gold_use_is_persisted() {
     let temp = typescript_repo("t43-gold");
     let index = success(&run(temp.path(), &["index", "--json"]));
-    // The 82 gold declarations; no binding for any TypeScript use.
+    // The 82 gold declarations, and T44's 51 exact bindings.
     assert_eq!(
         (&index["symbols"], &index["uses"], &index["bindings"]),
-        (&Value::from(82), &Value::from(138), &Value::from(0)),
+        (&Value::from(82), &Value::from(138), &Value::from(51)),
         "{index}"
     );
     let gold = gold();
@@ -264,8 +291,123 @@ fn every_t43_gold_use_is_persisted() {
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 
-    // Nothing binds a TypeScript use, and none has a receiver class (T43).
-    assert_eq!(typescript_rows(temp.path(), "bindings"), 0);
+    // No TypeScript use has a receiver class: receivers are T45's.
+    assert_eq!(typescript_rows(temp.path(), "receiver_classes"), 0);
+}
+
+/// Every stored binding: `(target, resolution)` by `(file, start_byte,
+/// end_byte)` of its use.
+fn persisted_bindings(root: &Path) -> BTreeMap<UseKey, (String, String)> {
+    let conn = open_db(root);
+    let mut stmt = conn
+        .prepare(
+            "SELECT uses.file, uses.start_byte, uses.end_byte, target_id, resolution
+             FROM bindings JOIN uses USING (use_id)",
+        )
+        .expect("prepare bindings");
+    stmt.query_map([], |row| {
+        Ok((
+            (row.get(0)?, row.get(1)?, row.get(2)?),
+            (row.get(3)?, row.get(4)?),
+        ))
+    })
+    .expect("query bindings")
+    .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+    .expect("binding rows")
+}
+
+/// The gold's expected link for each `[[binding]]` span of a done task:
+/// `Some((target, tier))` or `None` for a use that stays unresolved. Entries
+/// of a task not yet done (T45) are expected unbound: T44 binds no receiver.
+fn expected_links(gold: &toml::Table) -> BTreeMap<UseKey, Option<(String, String)>> {
+    let done: Vec<&str> = gold["done_tasks"]
+        .as_array()
+        .expect("done_tasks")
+        .iter()
+        .map(|task| task.as_str().expect("a task"))
+        .collect();
+    let mut out = BTreeMap::new();
+    for task in ["T44", "T45"] {
+        for entry in entries(gold, "binding", task) {
+            let key = (
+                text(entry, "file").to_string(),
+                number(entry, "start_byte"),
+                number(entry, "end_byte"),
+            );
+            let tier = text(entry, "expected_resolution");
+            let want = (done.contains(&task) && tier != "name_match")
+                .then(|| (text(entry, "expected_target").to_string(), tier.to_string()));
+            out.insert(key, want);
+        }
+    }
+    out
+}
+
+#[test]
+fn every_t44_gold_binding_holds_end_to_end() {
+    let temp = typescript_repo("t44-gold");
+    success(&run(temp.path(), &["index", "--json"]));
+    let gold = gold();
+    let bound = persisted_bindings(temp.path());
+    let mut problems = Vec::new();
+    for (key, want) in expected_links(&gold) {
+        let got = bound.get(&key).cloned();
+        if got != want {
+            problems.push(format!("binding {key:?}: want {want:?}, stored {got:?}"));
+        }
+    }
+    // A `not_target` is never the stored target.
+    for entry in entries(&gold, "binding", "T44") {
+        if let Some(not_target) = entry.get("not_target").and_then(toml::Value::as_str) {
+            let key = (
+                text(entry, "file").to_string(),
+                number(entry, "start_byte"),
+                number(entry, "end_byte"),
+            );
+            if bound
+                .get(&key)
+                .is_some_and(|(target, _)| target == not_target)
+            {
+                problems.push(format!("binding {key:?} is bound to its not_target"));
+            }
+        }
+    }
+    // Every stored TypeScript binding is `exact`: T44 has no other tier.
+    for (key, (target, tier)) in &bound {
+        if tier != "exact" {
+            problems.push(format!("{key:?} -> {target} is {tier}"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+
+    // `refs` reports each bound use of a target with its tier and target,
+    // aliases included: `runAll` and `makeLabel` are references to
+    // `launchAll` and `helper` through their bindings (spec §11.5).
+    for (target, alias) in [
+        ("src/util.ts#launchAll", "runAll"),
+        ("src/util.ts#helper", "makeLabel"),
+    ] {
+        let value = success(&run(temp.path(), &["refs", target, "--json"]));
+        let items = value["references"].as_array().expect("references");
+        let aliased: Vec<&Value> = items
+            .iter()
+            .filter(|item| item["file"] == "src/report.ts")
+            .collect();
+        assert_eq!(aliased.len(), 2, "{target}: {value}");
+        for item in aliased {
+            assert_eq!(item["resolution"], "exact", "{item}");
+            assert_eq!(item["resolved_target"], target, "{item}");
+        }
+        let spellings: BTreeSet<String> = bound
+            .iter()
+            .filter(|(_, (bound_target, _))| bound_target == target)
+            .map(|(key, _)| {
+                let source = fs::read(temp.path().join(&key.0)).expect("read");
+                String::from_utf8_lossy(&source[key.1 as usize..key.2 as usize]).into_owned()
+            })
+            .collect();
+        assert!(spellings.contains(alias), "{target}: {spellings:?}");
+    }
     assert_eq!(typescript_rows(temp.path(), "receiver_classes"), 0);
 }
 
@@ -273,6 +415,7 @@ fn every_t43_gold_use_is_persisted() {
 fn candidate_and_reference_mode_list_exactly_the_gold_focus_uses() {
     let temp = typescript_repo("t43-candidates");
     let gold = gold();
+    let links = expected_links(&gold);
     let targets = [
         ("launch", "src/services/survey.ts#SurveyService.launch"),
         ("double", "src/util.ts#double"),
@@ -305,9 +448,8 @@ fn candidate_and_reference_mode_list_exactly_the_gold_focus_uses() {
                 &["refs", target, "--mode", mode, "--limit", "500", "--json"],
             ));
             assert_eq!(value["symbol"]["language"], "typescript");
-            assert_eq!(unresolved_spans(&value), want, "{name} {mode}");
+            assert_eq!(checked_spans(&value, target, &links), want, "{name} {mode}");
             assert_eq!(value["total"], want.len(), "{name} {mode}");
-            assert_eq!(value["by_resolution"]["exact"], 0);
             assert_eq!(value["by_resolution"]["scoped"], 0);
             no_exclusion(&value);
         }
@@ -338,9 +480,12 @@ export enum Color {
 }
 ";
 
+/// The uses must stay unresolved to test exclusion, so `lib` is imported
+/// through a path alias, which v0.1 never resolves: a relative import would
+/// bind most of them (T44).
 const APP_TS: &[u8] = b"\
-import * as util from \"./lib\";
-import { Outer, LIMIT, Foo, Color, Other } from \"./lib\";
+import * as util from \"@/lib\";
+import { Outer, LIMIT, Foo, Color, Other } from \"@/lib\";
 
 Outer.f();
 util.format(1);
@@ -467,10 +612,24 @@ fn php_and_typescript_declarations_are_different_symbols() {
         BTreeSet::from(["use.ts:1:import".to_string(), "use.ts:2:type".to_string()])
     );
 
-    // The PHP use binds the PHP class; the TypeScript uses bind nothing.
+    // The PHP uses bind the PHP class; the TypeScript import and `new Foo()`
+    // bind the TypeScript class (T44), and `new foo()` binds nothing.
     let php = success(&run(temp.path(), &["refs", "Foo.php#Foo", "--json"]));
     assert_eq!(php["by_resolution"]["exact"], 2, "{php}");
-    assert_eq!(typescript_rows(temp.path(), "bindings"), 0);
+    let typescript = success(&run(temp.path(), &["refs", "foo.ts#Foo", "--json"]));
+    assert_eq!(typescript["by_resolution"]["exact"], 2, "{typescript}");
+    let targets: BTreeSet<String> = persisted_bindings(temp.path())
+        .into_iter()
+        .filter(|(key, _)| key.0 == "use.ts")
+        .map(|(key, (target, _))| format!("{}:{}:{target}", key.0, key.1))
+        .collect();
+    assert_eq!(
+        targets,
+        BTreeSet::from([
+            "use.ts:9:foo.ts#Foo".to_string(),
+            "use.ts:33:foo.ts#Foo".to_string()
+        ])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +833,95 @@ fn editing_one_typescript_file_re_extracts_only_that_file() {
     }
 }
 
+#[test]
+fn removing_an_export_unbinds_its_dependents_on_the_next_refresh() {
+    // As above, the broken file is left out so the reparse log names only the
+    // edited file.
+    let temp = typescript_repo("t44-freshness");
+    fs::remove_file(temp.path().join("src/broken.ts")).expect("remove broken.ts");
+    success(&run(temp.path(), &["index", "--json"]));
+    let before = persisted_bindings(temp.path());
+    let outside = |bindings: &BTreeMap<UseKey, (String, String)>| -> BTreeSet<UseKey> {
+        bindings
+            .iter()
+            .filter(|(key, (target, _))| key.0 != "src/util.ts" && target == "src/util.ts#double")
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
+    // Three dependents import `double`.
+    let previously = outside(&before);
+    let dependents: BTreeSet<&str> = previously.iter().map(|key| key.0.as_str()).collect();
+    assert_eq!(
+        dependents,
+        BTreeSet::from([
+            "src/anonymous.ts",
+            "src/components/App.tsx",
+            "src/report.ts"
+        ])
+    );
+
+    // `export const double` becomes a module-local `const double`.
+    let util = temp.path().join("src/util.ts");
+    let original = fs::read(&util).expect("read util.ts");
+    let text = String::from_utf8(original.clone()).expect("UTF-8");
+    assert_eq!(text.matches("export const double").count(), 1);
+    fs::write(&util, text.replace("export const double", "const double")).expect("edit");
+
+    let log_dir = TempDir::new("t44-reparsed");
+    let log = log_dir.path().join("reparsed.log");
+    let log_value = log.to_str().expect("UTF-8 path").to_string();
+    success(&run_env(
+        temp.path(),
+        &["index", "--json"],
+        &[("RIVET_DEBUG_REPARSED", log_value.as_str())],
+    ));
+    let reparsed: Vec<String> = fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(reparsed, ["src/util.ts"], "no dependent is reparsed");
+
+    let after = persisted_bindings(temp.path());
+    // No dependent binds `double` any more, although none was reparsed...
+    assert!(outside(&after).is_empty(), "{after:?}");
+    // ...util.ts's own `double(count)` still binds by the same-file rule...
+    assert!(
+        after
+            .iter()
+            .any(|(key, (target, _))| key.0 == "src/util.ts" && target == "src/util.ts#double"),
+        "{after:?}"
+    );
+    // ...and every other dependent binding is unchanged.
+    for (key, link) in &before {
+        if key.0 != "src/util.ts" && link.0 != "src/util.ts#double" {
+            assert_eq!(after.get(key), Some(link), "{key:?}");
+        }
+    }
+    // Those uses bind nothing else either.
+    let rebound: Vec<&UseKey> = previously
+        .iter()
+        .filter(|key| after.contains_key(*key))
+        .collect();
+    assert!(rebound.is_empty(), "{rebound:?}");
+
+    // The incremental snapshot binds exactly as a fresh index of the bytes.
+    let fresh = typescript_repo("t44-freshness-fresh");
+    fs::remove_file(fresh.path().join("src/broken.ts")).expect("remove broken.ts");
+    fs::write(
+        fresh.path().join("src/util.ts"),
+        fs::read(&util).expect("read"),
+    )
+    .expect("write util.ts");
+    success(&run(fresh.path(), &["index", "--json"]));
+    assert_eq!(persisted_bindings(fresh.path()), after);
+
+    // Restoring the export rebinds every dependent.
+    fs::write(&util, &original).expect("restore util.ts");
+    success(&run(temp.path(), &["index", "--json"]));
+    assert_eq!(persisted_bindings(temp.path()), before);
+}
+
 /// Every stored use's ID by `(file, start_byte, end_byte, ref_kind)`.
 fn persisted_ids(root: &Path) -> BTreeMap<(String, i64, i64, String), i64> {
     let conn = open_db(root);
@@ -712,9 +960,21 @@ fn query_bytes_are_identical_across_force_and_file_order() {
             .collect::<Vec<_>>()
     );
     assert_eq!(answers(reverse.path()), first, "file creation order");
+    // The bindings themselves agree, TypeScript's included (T44).
+    let bindings = persisted_bindings(forward.path());
+    assert!(
+        bindings.keys().any(|key| key.0.starts_with("ts/")),
+        "{bindings:?}"
+    );
+    assert_eq!(
+        persisted_bindings(reverse.path()),
+        bindings,
+        "file creation order"
+    );
 
     success(&run(forward.path(), &["index", "--force", "--json"]));
     assert_eq!(answers(forward.path()), first, "--force");
+    assert_eq!(persisted_bindings(forward.path()), bindings, "--force");
     // Repeated queries agree too.
     assert_eq!(answers(forward.path()), first, "repeated");
 }

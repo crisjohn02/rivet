@@ -16,9 +16,12 @@
 //! leave out a same-name unresolved use that cannot refer to the target.
 //!
 //! T43 indexes TypeScript beside PHP. Three language gates keep PHP's rules
-//! to PHP: the resolver's rule table (`resolve::rules_for`), which binds no
-//! TypeScript use; [`excludes_by_evidence`], which excludes no TypeScript use
-//! or target; and [`folds_case`], which folds case for PHP declarations only.
+//! to PHP: the resolver's rule table (`resolve::rules_for`), which gives each
+//! language its own rules over its own declarations; [`excludes_by_evidence`],
+//! which excludes no TypeScript use or target; and [`folds_case`], which folds
+//! case for PHP declarations only. T44 adds the TypeScript rule set: direct
+//! relative imports, namespace-import members, and same-file lexical
+//! bindings.
 
 pub mod exclusion;
 pub mod hierarchy;

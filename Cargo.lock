@@ -454,9 +454,12 @@ name = "rivet-index"
 version = "0.1.0"
 dependencies = [
  "rivet-core",
+ "rivet-languages",
+ "rivet-parser",
  "rivet-store",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
