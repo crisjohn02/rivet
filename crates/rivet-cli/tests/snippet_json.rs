@@ -481,6 +481,26 @@ fn outdated_block_is_replaced_preserving_surrounding_text() {
     }
 }
 
+/// The block SN1 shipped, byte for byte (SHA-256
+/// `1819530610c1418d4b0d9bce84363504d99f5029d628558185ede35a82d3b5f7`, 1,745
+/// bytes). pilot-02 to pilot-04 and heldout-01 ran with it; SN2 replaced it.
+const SN1_BLOCK: &str = r#"<!-- rivet:start -->
+## Code navigation with rivet
+
+Use `rivet` for structural lookup in supported source files:
+
+Choose the command that answers the current question; these commands are not a required sequence. For understanding a known symbol, start directly with `context`.
+
+- `rivet symbol <name>` locates a definition, signature, and call sites. Use it before searching a definition and reading its whole file.
+- `rivet refs <name>` returns likely references with their containing symbols. `?` means name-only evidence; verify before relying on it. `--mode candidates` also includes unrelated same-name uses for auditing. Neither mode proves runtime completeness.
+- `rivet context <name> --tokens 3000` returns target and related source within an estimated source-text budget. Inspect segment forms: `signature` is a summary, not the full body. Metadata and actual model-token counts are outside this budget.
+
+Names can be short, dotted, or repository-relative `file:line`. Ambiguity returns candidate IDs; rerun with a quoted canonical ID. Lists default to 50 results; check totals and use `--offset` to page references/call lists. Use `rivet symbol` to page ambiguity candidates for a context query.
+
+The default text output is compact and meant for you to read; `--json` emits the full machine contract at several times the size, so reserve it for scripts that parse the result. Queries refresh automatically; no routine `rivet index` call is needed. Check coverage/skipped files and resolution tiers before relying on an empty result. Use text tools for unsupported syntax/languages, comments, strings, dynamic references, or missing context. Results describe the indexed snapshot; verify live source before editing.
+<!-- rivet:end -->
+"#;
+
 /// The one sentence SN1 replaced; pilot-01 ran with the block that held it.
 const PILOT_01_SENTENCE: &str = "Add `--json` for structured results.";
 
@@ -489,33 +509,91 @@ const SN1_SENTENCE: &str = "The default text output is compact and meant for you
      `--json` emits the full machine contract at several times the size, so reserve it for \
      scripts that parse the result.";
 
+/// The pilot-01 block (SHA-256
+/// `0d5a7d0a2195199ecdefd96a23da4ba6e4653d15830b0109f76c1d096be6119f`, 1,603
+/// bytes): the SN1 block with SN1's one sentence reverted.
+fn pilot_01_block() -> String {
+    assert_eq!(SN1_BLOCK.matches(SN1_SENTENCE).count(), 1);
+    SN1_BLOCK.replacen(SN1_SENTENCE, PILOT_01_SENTENCE, 1)
+}
+
+/// Writes `old_block` inside user text into `AGENTS.md`, runs
+/// `init --write-snippet`, and asserts the file now holds the shipped block in
+/// the same place with every byte around it kept; a repeat run changes
+/// nothing.
+fn assert_upgrades_in_place(label: &str, old_block: &str) {
+    let new_block = snippet();
+    assert!(old_block.starts_with("<!-- rivet:start -->\n"), "{label}");
+    assert!(old_block.ends_with("\n<!-- rivet:end -->\n"), "{label}");
+    assert_ne!(old_block, new_block, "{label}");
+    for (place, before, after) in [
+        (
+            "middle",
+            "# Project rules\n\nkeep me\n\n",
+            "\n## After\nkeep me too\n",
+        ),
+        ("top", "", "## Notes\n\n- rivet is optional here\n"),
+        ("bottom", "# Rules\n\nUse tabs.\n\n", ""),
+    ] {
+        let temp = initialized_repo(&format!("upgrade-{label}-{place}"));
+        let root = temp.path();
+        write(
+            root,
+            "AGENTS.md",
+            format!("{before}{old_block}{after}").as_bytes(),
+        );
+
+        assert_eq!(
+            init_ok(root, &["--write-snippet"]),
+            reported(&[], &["AGENTS.md"], "AGENTS.md"),
+            "{label} {place}"
+        );
+        assert_eq!(
+            String::from_utf8(read(root, "AGENTS.md")).unwrap(),
+            format!("{before}{new_block}{after}"),
+            "{label} {place}"
+        );
+        assert_eq!(
+            init_ok(root, &["--write-snippet"]),
+            reported(&[], &[], "AGENTS.md"),
+            "{label} {place} repeat"
+        );
+        assert_eq!(names(root), [".git", ".gitignore", ".rivet", "AGENTS.md"]);
+    }
+}
+
+#[test]
+fn historical_blocks_are_the_recorded_ones() {
+    // No SHA-256 is available here, so byte lengths are the cheap guard; the
+    // hashes in docs/AGENT-SNIPPET.md and in the comments above were computed
+    // with `shasum -a 256` from these same bytes.
+    assert_eq!(SN1_BLOCK.len(), 1745);
+    assert_eq!(pilot_01_block().len(), 1603);
+    assert!(!SN1_BLOCK.contains(PILOT_01_SENTENCE));
+    // The shipped block is neither, and carries neither sentence.
+    let shipped = snippet();
+    assert_eq!(shipped.len(), 624);
+    assert!(!shipped.contains(SN1_SENTENCE));
+    assert!(!shipped.contains(PILOT_01_SENTENCE));
+    // The document records all three hashes.
+    let doc = fs::read_to_string(AGENT_SNIPPET_DOC).expect("read docs/AGENT-SNIPPET.md");
+    for hash in [
+        "908710a5ba23e4ffc3a4fe08513ceb01a9f5b1ed02227b97d0529f7ee38e5898",
+        "1819530610c1418d4b0d9bce84363504d99f5029d628558185ede35a82d3b5f7",
+        "0d5a7d0a2195199ecdefd96a23da4ba6e4653d15830b0109f76c1d096be6119f",
+    ] {
+        assert_eq!(doc.matches(hash).count(), 1, "{hash}");
+    }
+}
+
+#[test]
+fn sn1_block_is_upgraded_in_place_preserving_surrounding_text() {
+    assert_upgrades_in_place("sn1", SN1_BLOCK);
+}
+
 #[test]
 fn pilot_01_block_is_upgraded_in_place_preserving_surrounding_text() {
-    let new_block = snippet();
-    assert_eq!(new_block.matches(SN1_SENTENCE).count(), 1);
-    assert!(!new_block.contains(PILOT_01_SENTENCE));
-    // The pilot-01 block differs from the shipped one by that sentence only.
-    let old_block = new_block.replacen(SN1_SENTENCE, PILOT_01_SENTENCE, 1);
-    assert_ne!(old_block, new_block);
-
-    let temp = initialized_repo("upgrade-pilot-01");
-    let root = temp.path();
-    let before = format!("# Project rules\n\nkeep me\n\n{old_block}\n## After\nkeep me too\n");
-    write(root, "AGENTS.md", before.as_bytes());
-
-    assert_eq!(
-        init_ok(root, &["--write-snippet"]),
-        reported(&[], &["AGENTS.md"], "AGENTS.md")
-    );
-    assert_eq!(
-        String::from_utf8(read(root, "AGENTS.md")).unwrap(),
-        format!("# Project rules\n\nkeep me\n\n{new_block}\n## After\nkeep me too\n")
-    );
-    assert_eq!(
-        init_ok(root, &["--write-snippet"]),
-        reported(&[], &[], "AGENTS.md"),
-        "repeat"
-    );
+    assert_upgrades_in_place("pilot-01", &pilot_01_block());
 }
 
 #[test]
