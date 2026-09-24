@@ -7,6 +7,9 @@
 # broken build look green, runs the four mandated checks, and leaves a freshly
 # built binary at $REVIEW_TARGET/debug/rivet for hand probing.
 set -u
+# Without pipefail a check piped into tail reports tail's status, so a failing
+# clippy or gold run would print PASS.
+set -o pipefail
 NAME="${1:?usage: review.sh <task-id>}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -31,7 +34,7 @@ cargo test --workspace --no-fail-fast 2>&1 | grep -E '^test result|FAILED|^error
 cargo test --workspace --no-fail-fast >/dev/null 2>&1 && echo "PASS tests" || { echo "FAIL tests"; fail=1; }
 
 step "python3 tests/gold/check_gold.py"
-python3 tests/gold/check_gold.py 2>&1 | tail -3 && echo "PASS gold" || { echo "FAIL gold"; fail=1; }
+python3 tests/gold/check_gold.py 2>&1 | tail -6 && echo "PASS gold" || { echo "FAIL gold"; fail=1; }
 
 step "feature builds"
 cargo check --workspace --no-default-features 2>&1 | tail -2
