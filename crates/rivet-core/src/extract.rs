@@ -8,8 +8,10 @@
 //! scope facts. T43 adds the TypeScript scope facts: [`LocalBinding`]s in
 //! their [`BindingSpace`], and [`ModuleImport`]s. T44 adds each module's
 //! [`ModuleExport`]s and the `type` uses that name values
-//! ([`ScopeFacts::value_type_uses`]). Resolution and persistence are later
-//! tasks.
+//! ([`ScopeFacts::value_type_uses`]). T45 adds the TypeScript receiver
+//! facts: the static marker on [`UseHint::This`], the type-name span on
+//! [`UseHint::Typed`] and [`UseHint::NewExpr`], and each member's
+//! [`MemberSide`]. Resolution and persistence are later tasks.
 //!
 //! The T17 records derive `serde` so the store can persist a use's
 //! [`UseHint`] as JSON and a scope's [`ScopeFacts`] as JSON without the
@@ -87,8 +89,18 @@ impl ImportKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UseHint {
-    /// The receiver is `$this` inside a class body.
-    This,
+    /// The receiver is `$this` inside a class body (PHP), or `this` inside a
+    /// named class (TypeScript, T43).
+    This {
+        /// Whether the `this` is inside a static member, static block, or
+        /// static field initializer, where it names the class constructor
+        /// (T45, TypeScript). `None` when the adapter does not record it: the
+        /// PHP adapter never does, and a TypeScript `this` receiver with no
+        /// recorded side binds nothing. An absent value keeps the PHP fact
+        /// JSON unchanged (`{"kind":"this"}`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_static: Option<bool>,
+    },
     /// The receiver is `self`, `static`, or `parent`.
     SelfOrStatic,
     /// The receiver variable's most recent assignment in the same function
@@ -101,6 +113,13 @@ pub enum UseHint {
         /// requires this to match the assignment's block.
         #[serde(default)]
         use_block: Option<u32>,
+        /// The span of the `type` use the class name records at the `new`
+        /// site (T45, TypeScript): the identifier after `new`, or the last
+        /// name of `new ns.C()`. The resolver looks the class up through that
+        /// use, in the scope where the `new` is written. `None` for PHP, and
+        /// omitted from the fact JSON when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_span: Option<Span>,
     },
     /// The receiver is a parameter, promoted parameter, or typed property with
     /// the recorded explicit type.
@@ -113,6 +132,13 @@ pub enum UseHint {
         /// [`TypedOrigin::Parameter`], the stricter of the two.
         #[serde(default)]
         origin: TypedOrigin,
+        /// The span of the `type` use the annotation's type name records (T45,
+        /// TypeScript): `Foo` in `x: Foo` and `x: Foo<T>`, the last name of
+        /// `x: ns.Foo`. The resolver looks the class up through that use, in
+        /// the scope where the annotation is written, never the member use's
+        /// scope. `None` for PHP, and omitted from the fact JSON when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_span: Option<Span>,
     },
     /// The receiver is a class named explicitly in a static call, a
     /// class-constant access, or a static property access (`Foo::make()`,
@@ -568,6 +594,24 @@ pub struct ModuleExport {
     pub span: Span,
 }
 
+/// Which side of its class one TypeScript class or interface member is on
+/// (T45).
+///
+/// A static member belongs to the class constructor, anything else to its
+/// instances, so `this.m()` in a static method can name only a static `m`
+/// and an instance receiver only an instance one. Interface members are
+/// always instance members. A constructor is on neither side and is never
+/// recorded: `x.constructor` names the class, not the constructor method.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberSide {
+    /// Index of the member symbol in the owning [`ExtractedFile::symbols`];
+    /// persistence rewrites it to the canonical symbol ID, as for
+    /// [`ScopeFacts::declares`].
+    pub symbol: usize,
+    /// Whether the member is declared `static`.
+    pub is_static: bool,
+}
+
 /// Owned lexical facts recorded for one scope (T18).
 ///
 /// The persisted `scopes.facts_json` holds `imports`, `typed_bindings`,
@@ -576,8 +620,9 @@ pub struct ModuleExport {
 /// `global_names`, `dynamic_global_write`, `parameter_lists`, `supertypes`,
 /// `anonymous_supertypes`, and `declares` for a PHP scope, and `locals`,
 /// `module_imports`, `module_exports`, `value_type_uses`, `ambient_module`,
-/// and `declares` for a TypeScript scope (T43; T44 adds `module_exports`,
-/// `value_type_uses`, and `ambient_module`).
+/// `member_sides`, and `declares` for a TypeScript scope (T43; T44 adds
+/// `module_exports`, `value_type_uses`, and `ambient_module`; T45 adds
+/// `member_sides`).
 /// [`declares`](Self::declares) holds indices into the owning
 /// [`ExtractedFile::symbols`] because a language adapter has no file path; the
 /// persistence layer rewrites each index to its canonical symbol ID.
@@ -693,6 +738,12 @@ pub struct ScopeFacts {
     /// it.
     #[serde(default)]
     pub ambient_module: bool,
+    /// The side of every named class and interface member symbol of the file
+    /// (T45, TypeScript), in symbol order: recorded only in the file's module
+    /// scope. A member not listed (a constructor) has no known side, and the
+    /// resolver's receiver rules never bind it.
+    #[serde(default)]
+    pub member_sides: Vec<MemberSide>,
     /// Indices of declarations introduced directly in this scope.
     ///
     /// For PHP, every symbol, members under their class-like's scope. For

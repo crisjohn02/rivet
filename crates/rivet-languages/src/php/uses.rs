@@ -1221,16 +1221,18 @@ impl Walker<'_> {
                     if self.in_anonymous_class() {
                         return UseHint::Unresolved;
                     }
-                    return UseHint::This;
+                    return UseHint::This { is_static: None };
                 }
                 match self.scopes.last().and_then(|scope| scope.get(&text)) {
                     Some(Binding::New(class, _)) => UseHint::NewExpr {
                         class_spelling: class.clone(),
                         use_block: enclosing_block_start(node),
+                        name_span: None,
                     },
                     Some(Binding::Typed(ty)) => UseHint::Typed {
                         type_spelling: ty.clone(),
                         origin: TypedOrigin::Parameter,
+                        name_span: None,
                     },
                     _ => UseHint::Unresolved,
                 }
@@ -1260,6 +1262,7 @@ impl Walker<'_> {
                     Some(ty) => UseHint::Typed {
                         type_spelling: ty.clone(),
                         origin: TypedOrigin::Property,
+                        name_span: None,
                     },
                     None => UseHint::Unresolved,
                 }
@@ -1749,6 +1752,7 @@ fn call_receiver_from_hint(hint: &UseHint, receiver: Option<&str>) -> CallReceiv
         UseHint::NewExpr {
             class_spelling,
             use_block,
+            ..
         } => match receiver {
             Some(variable) => CallReceiver::Variable {
                 variable: variable.to_string(),
@@ -1762,6 +1766,7 @@ fn call_receiver_from_hint(hint: &UseHint, receiver: Option<&str>) -> CallReceiv
         UseHint::Typed {
             type_spelling,
             origin: TypedOrigin::Parameter,
+            ..
         } => match receiver {
             Some(variable) => CallReceiver::Variable {
                 variable: variable.to_string(),
@@ -1774,10 +1779,11 @@ fn call_receiver_from_hint(hint: &UseHint, receiver: Option<&str>) -> CallReceiv
         UseHint::Typed {
             type_spelling,
             origin: TypedOrigin::Property,
+            ..
         } => CallReceiver::Class {
             spelling: type_spelling.clone(),
         },
-        UseHint::This | UseHint::SelfOrStatic => CallReceiver::SelfClass,
+        UseHint::This { .. } | UseHint::SelfOrStatic => CallReceiver::SelfClass,
         UseHint::NamedClass { class_spelling } => CallReceiver::Class {
             spelling: class_spelling.clone(),
         },
@@ -2534,6 +2540,7 @@ mod tests {
                 UseHint::Typed {
                     type_spelling: "A".to_string(),
                     origin: TypedOrigin::Parameter,
+                    name_span: None,
                 },
                 "#{nth}"
             );
@@ -2547,6 +2554,7 @@ mod tests {
         let property = |type_spelling: &str| UseHint::Typed {
             type_spelling: type_spelling.to_string(),
             origin: TypedOrigin::Property,
+            name_span: None,
         };
         assert_eq!(call_hint(&class, "m", 0), UseHint::Unresolved);
         assert_eq!(call_hint(&class, "m", 1), property("A"));
@@ -2916,7 +2924,10 @@ mod tests {
             .filter(|use_| use_.span.start_byte() > body_end)
             .map(|use_| use_.hint.clone())
             .collect();
-        assert_eq!(after, vec![UseHint::This, UseHint::SelfOrStatic]);
+        assert_eq!(
+            after,
+            vec![UseHint::This { is_static: None }, UseHint::SelfOrStatic]
+        );
     }
 
     /// AF4: `$this->prop` inside an anonymous class reads the anonymous
@@ -2932,6 +2943,7 @@ mod tests {
             UseHint::Typed {
                 type_spelling: "Other".to_string(),
                 origin: TypedOrigin::Property,
+                name_span: None,
             }
         );
         assert_eq!(call_hint(&file, "go", 1), UseHint::Unresolved);
@@ -3306,6 +3318,12 @@ mod tests {
             .filter(|use_| use_.spelling == "f")
             .map(|use_| use_.hint.clone())
             .collect();
-        assert_eq!(calls, vec![UseHint::This, UseHint::This]);
+        assert_eq!(
+            calls,
+            vec![
+                UseHint::This { is_static: None },
+                UseHint::This { is_static: None }
+            ]
+        );
     }
 }

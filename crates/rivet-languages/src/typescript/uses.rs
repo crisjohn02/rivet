@@ -51,14 +51,20 @@
 //!   re-export specifiers, and `export *`, as [`ModuleImport`]s of the scope
 //!   they are written in, with the specifier as written. `require(...)` in an
 //!   expression is an ordinary call of `require`.
-//! - **Receiver hints** for T45: [`UseHint::This`] for `this.m()` inside a
-//!   named class (not inside a nested `function` or object-literal method,
-//!   and not in an anonymous or function-local class); [`UseHint::Typed`] for
-//!   a receiver that is a parameter or variable with one explicit named type,
-//!   or `this.f` where `f` is a field or parameter property with one; and
-//!   [`UseHint::NewExpr`] for a `const` initialized by `new C(...)`. A union,
+//! - **Receiver hints**: [`UseHint::This`] for `this.m()` inside a named
+//!   class (not inside a nested `function` or object-literal method, and not
+//!   in an anonymous or function-local class), with whether that `this` is
+//!   in a static context (T45); [`UseHint::Typed`] for a receiver that is a
+//!   parameter or variable with one explicit named type, or `this.f` where
+//!   `f` is a field or parameter property with one; and
+//!   [`UseHint::NewExpr`] for a `const` initialized by `new C(...)`. The
+//!   typed and `new` hints carry the span of their type name's `type` use
+//!   (T45), so the resolver looks the class up where it is written. A union,
 //!   array, or other structural type records no hint, and neither does a `let`
 //!   or `var` bound by `new`, which can be reassigned.
+//! - **Member sides** (T45): whether each class and interface member symbol
+//!   is static, as [`MemberSide`]s of the module scope. A constructor is on
+//!   neither side and is not recorded.
 //! - **Exports** (T44): each local `export` statement of the module scope (or
 //!   of a string-named ambient module body) as [`ModuleExport`]s: the names a
 //!   declaration exports, `export default` of a named declaration or of an
@@ -83,8 +89,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use rivet_core::extract::{
-    BindingSpace, ExtractedScope, ExtractedUse, LocalBinding, ModuleExport, ModuleImport,
-    ModuleImportKind, ScopeFacts, TypedOrigin, UseHint,
+    BindingSpace, ExtractedScope, ExtractedUse, LocalBinding, MemberSide, ModuleExport,
+    ModuleImport, ModuleImportKind, ScopeFacts, TypedOrigin, UseHint,
 };
 use rivet_core::{ExtractedSymbol, RefKind, Span, SymbolKind};
 use tree_sitter::Node;
@@ -115,16 +121,27 @@ pub(super) fn extract_uses(
     Some(walker.finish())
 }
 
+/// One explicit named type or `new` target as written, with the span of the
+/// `type` use its name records (T45): the resolver looks the class up through
+/// that use, in the scope where the annotation or `new` is written.
+#[derive(Debug, Clone)]
+struct NamedType {
+    /// The name as written: `Foo`, `ns.Foo` (a generic's `Foo<T>` as `Foo`).
+    spelling: String,
+    /// The span of the last identifier of the name, where its `type` use is.
+    span: Option<Span>,
+}
+
 /// What a local binding says about the value it holds, for receiver hints.
 #[derive(Debug, Clone)]
 enum Detail {
     /// A parameter, with its one explicit named type.
-    Parameter(Option<String>),
+    Parameter(Option<NamedType>),
     /// A variable, with its one explicit named type annotation and, for a
     /// `const` initialized by `new C(...)`, the class as written.
     Variable {
-        annotation: Option<String>,
-        new_class: Option<String>,
+        annotation: Option<NamedType>,
+        new_class: Option<NamedType>,
     },
     /// Anything else: nothing a hint can use.
     Other,
@@ -160,14 +177,18 @@ struct ScopeBuild {
 #[derive(Default)]
 struct Fields {
     /// Instance fields and constructor parameter properties.
-    instance: HashMap<String, Option<String>>,
+    instance: HashMap<String, Option<NamedType>>,
     /// Static fields.
-    statics: HashMap<String, Option<String>>,
+    statics: HashMap<String, Option<NamedType>>,
 }
 
 impl Fields {
     /// Records `name: spelling`; a name declared twice keeps no type.
-    fn insert(map: &mut HashMap<String, Option<String>>, name: String, spelling: Option<String>) {
+    fn insert(
+        map: &mut HashMap<String, Option<NamedType>>,
+        name: String,
+        spelling: Option<NamedType>,
+    ) {
         map.entry(name)
             .and_modify(|existing| *existing = None)
             .or_insert(spelling);
@@ -214,6 +235,8 @@ struct Walker<'s> {
     /// Whether the file is a script: it has no top-level `import` or
     /// `export`, so its top-level declarations are global (T44).
     script: bool,
+    /// The side of each named class and interface member symbol (T45).
+    member_sides: Vec<MemberSide>,
     /// How many `declare global` blocks enclose the current position (T44).
     global_depth: u32,
 }
@@ -250,6 +273,7 @@ impl<'s> Walker<'s> {
             class_stack: Vec::new(),
             next_ordinal: 0,
             script: false,
+            member_sides: Vec::new(),
             global_depth: 0,
         }
     }
@@ -413,7 +437,9 @@ impl<'s> Walker<'s> {
     fn receiver_hint(&self, object: Node<'_>) -> Hint {
         match object.kind() {
             "this" => Hint::Now(match self.this_stack.last() {
-                Some(This::Class { .. }) => UseHint::This,
+                Some(This::Class { is_static, .. }) => UseHint::This {
+                    is_static: Some(*is_static),
+                },
                 _ => UseHint::Unresolved,
             }),
             "member_expression" => {
@@ -428,10 +454,11 @@ impl<'s> Walker<'s> {
                     } else {
                         &fields.instance
                     };
-                    if let Some(Some(spelling)) = map.get(&self.text(property)) {
+                    if let Some(Some(ty)) = map.get(&self.text(property)) {
                         return Hint::Now(UseHint::Typed {
-                            type_spelling: spelling.clone(),
+                            type_spelling: ty.spelling.clone(),
                             origin: TypedOrigin::Property,
+                            name_span: ty.span,
                         });
                     }
                 }
@@ -1090,6 +1117,7 @@ impl<'s> Walker<'s> {
             }
         }
         if let Some(body) = body {
+            self.record_member_sides(body);
             let fields = self
                 .class_symbol(node)
                 .map(|_| Rc::new(collect_fields(body, self.source)));
@@ -1100,6 +1128,64 @@ impl<'s> Walker<'s> {
         if opened {
             self.close_scope();
         }
+    }
+
+    /// Records the side ([`MemberSide`]) of each member symbol a class or
+    /// interface body declares (T45): a class member is static when declared
+    /// `static`, and every interface member and constructor parameter
+    /// property is an instance member. A constructor is on neither side and
+    /// is not recorded. Members of an anonymous or function-local class are
+    /// not symbols, so nothing is recorded for them.
+    fn record_member_sides(&mut self, body: Node<'_>) {
+        for member in named_children(body) {
+            let Some(name) = member.child_by_field_name("name") else {
+                continue;
+            };
+            if member.kind() == "method_definition" && self.text(name) == "constructor" {
+                let parameters = member
+                    .child_by_field_name("parameters")
+                    .map(named_children)
+                    .unwrap_or_default();
+                for parameter in parameters {
+                    if let Some(pattern) = parameter.child_by_field_name("pattern")
+                        && let Some(symbol) = self.member_symbol(pattern)
+                    {
+                        self.member_sides.push(MemberSide {
+                            symbol,
+                            is_static: false,
+                        });
+                    }
+                }
+                continue;
+            }
+            let Some(symbol) = self.member_symbol(name) else {
+                continue;
+            };
+            if self.symbols[symbol].kind == SymbolKind::Method
+                && self.symbols[symbol].name == "constructor"
+            {
+                continue;
+            }
+            let is_static = has_modifier(member, Some(name), "static");
+            self.member_sides.push(MemberSide { symbol, is_static });
+        }
+    }
+
+    /// The method or property symbol of a class or interface whose name is
+    /// `name`, if there is one.
+    fn member_symbol(&self, name: Node<'_>) -> Option<usize> {
+        let symbol = *self
+            .by_name_span
+            .get(&(name.start_byte() as u32, name.end_byte() as u32))?;
+        let parent = self.symbols[symbol].parent_index?;
+        (matches!(
+            self.symbols[symbol].kind,
+            SymbolKind::Method | SymbolKind::Property
+        ) && matches!(
+            self.symbols[parent].kind,
+            SymbolKind::Class | SymbolKind::Interface
+        ))
+        .then_some(symbol)
     }
 
     /// The class symbol `node` declares, if it is one: a named class reached
@@ -1166,6 +1252,9 @@ impl<'s> Walker<'s> {
         if let Some(name) = name {
             let scope = self.current_scope();
             self.declare(scope, name, BindingSpace::Type, Detail::Other);
+        }
+        if let Some(body) = node.child_by_field_name("body") {
+            self.record_member_sides(body);
         }
         self.type_scoped(node, name);
     }
@@ -1831,6 +1920,9 @@ impl<'s> Walker<'s> {
         );
         uses.dedup_by(|b, a| a.span == b.span);
 
+        let mut member_sides = std::mem::take(&mut self.member_sides);
+        member_sides.sort_by_key(|side| side.symbol);
+        member_sides.dedup_by_key(|side| side.symbol);
         let keys: Vec<String> = self.scopes.iter().map(|scope| scope.key.clone()).collect();
         let mut scopes: Vec<ExtractedScope> = self
             .scopes
@@ -1865,6 +1957,12 @@ impl<'s> Walker<'s> {
                         // A module's own scope other than the file's is a
                         // string-named ambient module body.
                         ambient_module: scope.module && scope.parent.is_some(),
+                        // Recorded once per file, in its module scope (T45).
+                        member_sides: if scope.parent.is_none() {
+                            std::mem::take(&mut member_sides)
+                        } else {
+                            Vec::new()
+                        },
                         declares,
                         ..ScopeFacts::default()
                     },
@@ -1898,23 +1996,26 @@ impl<'s> Walker<'s> {
                     return UseHint::Unresolved;
                 }
                 return match &local.detail {
-                    Detail::Parameter(Some(spelling)) => UseHint::Typed {
-                        type_spelling: spelling.clone(),
+                    Detail::Parameter(Some(ty)) => UseHint::Typed {
+                        type_spelling: ty.spelling.clone(),
                         origin: TypedOrigin::Parameter,
+                        name_span: ty.span,
                     },
                     Detail::Variable {
-                        annotation: Some(spelling),
+                        annotation: Some(ty),
                         ..
                     } => UseHint::Typed {
-                        type_spelling: spelling.clone(),
+                        type_spelling: ty.spelling.clone(),
                         origin: TypedOrigin::Variable,
+                        name_span: ty.span,
                     },
                     Detail::Variable {
                         new_class: Some(class),
                         ..
                     } => UseHint::NewExpr {
-                        class_spelling: class.clone(),
+                        class_spelling: class.spelling.clone(),
                         use_block: None,
+                        name_span: class.span,
                     },
                     _ => UseHint::Unresolved,
                 };
@@ -2006,30 +2107,45 @@ fn collect_fields(body: Node<'_>, source: &[u8]) -> Fields {
 
 /// The one named type a type annotation (or type) names: `Foo`, `ns.Foo`, or
 /// the generic `Foo` of `Foo<T>`. Any other type (a union, an array, a
-/// literal, a function type, a predefined type) names none.
-fn named_type(node: Node<'_>, source: &[u8]) -> Option<String> {
+/// literal, a function type, a predefined type) names none. The span is the
+/// last identifier's (`Foo` of `ns.Foo`), where the name's `type` use is.
+fn named_type(node: Node<'_>, source: &[u8]) -> Option<NamedType> {
     let ty = if node.kind() == "type_annotation" {
         named_children(node).into_iter().next()?
     } else {
         node
     };
-    match ty.kind() {
-        "type_identifier" | "nested_type_identifier" => Some(text_of(ty, source)),
-        "generic_type" => ty
-            .child_by_field_name("name")
-            .map(|name| text_of(name, source)),
-        _ => None,
-    }
+    let name = match ty.kind() {
+        "type_identifier" | "nested_type_identifier" => ty,
+        "generic_type" => ty.child_by_field_name("name")?,
+        _ => return None,
+    };
+    let last = match name.kind() {
+        "nested_type_identifier" => name.child_by_field_name("name"),
+        _ => Some(name),
+    };
+    Some(NamedType {
+        spelling: text_of(name, source),
+        span: last.and_then(span_of),
+    })
 }
 
-/// The class a `new C(...)` initializer names, as written.
-fn new_class(value: Node<'_>, source: &[u8]) -> Option<String> {
+/// The class a `new C(...)` initializer names, as written, with the span of
+/// its `type` use (`C`, or the last name of `new ns.C()`).
+fn new_class(value: Node<'_>, source: &[u8]) -> Option<NamedType> {
     if value.kind() != "new_expression" {
         return None;
     }
     let constructor = value.child_by_field_name("constructor")?;
-    matches!(constructor.kind(), "identifier" | "member_expression")
-        .then(|| text_of(constructor, source))
+    let last = match constructor.kind() {
+        "identifier" => Some(constructor),
+        "member_expression" => constructor.child_by_field_name("property"),
+        _ => return None,
+    };
+    Some(NamedType {
+        spelling: text_of(constructor, source),
+        span: last.and_then(span_of),
+    })
 }
 
 /// Whether a block (or a `switch` case) binds a name lexically: a `let` or

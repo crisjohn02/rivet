@@ -14,7 +14,8 @@
 //! name the module does not export locally (`ns.missing`, a re-export, an
 //! `export *` name) stays unresolved, as does every other receiver
 //! (`this.x`, `obj.m()`, a default or named import used as an object):
-//! T45 owns receivers.
+//! [`ts_receivers`](super::ts_receivers) binds those through their receiver
+//! hints (T45).
 
 use rivet_core::extract::ModuleImportKind;
 use rivet_core::{RefKind, Resolution};

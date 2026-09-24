@@ -95,6 +95,7 @@ pub(crate) fn receiver_class<'a>(
     let UseHint::NewExpr {
         class_spelling,
         use_block,
+        ..
     } = hint
     else {
         return None;
@@ -178,6 +179,7 @@ mod tests {
         let hint = UseHint::NewExpr {
             class_spelling: class_spelling.to_string(),
             use_block,
+            name_span: None,
         };
         UseRow {
             use_id: None,

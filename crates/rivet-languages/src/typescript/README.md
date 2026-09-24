@@ -12,8 +12,11 @@ turns `LanguageId::has_extractor` on for TypeScript and TSX, and dispatches
 both to this adapter in `rivet_parser`. T44 adds each module's exports, the
 `type` uses that name values, and module-local `declares`; with them the
 resolver's TypeScript rules bind direct relative imports, namespace-import
-members, and same-file lexical bindings (`exact`). Receiver hints wait for
-T45: every other TypeScript reference is `name_match`.
+members, and same-file lexical bindings (`exact`). T45 records what the
+receiver rules need (the static side of `this` and of each member, and where
+an annotation's type name or a `new` target is written) and binds `this`,
+typed, and `new` receivers (`scoped`). Every other TypeScript reference is
+`name_match`.
 
 ## Named definitions (T42)
 
@@ -228,14 +231,17 @@ including a module augmentation) is marked `ambient_module`: it also sees the
 exports of the module it declares or augments, so the resolver never looks
 past it for a name the body does not bind itself.
 
-## Receiver hints (T43, for T45)
+## Receiver hints (T43, T45)
 
-A member use records the hint T45 will need; none is a binding:
+A member use records its receiver hint; none is a binding by itself:
 
 - `UseHint::This` for `this.m()` inside a named class's methods, accessors,
   field initializers, and static blocks, including arrow functions there. Not
   inside a nested `function` or object-literal method (their own `this`), and
-  not in an anonymous or function-local class, which is not a symbol.
+  not in an anonymous or function-local class, which is not a symbol. T45
+  records `is_static`: `true` inside a static method or accessor, a static
+  field initializer, or a static block, where `this` is the class
+  constructor; `false` elsewhere.
 - `UseHint::Typed` with origin `parameter` for a receiver that is a parameter
   with one explicit named type (`svc: SurveyService`, `Foo<T>` as `Foo`,
   `ns.Foo`); `variable` for a variable with one; and `property` for
@@ -244,10 +250,48 @@ A member use records the hint T45 will need; none is a binding:
 - `UseHint::NewExpr` for a receiver that is a `const` initialized by
   `new C(...)`; an annotation wins over `new`.
 
+T45 adds `name_span` to `Typed` and `NewExpr`: the span of the `type` use the
+annotation's type name records (`Foo`, the `Foo` of `Foo<T>` and of
+`ns.Foo`), or of the `new` target (`C`, the `C` of `new ns.C()`). That use
+sits in the scope where the annotation or `new` is written, which can differ
+from the member use's scope, so the resolver resolves the class exactly as
+T44 resolves that `type` use.
+
 A union, array, function, or other structural type records no hint; nor does
 a `let` or `var` bound by `new` (it can be reassigned), a name bound twice in
 its nearest scope, or an import binding. The nearest scope that binds the
 name as a value decides.
+
+### Member sides (T45)
+
+The module scope's `member_sides` records, for every class and interface
+member symbol of the file, whether it is static: a class method, accessor, or
+field declared `static` is; every other class member, every constructor
+parameter property, and every interface member is not. A constructor is on
+neither side and is not recorded (`x.constructor` names the class, not the
+constructor method), and neither is a member of an anonymous or function-local
+class, which is not a symbol.
+
+### Receiver bindings (T45)
+
+The resolver's receiver rule (`rivet_index::resolve::rules::ts_receivers`)
+binds a call, read, or write through a hinted receiver, always `scoped`:
+
+- the class is the named class enclosing a `this`, or the one class or
+  interface a typed or `new` hint's `type` use binds to through the T44
+  lexical rules (a type alias, enum, namespace, function, merged declaration,
+  package or path-alias import, re-export, or unresolved name gives none; a
+  generic type parameter of the same name hides the class);
+- the class must itself declare exactly one method or property of the use's
+  spelling (case-sensitive, `#` included) on the receiver's side: static for
+  a static `this`, instance for every other receiver. A member of unknown
+  side blocks the binding. Inheritance is never traversed, and an interface
+  receiver binds the interface's own member.
+
+TypeScript uses record no read/write distinction for accessors, so a getter
+and a setter sharing a name are two candidates and `this.label` stays
+unresolved. Calls on a class name (`SurveyService.create()`,
+`Status.Active`) are not bound in v0.1.
 
 ## Signatures and doc comments
 
@@ -284,9 +328,10 @@ language's uses appear in the other's `refs`.
 
 ## Resolution and exclusion
 
-The resolver's TypeScript rule set (`rivet_index::resolve`, T44) sees only
-TypeScript uses and declarations, and PHP's rules only PHP's. Every binding it
-makes is `exact` (docs/ADDING-A-LANGUAGE.md "TypeScript bindings"):
+The resolver's TypeScript rule set (`rivet_index::resolve`, T44, T45) sees
+only TypeScript uses and declarations, and PHP's rules only PHP's. Every
+lexical binding it makes is `exact` (docs/ADDING-A-LANGUAGE.md "TypeScript
+bindings"):
 
 - a named, aliased, default, or `import type` import of a relative module
   binds its `import` use and every unshadowed use of its local name to the
@@ -296,9 +341,11 @@ makes is `exact` (docs/ADDING-A-LANGUAGE.md "TypeScript bindings"):
 - a use bound lexically, with shadowing and value/type spaces accounted for,
   to one module-local declaration of its own file binds to it.
 
+Every receiver binding is `scoped` ("Receiver bindings (T45)" above).
 Re-exports, `export *`, path aliases, packages, `require`, ambiguous or
-unindexed modules, globals, merged declarations, and every other receiver stay
-`name_match`; receivers are T45's. Reference-mode exclusion (spec §11.5)
+unindexed modules, globals, merged declarations, and every receiver no hint
+binds stay `name_match`, and no TypeScript use gets a receiver class.
+Reference-mode exclusion (spec §11.5)
 never applies to a TypeScript target or use: PHP's form table would drop real
 TypeScript references such as `Outer.f()`, `util.format()`, and `Color.Red`,
 and structural typing makes a receiver's class no evidence.

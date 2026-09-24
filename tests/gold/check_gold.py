@@ -23,7 +23,7 @@ extractor comparison in crates/rivet-languages/tests/typescript_gold.rs; T43:
 that comparison plus the end-to-end check through the CLI in
 crates/rivet-cli/tests/typescript_index.rs; T44: the extractor-and-resolver
 comparison in crates/rivet-index/tests/typescript_gold.rs plus the same
-end-to-end CLI check). The report names those harnesses and says they are not
+end-to-end CLI check; T45: the same two harnesses). The report names those harnesses and says they are not
 run here; a done task with no harness listed fails.
 
 Private corpus gold (T35). The benchmark corpus is private, so its gold
@@ -55,6 +55,10 @@ TS_HARNESS = {
             ("crates/rivet-cli/tests/typescript_index.rs",
              "cargo test -p rivet-cli --test typescript_index")],
     "T44": [("crates/rivet-index/tests/typescript_gold.rs",
+             "cargo test -p rivet-index --test typescript_gold"),
+            ("crates/rivet-cli/tests/typescript_index.rs",
+             "cargo test -p rivet-cli --test typescript_index")],
+    "T45": [("crates/rivet-index/tests/typescript_gold.rs",
              "cargo test -p rivet-index --test typescript_gold"),
             ("crates/rivet-cli/tests/typescript_index.rs",
              "cargo test -p rivet-cli --test typescript_index")],

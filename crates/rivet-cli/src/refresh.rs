@@ -275,6 +275,16 @@ impl RefreshMode {
 ///
 /// History, newest first:
 ///
+/// - **php-rules-v4;ts-rules-v2** — T45: TypeScript receiver hints bind
+///   member uses, all `scoped`. `this` names the enclosing named class; an
+///   explicit parameter, field, or variable annotation names its type; and a
+///   `const` bound by `new C(...)` names `C`, each type name looked up through
+///   the T44 lexical rules in the scope where it is written and required to
+///   be exactly one class or interface. The receiver class must itself declare
+///   exactly one member of the use's spelling on the matching side (static for
+///   `this` in a static context, instance otherwise); inheritance is never
+///   traversed. No TypeScript use gets a receiver class. Only TypeScript's
+///   rules changed: the PHP rules are exactly php-rules-v4's.
 /// - **php-rules-v4;ts-rules-v1** — T44: the first TypeScript rules. Only
 ///   TypeScript's rules changed: direct relative named, aliased, default, and
 ///   `import type` imports bind to the declaration the module exports
@@ -308,7 +318,7 @@ impl RefreshMode {
 ///   binding nothing (AF4).
 /// - **php-rules-v1** — T19: the first real binding rules (imports and
 ///   functions), later extended by T20/T21 receivers under the same value.
-const RESOLVER_FINGERPRINT: &str = "php-rules-v4;ts-rules-v1";
+const RESOLVER_FINGERPRINT: &str = "php-rules-v4;ts-rules-v2";
 
 /// The `meta` key recording whether the committed bindings were resolved with
 /// the global function fallback suppressed because an enabled PHP file was not
@@ -1390,7 +1400,8 @@ fn declared_ids<'a>(declares: &[usize], ids: &'a [String]) -> Vec<&'a str> {
 /// TypeScript scope rows (T43): each scope's bound names, its import
 /// bindings and re-exports, its module's own exports, the spans of its
 /// value-position `type` uses, and whether it is an ambient module body
-/// (T44), and the canonical IDs of the symbols among its names. No PHP-only
+/// (T44), the side of each class and interface member (T45, the module scope
+/// only), and the canonical IDs of the symbols among its names. No PHP-only
 /// field is written.
 #[cfg(feature = "lang-typescript")]
 fn typescript_scope_rows(
@@ -1401,6 +1412,13 @@ fn typescript_scope_rows(
     use rivet_core::Span;
     use rivet_core::extract::{LocalBinding, ModuleExport, ModuleImport};
 
+    /// One class or interface member's side, keyed by canonical ID (T45).
+    #[derive(serde::Serialize)]
+    struct PersistedMemberSide<'a> {
+        symbol: &'a str,
+        is_static: bool,
+    }
+
     /// The exact persisted `scopes.facts_json` shape of a TypeScript scope.
     #[derive(serde::Serialize)]
     struct PersistedScopeFacts<'a> {
@@ -1409,6 +1427,7 @@ fn typescript_scope_rows(
         module_exports: &'a [ModuleExport],
         value_type_uses: &'a [Span],
         ambient_module: bool,
+        member_sides: Vec<PersistedMemberSide<'a>>,
         declares: Vec<&'a str>,
     }
 
@@ -1422,6 +1441,17 @@ fn typescript_scope_rows(
                 module_exports: &scope.facts.module_exports,
                 value_type_uses: &scope.facts.value_type_uses,
                 ambient_module: scope.facts.ambient_module,
+                member_sides: scope
+                    .facts
+                    .member_sides
+                    .iter()
+                    .filter_map(|side| {
+                        ids.get(side.symbol).map(|id| PersistedMemberSide {
+                            symbol: id.as_str(),
+                            is_static: side.is_static,
+                        })
+                    })
+                    .collect(),
                 declares: declared_ids(&scope.facts.declares, ids),
             };
             ScopeRow {

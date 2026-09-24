@@ -105,12 +105,13 @@
 # The tasks whose entries are verified. check_gold.py checks their spans and
 # names the harness that compares them with rivet (T42 and T43: the extractor,
 # in crates/rivet-languages/tests/typescript_gold.rs; T43 also end to end
-# through the CLI, in crates/rivet-cli/tests/typescript_index.rs; T44: the
-# extractor and resolver, in crates/rivet-index/tests/typescript_gold.rs, and
-# end to end through the CLI, in crates/rivet-cli/tests/typescript_index.rs);
-# every other entry is reported as pending, per task. Add a task in the same
-# change that makes its entries pass.
-done_tasks = ["T42", "T43", "T44"]
+# through the CLI, in crates/rivet-cli/tests/typescript_index.rs; T44 and
+# T45: the extractor and resolver, in
+# crates/rivet-index/tests/typescript_gold.rs, and end to end through the
+# CLI, in crates/rivet-cli/tests/typescript_index.rs); every other entry is
+# reported as pending, per task. Add a task in the same change that makes its
+# entries pass.
+done_tasks = ["T42", "T43", "T44", "T45"]
 
 # Every occurrence of these names outside comments in a supported fixture file
 # is a declaration's name or exactly one [[use]], [[not_a_use]] or [[undecided]]

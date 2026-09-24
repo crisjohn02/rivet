@@ -82,7 +82,7 @@ pub(crate) fn receiver_class<'a>(
 ) -> Option<ClassEvidence<'a>> {
     let hint: UseHint = serde_json::from_str(&use_row.hint_json).ok()?;
     match hint {
-        UseHint::This | UseHint::SelfOrStatic => {
+        UseHint::This { .. } | UseHint::SelfOrStatic => {
             if !names_enclosing_class(use_row, &hint) {
                 return None;
             }
@@ -91,6 +91,7 @@ pub(crate) fn receiver_class<'a>(
         UseHint::Typed {
             type_spelling,
             origin,
+            ..
         } => {
             // A parameter type says nothing once the variable is rebound; a
             // property type holds on every assignment (AF3).
@@ -126,7 +127,7 @@ fn is_bare_variable(receiver: &str) -> bool {
 /// which may name a subclass (AF4; spec §11.4).
 fn names_enclosing_class(use_row: &UseRow, hint: &UseHint) -> bool {
     match hint {
-        UseHint::This => use_row.receiver.as_deref() == Some("$this"),
+        UseHint::This { .. } => use_row.receiver.as_deref() == Some("$this"),
         UseHint::SelfOrStatic => use_row
             .receiver
             .as_deref()

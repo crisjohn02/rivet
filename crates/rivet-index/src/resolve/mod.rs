@@ -29,8 +29,10 @@
 //! TypeScript rules (T44). The TypeScript rule set binds direct relative
 //! imports, namespace-import members, and same-file lexical bindings
 //! (`rules::ts_lexical`, `rules::ts_namespace`), over TypeScript declarations
-//! only, reading TypeScript scope facts through [`RuleCtx::typescript`]. It
-//! records no receiver class: receiver hints are T45's.
+//! only, reading TypeScript scope facts through [`RuleCtx::typescript`]. T45
+//! adds `rules::ts_receivers`: `this`, typed, and `new` receivers bind the
+//! receiver class's own member, `scoped`. It records no receiver class:
+//! TypeScript has no evidence-based exclusion (spec §11.5).
 
 pub(crate) mod rules;
 
@@ -67,10 +69,16 @@ const PHP_RULES: &[RuleFn] = &[
     rules::new_expr::resolve,
 ];
 
-/// The ordered TypeScript rule list (T44). The two rules are disjoint: the
+/// The ordered TypeScript rule list (T44, T45). The rules are disjoint: the
 /// lexical rule binds `import` uses and uses without a receiver, the
-/// namespace rule members of a namespace import. T45 adds receiver rules.
-const TYPESCRIPT_RULES: &[RuleFn] = &[rules::ts_lexical::resolve, rules::ts_namespace::resolve];
+/// namespace rule members of a namespace import (whose receiver carries no
+/// hint), and the receiver rule (T45) members through a `this`, typed, or
+/// `new` receiver hint.
+const TYPESCRIPT_RULES: &[RuleFn] = &[
+    rules::ts_lexical::resolve,
+    rules::ts_namespace::resolve,
+    rules::ts_receivers::resolve,
+];
 
 /// The ordered rule set for uses in files of `language` (the stored
 /// `files.language`), or no rules at all (T43).
@@ -253,6 +261,17 @@ struct PersistedScopeFacts {
     /// TypeScript (T44): whether the scope is an ambient module body.
     #[serde(default)]
     ambient_module: bool,
+    /// TypeScript (T45): the side of each class and interface member, in a
+    /// file's module scope.
+    #[serde(default)]
+    member_sides: Vec<PersistedMemberSide>,
+}
+
+/// One TypeScript member's persisted side (T45).
+#[derive(Deserialize)]
+struct PersistedMemberSide {
+    symbol: SymbolId,
+    is_static: bool,
 }
 
 /// One declaration's persisted by-reference parameter flags (AF3).
@@ -545,6 +564,13 @@ impl<'a> Resolver<'a> {
         let mut ctx = RuleCtx::new(php_symbols);
         let mut typescript = RuleCtx::new(typescript_symbols);
         typescript.typescript = rules::ts_scopes::TsModules::new(files, &typescript.symbols);
+        // A TypeScript receiver hint names the `type` use of its class name
+        // (T45), which the receiver rule finds by span.
+        for row in uses {
+            if languages.get(row.file.as_str()).copied() == Some(TYPESCRIPT) {
+                typescript.typescript.insert_use(row);
+            }
+        }
         let mut scope_map = HashMap::with_capacity(scopes.len());
         for row in scopes {
             let mut parsed =
@@ -581,6 +607,18 @@ impl<'a> Resolver<'a> {
                         row.scope_key.as_str(),
                         scope,
                     );
+                    // Only a member of the scope's own file (T45).
+                    let sides: Vec<(&SymbolRow, bool)> = parsed
+                        .member_sides
+                        .iter()
+                        .filter_map(|side| {
+                            let member = typescript.symbol_by_id(&side.symbol)?;
+                            (member.file == row.file).then_some((member, side.is_static))
+                        })
+                        .collect();
+                    for (member, is_static) in sides {
+                        typescript.typescript.insert_member_side(member, is_static);
+                    }
                 }
                 _ => {}
             }
@@ -692,8 +730,9 @@ impl<'a> Resolver<'a> {
                 });
                 continue;
             }
-            // Only a PHP use naming a member kind has a receiver class (AF2);
-            // TypeScript receivers are T45's.
+            // Only a PHP use naming a member kind has a receiver class (AF2).
+            // TypeScript records none: it has no evidence-based exclusion
+            // (spec §11.5), so a receiver class would be read by nothing.
             if !is_php || MemberUse::of(use_row, &facts).is_none() {
                 continue;
             }

@@ -182,7 +182,7 @@ fn php_authored_receiver_hints_and_imports() {
 
     // Case d: `$this->launch()` scoped through `$this`.
     let this_call = find_use(&survey, 640, 646);
-    assert_eq!(this_call.hint, UseHint::This);
+    assert_eq!(this_call.hint, UseHint::This { is_static: None });
     assert_eq!(this_call.receiver.as_deref(), Some("$this"));
 
     // Case e: `$svc->launch()` after `$svc = new \App\...\SurveyService()`.
@@ -191,6 +191,7 @@ fn php_authored_receiver_hints_and_imports() {
         UseHint::NewExpr {
             class_spelling,
             use_block,
+            ..
         } => {
             assert_eq!(class_spelling, "\\App\\Services\\SurveyService");
             assert_eq!(*use_block, None, "case e is at file scope");
@@ -204,6 +205,7 @@ fn php_authored_receiver_hints_and_imports() {
         UseHint::Typed {
             type_spelling,
             origin,
+            ..
         } => {
             assert_eq!(type_spelling, "SurveyService");
             assert_eq!(*origin, TypedOrigin::Parameter, "a parameter type (AF3)");

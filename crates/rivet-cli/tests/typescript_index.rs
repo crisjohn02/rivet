@@ -1,4 +1,4 @@
-//! T43: TypeScript indexed end to end; T44: its bindings end to end.
+//! T43: TypeScript indexed end to end; T44 and T45: its bindings end to end.
 //!
 //! These tests drive the built binary over the authored TypeScript fixture
 //! and small temporary repositories:
@@ -8,11 +8,11 @@
 //!   the gold's uses of each focus name (this is the end-to-end half of the
 //!   T43 gold harness; `rivet-languages/tests/typescript_gold.rs` is the
 //!   extractor half);
-//! - every T44 gold `[[binding]]` holds in the published index and in `refs`
-//!   (the end-to-end half of the T44 gold harness;
+//! - every T44 and T45 gold `[[binding]]` holds in the published index and in
+//!   `refs` (the end-to-end half of the T44 and T45 gold harness;
 //!   `rivet-index/tests/typescript_gold.rs` is the extractor-and-resolver
-//!   half), no T45 entry is bound yet, and no TypeScript use has a receiver
-//!   class;
+//!   half), every receiver binding is `scoped` and every other one `exact`,
+//!   and no TypeScript use has a receiver class;
 //! - removing an export unbinds its dependents on the next refresh, with no
 //!   other file reparsed;
 //! - reference mode excludes nothing by evidence for a TypeScript target;
@@ -185,9 +185,10 @@ fn typescript_rows(root: &Path, table: &str) -> i64 {
 
 /// The `(file, start_byte, end_byte)` of every reference in a refs response
 /// for `target`, checking each one's tier and resolved target against the
-/// gold: a use the gold binds to `target` is `exact` with that target, and
-/// every other use is `name_match` and unbound (T44 binds no focus-name use
-/// to another declaration, and T45's receivers are not bound yet).
+/// gold: a use the gold binds to `target` has the gold's tier (`exact` for
+/// T44, `scoped` for T45) with that target, and every other use is
+/// `name_match` and unbound (the gold binds no focus-name use to another
+/// declaration).
 fn checked_spans(
     value: &Value,
     target: &str,
@@ -238,10 +239,11 @@ fn no_exclusion(value: &Value) {
 fn every_t43_gold_use_is_persisted() {
     let temp = typescript_repo("t43-gold");
     let index = success(&run(temp.path(), &["index", "--json"]));
-    // The 82 gold declarations, and T44's 51 exact bindings.
+    // The 82 gold declarations; T44's 51 exact bindings and T45's 16 scoped
+    // ones.
     assert_eq!(
         (&index["symbols"], &index["uses"], &index["bindings"]),
-        (&Value::from(82), &Value::from(138), &Value::from(51)),
+        (&Value::from(82), &Value::from(138), &Value::from(67)),
         "{index}"
     );
     let gold = gold();
@@ -291,7 +293,8 @@ fn every_t43_gold_use_is_persisted() {
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 
-    // No TypeScript use has a receiver class: receivers are T45's.
+    // No TypeScript use has a receiver class: TypeScript has no
+    // evidence-based exclusion (spec §11.5).
     assert_eq!(typescript_rows(temp.path(), "receiver_classes"), 0);
 }
 
@@ -318,7 +321,7 @@ fn persisted_bindings(root: &Path) -> BTreeMap<UseKey, (String, String)> {
 
 /// The gold's expected link for each `[[binding]]` span of a done task:
 /// `Some((target, tier))` or `None` for a use that stays unresolved. Entries
-/// of a task not yet done (T45) are expected unbound: T44 binds no receiver.
+/// of a task not yet done are expected unbound.
 fn expected_links(gold: &toml::Table) -> BTreeMap<UseKey, Option<(String, String)>> {
     let done: Vec<&str> = gold["done_tasks"]
         .as_array()
@@ -343,8 +346,22 @@ fn expected_links(gold: &toml::Table) -> BTreeMap<UseKey, Option<(String, String
     out
 }
 
+/// Each stored use's `hint_json` by `(file, start_byte, end_byte)`.
+fn persisted_hints(root: &Path) -> BTreeMap<UseKey, String> {
+    let conn = open_db(root);
+    let mut stmt = conn
+        .prepare("SELECT file, start_byte, end_byte, hint_json FROM uses")
+        .expect("prepare hints");
+    stmt.query_map([], |row| {
+        Ok(((row.get(0)?, row.get(1)?, row.get(2)?), row.get(3)?))
+    })
+    .expect("query hints")
+    .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+    .expect("hint rows")
+}
+
 #[test]
-fn every_t44_gold_binding_holds_end_to_end() {
+fn every_t44_and_t45_gold_binding_holds_end_to_end() {
     let temp = typescript_repo("t44-gold");
     success(&run(temp.path(), &["index", "--json"]));
     let gold = gold();
@@ -372,10 +389,17 @@ fn every_t44_gold_binding_holds_end_to_end() {
             }
         }
     }
-    // Every stored TypeScript binding is `exact`: T44 has no other tier.
+    // A binding through a receiver hint is `scoped` (T45); every other
+    // TypeScript binding is `exact` (T44).
+    let hints = persisted_hints(temp.path());
     for (key, (target, tier)) in &bound {
-        if tier != "exact" {
-            problems.push(format!("{key:?} -> {target} is {tier}"));
+        let want = if hints[key] == r#"{"kind":"unresolved"}"# {
+            "exact"
+        } else {
+            "scoped"
+        };
+        if tier != want {
+            problems.push(format!("{key:?} -> {target} is {tier}, want {want}"));
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -450,10 +474,295 @@ fn candidate_and_reference_mode_list_exactly_the_gold_focus_uses() {
             assert_eq!(value["symbol"]["language"], "typescript");
             assert_eq!(checked_spans(&value, target, &links), want, "{name} {mode}");
             assert_eq!(value["total"], want.len(), "{name} {mode}");
-            assert_eq!(value["by_resolution"]["scoped"], 0);
+            let scoped = links
+                .values()
+                .flatten()
+                .filter(|(bound, tier)| bound == target && tier == "scoped")
+                .count();
+            assert_eq!(value["by_resolution"]["scoped"], scoped, "{name} {mode}");
             no_exclusion(&value);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Receiver bindings through the query commands (T45).
+// ---------------------------------------------------------------------------
+
+/// `(file, line, resolution, resolved_target or "")` of each listed use.
+fn listed(items: &Value) -> Vec<(String, i64, String, String)> {
+    items
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| {
+            (
+                item["file"].as_str().expect("file").to_string(),
+                item["line"].as_i64().expect("line"),
+                item["resolution"].as_str().expect("resolution").to_string(),
+                item["resolved_target"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn receiver_bindings_flow_through_refs_symbol_and_context() {
+    let temp = typescript_repo("t45-queries");
+    let launch = "src/services/survey.ts#SurveyService.launch";
+    let scoped = |file: &str, line: i64| {
+        (
+            file.to_string(),
+            line,
+            "scoped".to_string(),
+            launch.to_string(),
+        )
+    };
+    let receivers = vec![
+        scoped("src/report.ts", 17),
+        scoped("src/report.ts", 23),
+        scoped("src/report.ts", 28),
+        scoped("src/report.ts", 29),
+        scoped("src/report.ts", 35),
+        scoped("src/services/survey.ts", 44),
+    ];
+    let untyped = (
+        "src/report.ts".to_string(),
+        41,
+        "name_match".to_string(),
+        String::new(),
+    );
+
+    // `refs`: the five typed/`new` receivers in report.ts and `this.launch()`
+    // in `relaunch` are `scoped`; the untyped `x.launch()` is `name_match`.
+    let value = success(&run(temp.path(), &["refs", launch, "--json"]));
+    let mut want = receivers.clone();
+    want.insert(5, untyped.clone());
+    assert_eq!(listed(&value["references"]), want, "{value}");
+    assert_eq!(
+        value["by_resolution"],
+        serde_json::json!({"exact": 0, "scoped": 6, "name_match": 1})
+    );
+    no_exclusion(&value);
+    let value = success(&run(
+        temp.path(),
+        &["refs", launch, "--min-resolution", "scoped", "--json"],
+    ));
+    assert_eq!(listed(&value["references"]), receivers, "{value}");
+    assert_eq!(value["total"], 6);
+
+    // Human output marks only the name-only use with `?`.
+    let output = run(temp.path(), &["refs", launch]);
+    assert_eq!(output.status.code(), Some(0));
+    let human = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(
+        human.contains("7 references  (6 scoped, 1 name_match)"),
+        "{human}"
+    );
+    let rows: Vec<&str> = human
+        .lines()
+        .filter(|line| line.starts_with("src/"))
+        .collect();
+    assert_eq!(rows.len(), 7, "{human}");
+    for row in rows {
+        if row.starts_with("src/report.ts:41:") {
+            assert!(row.ends_with("name_match ?"), "{row}");
+        } else {
+            assert!(row.ends_with("call  scoped"), "{row}");
+        }
+    }
+
+    // `symbol`: the callers (scoped by default) are the receiver uses, and
+    // the untyped one is counted, not listed.
+    let value = success(&run(temp.path(), &["symbol", launch, "--json"]));
+    assert_eq!(listed(&value["called_by"]["items"]), receivers, "{value}");
+    assert_eq!(value["called_by"]["hidden_name_match"], 1);
+    let callers: BTreeSet<&str> = value["called_by"]["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| item["containing_symbol"]["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(
+        callers,
+        BTreeSet::from([
+            "src/report.ts#ReportService.launch",
+            "src/report.ts#ReportService.runNew",
+            "src/report.ts#ReportService.runTyped",
+            "src/report.ts#ReportService.runVariable",
+            "src/services/survey.ts#SurveyService.relaunch",
+        ])
+    );
+    let output = run(temp.path(), &["symbol", launch]);
+    let human = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(
+        human.contains("called by: (+1 name-only not listed)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("src/services/survey.ts:44:10  SurveyService.relaunch     scoped"),
+        "{human}"
+    );
+
+    // `runTyped`'s own calls are its scoped callee.
+    let run_typed = "src/report.ts#ReportService.runTyped";
+    let value = success(&run(temp.path(), &["symbol", run_typed, "--json"]));
+    let calls: Vec<(String, String)> = value["calls"]["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| {
+            (
+                item["resolved_target"]
+                    .as_str()
+                    .expect("target")
+                    .to_string(),
+                item["resolution"].as_str().expect("tier").to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (launch.to_string(), "scoped".to_string()),
+            (launch.to_string(), "scoped".to_string())
+        ],
+        "{value}"
+    );
+
+    // `context`: with a budget that leaves out the receiver's class, the
+    // scoped callee is its own segment.
+    let args = [
+        "context", run_typed, "--depth", "1", "--tokens", "120", "--json",
+    ];
+    let value = success(&run(temp.path(), &args));
+    let segments: Vec<(String, String, String)> = value["segments"]
+        .as_array()
+        .expect("segments")
+        .iter()
+        .map(|segment| {
+            (
+                segment["symbol"]["id"].as_str().expect("id").to_string(),
+                segment["reason"].as_str().expect("reason").to_string(),
+                segment["resolution"].as_str().expect("tier").to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        segments,
+        vec![
+            (
+                run_typed.to_string(),
+                "target".to_string(),
+                "exact".to_string()
+            ),
+            (
+                launch.to_string(),
+                "callee".to_string(),
+                "scoped".to_string()
+            ),
+        ],
+        "{value}"
+    );
+    let output = run(
+        temp.path(),
+        &["context", run_typed, "--depth", "1", "--tokens", "120"],
+    );
+    let human = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(
+        human.contains("SurveyService.launch  [callee, full]"),
+        "{human}"
+    );
+    // At full depth the callers of that callee come in through it, scoped.
+    let value = success(&run(temp.path(), &["context", run_typed, "--json"]));
+    let second: Vec<(&str, &str)> = value["segments"]
+        .as_array()
+        .expect("segments")
+        .iter()
+        .filter(|segment| segment["reason"] == "second_degree")
+        .map(|segment| {
+            (
+                segment["symbol"]["id"].as_str().expect("id"),
+                segment["resolution"].as_str().expect("tier"),
+            )
+        })
+        .collect();
+    assert!(
+        second.contains(&("src/report.ts#ReportService.runNew", "scoped")),
+        "{value}"
+    );
+}
+
+/// T45: renaming a receiver class's method unbinds the receiver uses in an
+/// unchanged file on the next refresh, and restoring it rebinds them.
+#[test]
+fn renaming_a_receiver_method_unbinds_its_callers_on_the_next_refresh() {
+    let temp = typescript_repo("t45-freshness");
+    fs::remove_file(temp.path().join("src/broken.ts")).expect("remove broken.ts");
+    success(&run(temp.path(), &["index", "--json"]));
+    let launch = "src/services/survey.ts#SurveyService.launch";
+    let before = persisted_bindings(temp.path());
+    let report_links = |bindings: &BTreeMap<UseKey, (String, String)>| -> Vec<UseKey> {
+        bindings
+            .iter()
+            .filter(|(key, (target, tier))| {
+                key.0 == "src/report.ts" && target == launch && tier == "scoped"
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
+    assert_eq!(report_links(&before).len(), 5, "{before:?}");
+
+    let survey = temp.path().join("src/services/survey.ts");
+    let original = fs::read(&survey).expect("read survey.ts");
+    let text = String::from_utf8(original.clone()).expect("UTF-8");
+    assert_eq!(text.matches("  launch(): void {").count(), 1);
+    fs::write(
+        &survey,
+        text.replace("  launch(): void {", "  start(): void {"),
+    )
+    .expect("edit");
+    let log_dir = TempDir::new("t45-reparsed");
+    let log = log_dir.path().join("reparsed.log");
+    let log_value = log.to_str().expect("UTF-8 path").to_string();
+    success(&run_env(
+        temp.path(),
+        &["index", "--json"],
+        &[("RIVET_DEBUG_REPARSED", log_value.as_str())],
+    ));
+    let reparsed: Vec<String> = fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        reparsed,
+        ["src/services/survey.ts"],
+        "report.ts is untouched"
+    );
+    let after = persisted_bindings(temp.path());
+    // report.ts's `launch` uses bind nothing now: `ReportService.launch` is
+    // not their receiver's class, and `start` is not their spelling.
+    for key in report_links(&before) {
+        assert_eq!(after.get(&key), None, "{key:?}");
+    }
+    // `this.service` still binds its field, and nothing names `launch` any
+    // more in `refs`.
+    assert!(
+        after.values().any(
+            |(target, tier)| target == "src/report.ts#ReportService.service" && tier == "scoped"
+        ),
+        "{after:?}"
+    );
+    let value = failure(&run(temp.path(), &["refs", launch, "--json"]), 4);
+    assert_eq!(value["error"], "symbol_not_found", "{value}");
+
+    fs::write(&survey, &original).expect("restore survey.ts");
+    success(&run(temp.path(), &["index", "--json"]));
+    assert_eq!(persisted_bindings(temp.path()), before);
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +969,28 @@ fn navigation_queries() -> Vec<Vec<&'static str>> {
             "ts/src/services/survey.ts#SurveyService.launch",
             "--mode",
             "candidates",
+            "--json",
+        ],
+        // T45: the receiver bindings, in every query that lists them.
+        vec![
+            "refs",
+            "ts/src/services/survey.ts#SurveyService.launch",
+            "--json",
+        ],
+        vec![
+            "refs",
+            "ts/src/services/survey.ts#SurveyService.launch",
+            "--min-resolution",
+            "scoped",
+        ],
+        vec![
+            "symbol",
+            "ts/src/services/survey.ts#SurveyService.launch",
+            "--json",
+        ],
+        vec![
+            "context",
+            "ts/src/report.ts#ReportService.runTyped",
             "--json",
         ],
         vec!["refs", "ts/src/components/Button.tsx#Button", "--json"],
