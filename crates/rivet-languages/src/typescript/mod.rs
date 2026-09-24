@@ -21,9 +21,9 @@
 //! names; and import bindings and re-exports, recorded in the scope they are
 //! written in. [`crate::LanguageId::has_extractor`] is on for TypeScript and
 //! TSX from T43, and `rivet_parser` dispatches both to [`extract_with_limits`].
-//! No use is resolved here, and until T44/T45 add TypeScript binding rules
-//! none is resolved anywhere (`rivet_index`'s rule table has no TypeScript
-//! entry).
+//! T44 records each module's exports and the `type` uses that name values,
+//! and keeps global declarations out of `declares`. No use is resolved here:
+//! `rivet_index`'s TypeScript rule set binds them from these facts.
 //!
 //! Parse policy (docs/ARCHITECTURE.md "Parse and coverage policy"), exactly as
 //! the PHP adapter applies it: a tree with any ERROR or MISSING node publishes

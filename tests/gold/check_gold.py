@@ -21,8 +21,10 @@ TypeScript entry. Comparing a done task's entries with rivet's output is owned
 by Rust tests that `cargo test` runs, named per task in TS_HARNESS (T42: the
 extractor comparison in crates/rivet-languages/tests/typescript_gold.rs; T43:
 that comparison plus the end-to-end check through the CLI in
-crates/rivet-cli/tests/typescript_index.rs). The report names those harnesses
-and says they are not run here; a done task with no harness listed fails.
+crates/rivet-cli/tests/typescript_index.rs; T44: the extractor-and-resolver
+comparison in crates/rivet-index/tests/typescript_gold.rs plus the same
+end-to-end CLI check). The report names those harnesses and says they are not
+run here; a done task with no harness listed fails.
 
 Private corpus gold (T35). The benchmark corpus is private, so its gold
 samples live outside this repository. When both environment variables are
@@ -50,6 +52,10 @@ TS_HARNESS = {
              "cargo test -p rivet-languages --test typescript_gold")],
     "T43": [("crates/rivet-languages/tests/typescript_gold.rs",
              "cargo test -p rivet-languages --test typescript_gold"),
+            ("crates/rivet-cli/tests/typescript_index.rs",
+             "cargo test -p rivet-cli --test typescript_index")],
+    "T44": [("crates/rivet-index/tests/typescript_gold.rs",
+             "cargo test -p rivet-index --test typescript_gold"),
             ("crates/rivet-cli/tests/typescript_index.rs",
              "cargo test -p rivet-cli --test typescript_index")],
 }

@@ -9,9 +9,11 @@ generic resolver (`docs/ADDING-A-LANGUAGE.md` "Adapter contract").
 
 T42 extracts named definitions; T43 adds uses, lexical scopes, and imports,
 turns `LanguageId::has_extractor` on for TypeScript and TSX, and dispatches
-both to this adapter in `rivet_parser`. No TypeScript use is bound until T44
-(direct relative imports) and T45 (receiver hints) add TypeScript binding
-rules: every TypeScript reference is `name_match`.
+both to this adapter in `rivet_parser`. T44 adds each module's exports, the
+`type` uses that name values, and module-local `declares`; with them the
+resolver's TypeScript rules bind direct relative imports, namespace-import
+members, and same-file lexical bindings (`exact`). Receiver hints wait for
+T45: every other TypeScript reference is `name_match`.
 
 ## Named definitions (T42)
 
@@ -150,9 +152,10 @@ binds a name. Each records the names it binds (`locals`) with their space:
 | `namespace A.B` | `A` in the enclosing scope | both |
 
 A name binds for its whole scope, wherever in it it is declared. `declares`
-lists the symbols among a scope's locals; class and interface members are in
-no scope's `declares`, because a bare name never reaches them (a constructor
-parameter property is a parameter inside the constructor). A use's scope
+lists the module-local symbols among a scope's locals; class and interface
+members are in no scope's `declares`, because a bare name never reaches them
+(a constructor parameter property is a parameter inside the constructor), and
+neither are globals (T44, below). A use's scope
 chain, nearest first, therefore shows whether a local of the same name hides
 an import: the fixture's `shadowed` function binds `double` itself, so its
 `double(7)` finds the local before the module scope's import.
@@ -173,11 +176,57 @@ written in (the module, or a string-named ambient module body), never
 | `export * from "m"`, `export * as ns from "m"` | `re_export_all` | none | none | none / `ns` |
 
 `type_only` records `import type`, `export type`, and a `type` modifier on one
-specifier; `import type` is an ordinary import binding, which T44 resolves.
+specifier; `import type` is an ordinary import binding, which T44 resolves
+like any other.
 The specifier is kept exactly as written, relative (`./util`), path alias
 (`@/util`), or package (`lodash`); nothing here decides which module it names.
 `require(...)` in an expression is a `call` of `require`, not an import, and
 `import "./side-effect"` binds nothing and is not recorded.
+
+## Exports (T44)
+
+Each local `export` statement written in a module's own scope (the file's
+module scope, or a string-named ambient module body) records what the module
+exports from its own declarations, as `module_exports` of that scope:
+
+| Form | `exported` | `local` |
+|---|---|---|
+| `export function f`, `export class C`, `export interface I`, `export type T`, `export enum E`, `export declare ...`, `export import X = ...` | the name | the name |
+| `export const a = 1, b = 2`, `export let`, `export var`, `export const { c } = o` | each bound name | the name |
+| `export namespace A.B.C {}` | `A` | `A` |
+| `export default function f`, `export default class C`, `export default interface I` | `default` | the name |
+| `export default x` (an identifier) | `default` | `x` |
+| `export default <expression>`, `export default class {}`, `export default function () {}` | `default` | none |
+| `export { a }`, `export { a as b }`, `export { a as default }` | `a` / `b` / `default` | `a` |
+
+`type_only` is set for `export type { a }` and a `type` modifier on one
+specifier. The span is the local name where the statement writes it (a
+declared name, or the `unknown` use of `export { a }` and `export default
+a`), or the `default` keyword when there is no local name. A namespace
+member's `export`, anything inside `declare global`, `export =`, and `export
+as namespace` record nothing; re-exports stay `module_imports`. Which
+declaration a local name identifies is resolution.
+
+## Value-position `type` uses (T44)
+
+A `new` target, the class operand of `instanceof`, the operand of a
+type-position `typeof`, and a class's `extends` expression are `type` uses (as
+in PHP), but each names a value. Their spans are recorded in the scope's
+`value_type_uses`, so `typeof Foo` beside an `interface Foo` and a `const Foo`
+is looked up among values.
+
+## Global declarations (T44)
+
+A script file (no top-level `import` or `export` statement; a side-effect
+`import "./x"` counts) declares globals, and so does `declare global { ... }`.
+A global can merge with declarations in other files, including unindexed
+library files, so its symbol is in no scope's `declares`: no same-file binding
+claims it. Its name is still a local, so it still hides an outer binding.
+
+The body of a string-named ambient module (`declare module "x" { ... }`,
+including a module augmentation) is marked `ambient_module`: it also sees the
+exports of the module it declares or augments, so the resolver never looks
+past it for a name the body does not bind itself.
 
 ## Receiver hints (T43, for T45)
 
@@ -235,10 +284,22 @@ language's uses appear in the other's `refs`.
 
 ## Resolution and exclusion
 
-Every TypeScript use stays unresolved until T44/T45: the resolver's rule table
-(`rivet_index::resolve`) has no TypeScript entry, and PHP's rules see only
-PHP uses and declarations. Reference-mode exclusion (spec §11.5) never
-applies to a TypeScript target or use: PHP's form table would drop real
+The resolver's TypeScript rule set (`rivet_index::resolve`, T44) sees only
+TypeScript uses and declarations, and PHP's rules only PHP's. Every binding it
+makes is `exact` (docs/ADDING-A-LANGUAGE.md "TypeScript bindings"):
+
+- a named, aliased, default, or `import type` import of a relative module
+  binds its `import` use and every unshadowed use of its local name to the
+  declaration the module exports under the imported name;
+- `ns.member` after `import * as ns` binds `member` to the module's export of
+  that name, a lexical module-qualified name rather than receiver access;
+- a use bound lexically, with shadowing and value/type spaces accounted for,
+  to one module-local declaration of its own file binds to it.
+
+Re-exports, `export *`, path aliases, packages, `require`, ambiguous or
+unindexed modules, globals, merged declarations, and every other receiver stay
+`name_match`; receivers are T45's. Reference-mode exclusion (spec §11.5)
+never applies to a TypeScript target or use: PHP's form table would drop real
 TypeScript references such as `Outer.f()`, `util.format()`, and `Color.Red`,
 and structural typing makes a receiver's class no evidence.
 

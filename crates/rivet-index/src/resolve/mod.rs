@@ -17,28 +17,40 @@
 //! Language guard (T43). The rules above are PHP's: they read PHP's name
 //! resolution, case folding, and receiver syntax. [`rules_for`] is the one
 //! place resolution dispatches on a file's language: a use in a file of a
-//! language with no rule set (TypeScript until T44/T45) is never bound and
-//! gets no receiver class, and each rule set sees only the declarations of
-//! its own language, so a PHP use can never bind a TypeScript declaration
-//! either. Without the guard the PHP rules would bind TypeScript uses by
-//! accident: the global function fallback binds `double()` to any unique
-//! function `double`, the class lookup binds a `type` use or a `new` target
-//! to any unique class of that name, and a typed or `new` receiver hint binds
-//! a member call, all as if PHP's name resolution applied.
+//! language with no rule set is never bound and gets no receiver class, and
+//! each rule set sees only the declarations of its own language, so a PHP use
+//! can never bind a TypeScript declaration or the reverse. Without the guard
+//! the PHP rules would bind TypeScript uses by accident: the global function
+//! fallback binds `double()` to any unique function `double`, the class
+//! lookup binds a `type` use or a `new` target to any unique class of that
+//! name, and a typed or `new` receiver hint binds a member call, all as if
+//! PHP's name resolution applied.
+//!
+//! TypeScript rules (T44). The TypeScript rule set binds direct relative
+//! imports, namespace-import members, and same-file lexical bindings
+//! (`rules::ts_lexical`, `rules::ts_namespace`), over TypeScript declarations
+//! only, reading TypeScript scope facts through [`RuleCtx::typescript`]. It
+//! records no receiver class: receiver hints are T45's.
 
 pub(crate) mod rules;
 
 use std::collections::{HashMap, HashSet};
 
-use rivet_core::extract::{CallArg, NewBinding, ScopeImport};
+use rivet_core::extract::{
+    CallArg, LocalBinding, ModuleExport, ModuleImport, NewBinding, ScopeImport,
+};
 use rivet_core::{ParseStatus, RefKind, Resolution, Span, SymbolKind};
 use rivet_store::{
     BindingRow, Error, FileRow, ReceiverClassRow, ScopeRow, Store, SymbolRow, UseRow,
 };
 use serde::Deserialize;
 
-/// The stored `files.language` whose rule set [`RULES`] is.
+/// The stored `files.language` whose rule set [`PHP_RULES`] is.
 const PHP: &str = "php";
+
+/// The stored `files.language` of `.ts`, `.d.ts`, and `.tsx` files, whose
+/// rule set [`TYPESCRIPT_RULES`] is (T44).
+const TYPESCRIPT: &str = "typescript";
 
 /// The canonical ID of the one declaration a rule selected.
 pub(crate) type SymbolId = String;
@@ -48,29 +60,40 @@ pub(crate) type RuleFn = fn(&RuleCtx<'_>, &UseRow, &ScopeFacts) -> Option<(Symbo
 
 /// The ordered PHP rule list. The first single-candidate rule wins. T20
 /// registers `receivers` and T21 registers `new_expr` after these entries.
-const RULES: &[RuleFn] = &[
+const PHP_RULES: &[RuleFn] = &[
     rules::imports::resolve,
     rules::functions::resolve,
     rules::receivers::resolve,
     rules::new_expr::resolve,
 ];
 
+/// The ordered TypeScript rule list (T44). The two rules are disjoint: the
+/// lexical rule binds `import` uses and uses without a receiver, the
+/// namespace rule members of a namespace import. T45 adds receiver rules.
+const TYPESCRIPT_RULES: &[RuleFn] = &[rules::ts_lexical::resolve, rules::ts_namespace::resolve];
+
 /// The ordered rule set for uses in files of `language` (the stored
 /// `files.language`), or no rules at all (T43).
 ///
-/// This is the one place resolution dispatches on language. Only PHP has
-/// rules in v0.1; T44 and T45 add TypeScript's here, each seeing only
-/// TypeScript declarations. A use whose language has no rules keeps no
-/// binding and no receiver class, so it stays `name_match` wherever it is
-/// listed; a file with no stored language is never bound either.
+/// This is the one place resolution dispatches on language. PHP uses get the
+/// PHP rules over PHP declarations and TypeScript uses (T44) the TypeScript
+/// rules over TypeScript declarations. A use whose language has no rules
+/// keeps no binding and no receiver class, so it stays `name_match` wherever
+/// it is listed; a file with no stored language is never bound either.
 fn rules_for(language: Option<&str>) -> &'static [RuleFn] {
     match language {
-        Some(PHP) => RULES,
+        Some(PHP) => PHP_RULES,
+        Some(TYPESCRIPT) => TYPESCRIPT_RULES,
         _ => &[],
     }
 }
 
 /// Lexical facts visible from one use, gathered along its scope chain.
+///
+/// These are PHP's facts. A TypeScript use gets the empty value: the
+/// TypeScript rules walk the scope chain themselves, through
+/// [`RuleCtx::typescript`], because the nearest binding scope decides.
+#[derive(Default)]
 pub(crate) struct ScopeFacts {
     /// Import aliases visible from the use, nearest scope first.
     pub(crate) imports: Vec<ScopeImport>,
@@ -215,6 +238,21 @@ struct PersistedScopeFacts {
     dynamic_global_write: bool,
     #[serde(default)]
     parameter_lists: Vec<PersistedParameterList>,
+    /// TypeScript (T43): the names each scope binds.
+    #[serde(default)]
+    locals: Vec<LocalBinding>,
+    /// TypeScript (T43): import bindings and re-exports.
+    #[serde(default)]
+    module_imports: Vec<ModuleImport>,
+    /// TypeScript (T44): the module's own exports.
+    #[serde(default)]
+    module_exports: Vec<ModuleExport>,
+    /// TypeScript (T44): the `type` uses that name values.
+    #[serde(default)]
+    value_type_uses: Vec<Span>,
+    /// TypeScript (T44): whether the scope is an ambient module body.
+    #[serde(default)]
+    ambient_module: bool,
 }
 
 /// One declaration's persisted by-reference parameter flags (AF3).
@@ -252,6 +290,9 @@ pub(crate) struct RuleCtx<'a> {
     /// Whether some indexed function-like scope can rebind a global it does
     /// not name (AF3). See `ScopeFacts::dynamic_global_write` in rivet-core.
     pub(crate) dynamic_global_write: bool,
+    /// The TypeScript scopes, files, and symbol indexes the TypeScript rules
+    /// read (T44); empty in the PHP rule set's context.
+    pub(crate) typescript: rules::ts_scopes::TsModules<'a>,
 }
 
 impl<'a> RuleCtx<'a> {
@@ -281,6 +322,7 @@ impl<'a> RuleCtx<'a> {
             parameter_lists: HashMap::new(),
             global_names: HashSet::new(),
             dynamic_global_write: false,
+            typescript: rules::ts_scopes::TsModules::default(),
         }
     }
 
@@ -429,6 +471,9 @@ pub struct ResolvedLinks {
 pub struct Resolver<'a> {
     /// The PHP rules' view of the snapshot: PHP declarations only (T43).
     ctx: RuleCtx<'a>,
+    /// The TypeScript rules' view: TypeScript declarations, scopes, and the
+    /// snapshot's files (T44).
+    typescript: RuleCtx<'a>,
     uses: &'a [UseRow],
     scopes: HashMap<(&'a str, &'a str), ScopeData<'a>>,
     /// Each file's stored language, which picks its rule set ([`rules_for`]).
@@ -452,11 +497,22 @@ impl<'a> Resolver<'a> {
             .iter()
             .filter_map(|file| Some((file.path.as_str(), file.language.as_deref()?)))
             .collect();
-        let php_symbols = symbols
-            .iter()
-            .filter(|row| languages.get(row.file.as_str()).copied() == Some(PHP))
-            .collect();
-        Resolver::build(languages, php_symbols, uses, scopes)
+        let of_language = |language: &str| -> Vec<&'a SymbolRow> {
+            symbols
+                .iter()
+                .filter(|row| languages.get(row.file.as_str()).copied() == Some(language))
+                .collect()
+        };
+        let php_symbols = of_language(PHP);
+        let typescript_symbols = of_language(TYPESCRIPT);
+        Resolver::build(
+            languages,
+            php_symbols,
+            typescript_symbols,
+            files,
+            uses,
+            scopes,
+        )
     }
 
     /// A resolver that only reads scope facts ([`Resolver::scope_facts_for`])
@@ -468,28 +524,65 @@ impl<'a> Resolver<'a> {
         uses: &'a [UseRow],
         scopes: &'a [ScopeRow],
     ) -> Resolver<'a> {
-        Resolver::build(HashMap::new(), symbols.iter().collect(), uses, scopes)
+        Resolver::build(
+            HashMap::new(),
+            symbols.iter().collect(),
+            Vec::new(),
+            &[],
+            uses,
+            scopes,
+        )
     }
 
     fn build(
         languages: HashMap<&'a str, &'a str>,
-        rule_symbols: Vec<&'a SymbolRow>,
+        php_symbols: Vec<&'a SymbolRow>,
+        typescript_symbols: Vec<&'a SymbolRow>,
+        files: &'a [FileRow],
         uses: &'a [UseRow],
         scopes: &'a [ScopeRow],
     ) -> Resolver<'a> {
-        let mut ctx = RuleCtx::new(rule_symbols);
+        let mut ctx = RuleCtx::new(php_symbols);
+        let mut typescript = RuleCtx::new(typescript_symbols);
+        typescript.typescript = rules::ts_scopes::TsModules::new(files, &typescript.symbols);
         let mut scope_map = HashMap::with_capacity(scopes.len());
         for row in scopes {
-            let parsed =
+            let mut parsed =
                 serde_json::from_str::<PersistedScopeFacts>(&row.facts_json).unwrap_or_default();
             // Snapshot-wide facts (AF3): any PHP scope's parameter lists and
             // global rebinding facts apply to PHP uses in every file.
-            if languages.get(row.file.as_str()).copied() == Some(PHP) {
-                for list in parsed.parameter_lists {
-                    ctx.parameter_lists.insert(list.symbol, list.by_ref);
+            match languages.get(row.file.as_str()).copied() {
+                Some(PHP) => {
+                    for list in std::mem::take(&mut parsed.parameter_lists) {
+                        ctx.parameter_lists.insert(list.symbol, list.by_ref);
+                    }
+                    ctx.global_names
+                        .extend(std::mem::take(&mut parsed.global_names));
+                    ctx.dynamic_global_write |= parsed.dynamic_global_write;
                 }
-                ctx.global_names.extend(parsed.global_names);
-                ctx.dynamic_global_write |= parsed.dynamic_global_write;
+                // The TypeScript rules read each scope's own facts (T44).
+                Some(TYPESCRIPT) => {
+                    let declared = parsed
+                        .declares
+                        .iter()
+                        .filter_map(|id| typescript.symbol_by_id(id))
+                        .collect();
+                    let scope = rules::ts_scopes::TsScope::new(
+                        row.parent_scope_key.as_deref(),
+                        std::mem::take(&mut parsed.locals),
+                        std::mem::take(&mut parsed.module_imports),
+                        std::mem::take(&mut parsed.module_exports),
+                        declared,
+                        &parsed.value_type_uses,
+                        parsed.ambient_module,
+                    );
+                    typescript.typescript.insert_scope(
+                        row.file.as_str(),
+                        row.scope_key.as_str(),
+                        scope,
+                    );
+                }
+                _ => {}
             }
             scope_map.insert(
                 (row.file.as_str(), row.scope_key.as_str()),
@@ -514,6 +607,7 @@ impl<'a> Resolver<'a> {
         }
         Resolver {
             ctx,
+            typescript,
             uses,
             scopes: scope_map,
             languages,
@@ -571,19 +665,25 @@ impl<'a> Resolver<'a> {
             let Some(use_id) = use_row.use_id else {
                 continue;
             };
-            let rules = rules_for(self.languages.get(use_row.file.as_str()).copied());
+            let language = self.languages.get(use_row.file.as_str()).copied();
+            let rules = rules_for(language);
             if rules.is_empty() {
                 continue;
             }
-            let facts = self.scope_facts_for(use_row);
+            // Each rule set sees its own language's declarations only. The
+            // TypeScript rules walk their own scope chain (T44).
+            let is_php = language == Some(PHP);
+            let (ctx, facts) = if is_php {
+                (&self.ctx, self.scope_facts_for(use_row))
+            } else {
+                (&self.typescript, ScopeFacts::default())
+            };
             // A use no single namespace block owns has no trustworthy lexical
             // context; never guess one (AF1).
             if facts.namespace_unattributed {
                 continue;
             }
-            let bound = rules
-                .iter()
-                .find_map(|rule| rule(&self.ctx, use_row, &facts));
+            let bound = rules.iter().find_map(|rule| rule(ctx, use_row, &facts));
             if let Some((target_id, resolution)) = bound {
                 bindings.push(BindingRow {
                     use_id,
@@ -592,8 +692,9 @@ impl<'a> Resolver<'a> {
                 });
                 continue;
             }
-            // Only a use naming a member kind has a receiver class (AF2).
-            if MemberUse::of(use_row, &facts).is_none() {
+            // Only a PHP use naming a member kind has a receiver class (AF2);
+            // TypeScript receivers are T45's.
+            if !is_php || MemberUse::of(use_row, &facts).is_none() {
                 continue;
             }
             let evidence = rules::receivers::receiver_class(&self.ctx, use_row, &facts)
@@ -1362,10 +1463,12 @@ mod tests {
 
     /// T43: every PHP rule would bind these TypeScript uses by accident (the
     /// global function fallback, the class lookup for a `type` use, the
-    /// typed-receiver and `new` rules), but no rule set exists for TypeScript,
-    /// so nothing is bound and no receiver class is recorded.
+    /// typed-receiver and `new` rules). T44: the TypeScript rules bind only
+    /// through a lexical binding (a local or an import of the use's scope
+    /// chain, or a namespace import), which these rows do not record, so
+    /// nothing is bound and no receiver class is recorded.
     #[test]
-    fn typescript_uses_are_never_bound() {
+    fn php_rules_never_bind_typescript_uses() {
         let function = symbol("util.ts", "double", SymbolKind::Function);
         let class = symbol("svc.ts", "Svc", SymbolKind::Class);
         let mut method = symbol("svc.ts", "Svc.launch", SymbolKind::Method);

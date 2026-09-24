@@ -5,8 +5,8 @@ import { debounce } from "lodash";
 import type { Survey } from "./models";
 import { pick } from "./pick";
 
-// gold: (x) every import-bound use below stays unresolved in v0.1; (y) "./pick"
-// names both pick.ts and pick/index.ts.
+// gold: (x) import-bound uses below stay unresolved in v0.1, except (b) the
+// import type; (y) "./pick" is two modules.
 export function unresolvedUses(survey: Survey): number {
   const legacy = require("./util");
   legacy.double(1);

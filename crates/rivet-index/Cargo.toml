@@ -13,3 +13,10 @@ rivet-store = { path = "../rivet-store" }
 # reparsing the source file (T18/T19).
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# The T44 TypeScript gold harness (tests/typescript_gold.rs) extracts the
+# authored fixture with the real adapter and resolves it with this crate.
+rivet-languages = { path = "../rivet-languages" }
+rivet-parser = { path = "../rivet-parser" }
+toml = { workspace = true }

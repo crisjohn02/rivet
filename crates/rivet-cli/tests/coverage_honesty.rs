@@ -395,14 +395,15 @@ fn typescript_fixture_is_indexed_beside_unchanged_php() {
     assert_eq!(items[0]["code"], "parse_error");
 
     // The TypeScript fixture adds its 82 gold declarations and 138 uses, and
-    // no binding: TypeScript uses stay unresolved until T44/T45.
+    // T44's 51 exact TypeScript bindings (direct relative imports, namespace
+    // members, same-file declarations); the 13 PHP bindings are unchanged.
     assert_eq!(
         (&before["symbols"], &before["uses"], &before["bindings"]),
         (&json!(50), &json!(14), &json!(13))
     );
     assert_eq!(
         (&value["symbols"], &value["uses"], &value["bindings"]),
-        (&json!(132), &json!(152), &json!(13))
+        (&json!(132), &json!(152), &json!(64))
     );
 
     // PHP answers are the PHP-only repository's.

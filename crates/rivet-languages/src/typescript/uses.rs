@@ -59,6 +59,23 @@
 //!   [`UseHint::NewExpr`] for a `const` initialized by `new C(...)`. A union,
 //!   array, or other structural type records no hint, and neither does a `let`
 //!   or `var` bound by `new`, which can be reassigned.
+//! - **Exports** (T44): each local `export` statement of the module scope (or
+//!   of a string-named ambient module body) as [`ModuleExport`]s: the names a
+//!   declaration exports, `export default` of a named declaration or of an
+//!   identifier, and `export { a as b }` specifiers; `export default
+//!   <expression>` and anonymous defaults are recorded with no local name.
+//!   Re-exports stay [`ModuleImport`]s.
+//! - **Value-position `type` uses** (T44): the span of each `type` use that
+//!   names a value (a `new` target, an `instanceof` operand, a `typeof`
+//!   operand, a class `extends` expression), in its scope's
+//!   `value_type_uses`.
+//! - **Global declarations** (T44): a script file (no top-level `import` or
+//!   `export`) and a `declare global` block declare globals, which can merge
+//!   with declarations in other files. Their names are locals, but no scope's
+//!   `declares` lists their symbols, so no same-file binding claims one.
+//! - **Ambient module bodies** (T44): the body of `declare module "x" {}` is
+//!   marked `ambient_module`, because it also sees the exports of the module
+//!   it declares or augments.
 //!
 //! Nothing here resolves anything: every use leaves the adapter unbound.
 
@@ -66,8 +83,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use rivet_core::extract::{
-    BindingSpace, ExtractedScope, ExtractedUse, LocalBinding, ModuleImport, ModuleImportKind,
-    ScopeFacts, TypedOrigin, UseHint,
+    BindingSpace, ExtractedScope, ExtractedUse, LocalBinding, ModuleExport, ModuleImport,
+    ModuleImportKind, ScopeFacts, TypedOrigin, UseHint,
 };
 use rivet_core::{ExtractedSymbol, RefKind, Span, SymbolKind};
 use tree_sitter::Node;
@@ -126,9 +143,17 @@ struct ScopeBuild {
     /// Whether `var` and function declarations land here: the module, a
     /// namespace or ambient module body, a function, or a static block.
     var_scope: bool,
+    /// Whether this is a module's own scope, whose `export` statements are
+    /// the module's exports (T44): the file's module scope, or the body of a
+    /// string-named ambient module. A namespace body is not: its `export`
+    /// exports a namespace member.
+    module: bool,
     locals: Vec<Local>,
     declares: Vec<usize>,
     imports: Vec<ModuleImport>,
+    exports: Vec<ModuleExport>,
+    /// The spans of `type` uses in this scope that name values (T44).
+    value_type_uses: Vec<Span>,
 }
 
 /// The single named types of one named class's fields.
@@ -186,6 +211,11 @@ struct Walker<'s> {
     /// For each class body being walked, its fields when it is a named class.
     class_stack: Vec<Option<Rc<Fields>>>,
     next_ordinal: u32,
+    /// Whether the file is a script: it has no top-level `import` or
+    /// `export`, so its top-level declarations are global (T44).
+    script: bool,
+    /// How many `declare global` blocks enclose the current position (T44).
+    global_depth: u32,
 }
 
 impl<'s> Walker<'s> {
@@ -219,6 +249,8 @@ impl<'s> Walker<'s> {
             this_stack: vec![This::Opaque],
             class_stack: Vec::new(),
             next_ordinal: 0,
+            script: false,
+            global_depth: 0,
         }
     }
 
@@ -228,13 +260,21 @@ impl<'s> Walker<'s> {
 
     /// Walks the whole file in the module scope.
     fn module(&mut self, root: Node<'_>) {
+        // A file with no top-level `import` or `export` statement is a script
+        // (a side-effect `import "./x"` counts: it makes the file a module).
+        self.script = !named_children(root)
+            .iter()
+            .any(|child| matches!(child.kind(), "import_statement" | "export_statement"));
         self.scopes.push(ScopeBuild {
             key: MODULE_SCOPE_KEY.to_string(),
             parent: None,
             var_scope: true,
+            module: true,
             locals: Vec::new(),
             declares: Vec::new(),
             imports: Vec::new(),
+            exports: Vec::new(),
+            value_type_uses: Vec::new(),
         });
         self.scope_stack.push(0);
         self.statements(root);
@@ -252,9 +292,12 @@ impl<'s> Walker<'s> {
             key: format!("{container}:{}", self.next_ordinal),
             parent: self.scope_stack.last().copied(),
             var_scope,
+            module: false,
             locals: Vec::new(),
             declares: Vec::new(),
             imports: Vec::new(),
+            exports: Vec::new(),
+            value_type_uses: Vec::new(),
         });
         let index = self.scopes.len() - 1;
         self.scope_stack.push(index);
@@ -287,7 +330,11 @@ impl<'s> Walker<'s> {
         // A class or interface member is never lexically bound, even when a
         // local shares its declaration: a constructor parameter property is a
         // parameter inside the constructor, not a reference to the property.
-        if let Some(&symbol) = self.by_name_span.get(&(span.start_byte(), span.end_byte()))
+        // A global declaration (T44) is not module-local, so it is in no
+        // scope's `declares` either; its name is still a local below.
+        if !self.script
+            && self.global_depth == 0
+            && let Some(&symbol) = self.by_name_span.get(&(span.start_byte(), span.end_byte()))
             && self.symbols[symbol].parent_index.is_none_or(|parent| {
                 matches!(
                     self.symbols[parent].kind,
@@ -636,12 +683,36 @@ impl<'s> Walker<'s> {
     }
 
     /// A position that names a class or value as a type (`new C`,
-    /// `instanceof C`, `extends C`, `typeof x`).
+    /// `instanceof C`, `extends C`, `typeof x`). The use is a `type` use, as
+    /// in PHP, and its span is a value-position type use of the current scope
+    /// (T44): the name is looked up among values.
     fn typed_operand(&mut self, node: Node<'_>) {
         match node.kind() {
-            "identifier" => self.bare(node, RefKind::Type),
-            "member_expression" => self.member(node, RefKind::Type),
+            "identifier" => {
+                self.bare(node, RefKind::Type);
+                self.value_type_use(node);
+            }
+            "member_expression" => {
+                self.member(node, RefKind::Type);
+                if let Some(property) = node.child_by_field_name("property")
+                    && matches!(
+                        property.kind(),
+                        "property_identifier" | "private_property_identifier"
+                    )
+                {
+                    self.value_type_use(property);
+                }
+            }
             _ => self.visit(node),
+        }
+    }
+
+    /// Records `name`, a `type` use just recorded in the current scope, as
+    /// one that names a value (T44).
+    fn value_type_use(&mut self, name: Node<'_>) {
+        if let Some(span) = span_of(name) {
+            let scope = self.current_scope();
+            self.scopes[scope].value_type_uses.push(span);
         }
     }
 
@@ -1171,7 +1242,12 @@ impl<'s> Walker<'s> {
             }
         }
         if let Some(body) = node.child_by_field_name("body") {
-            self.open_scope(true);
+            let scope = self.open_scope(true);
+            // A string-named ambient module's body is a module's own scope,
+            // whose `export`s are that module's exports (T44).
+            self.scopes[scope].module = node
+                .child_by_field_name("name")
+                .is_some_and(|name| name.kind() == "string");
             self.statements(body);
             self.close_scope();
         }
@@ -1184,12 +1260,18 @@ impl<'s> Walker<'s> {
         let global = node
             .children(&mut cursor)
             .any(|child| !child.is_named() && child.kind() == "global");
+        if global {
+            self.global_depth += 1;
+        }
         for child in named_children(node) {
             if global && child.kind() == "statement_block" {
                 self.statements(child);
             } else {
                 self.visit(child);
             }
+        }
+        if global {
+            self.global_depth -= 1;
         }
     }
 
@@ -1478,6 +1560,9 @@ impl<'s> Walker<'s> {
         let type_only = has_token(node, "type");
         // `export as namespace X` names a global, not a use.
         let as_namespace = has_token(node, "namespace");
+        if specifier.is_none() {
+            self.record_exports(node, type_only);
+        }
         let mut cursor = node.walk();
         let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
         for child in children {
@@ -1514,6 +1599,95 @@ impl<'s> Walker<'s> {
                 _ => {}
             }
         }
+    }
+
+    /// Records what one local `export` statement exports (T44), when it is
+    /// written in a module's own scope and outside `declare global`.
+    ///
+    /// - `export <declaration>`: each name the declaration binds, under its
+    ///   own name.
+    /// - `export default <named declaration>`: its name, as `default`.
+    /// - `export default <identifier>`: the identifier, as `default`.
+    /// - `export default <expression>` or an anonymous default: `default`
+    ///   with no local name.
+    /// - `export { a, b as c, d as default }`: each specifier's local name
+    ///   under its exported name.
+    ///
+    /// `export =` and `export as namespace` record nothing.
+    fn record_exports(&mut self, node: Node<'_>, type_only: bool) {
+        let scope = self.current_scope();
+        if self.global_depth > 0 || !self.scopes[scope].module {
+            return;
+        }
+        let mut cursor = node.walk();
+        let default_keyword = node
+            .children(&mut cursor)
+            .find(|child| !child.is_named() && child.kind() == "default");
+        let mut exports = Vec::new();
+        if let Some(keyword) = default_keyword {
+            let local = match node.child_by_field_name("declaration") {
+                Some(declaration) => match declared_names(declaration).as_slice() {
+                    [name] => Some(*name),
+                    _ => None,
+                },
+                None => node
+                    .child_by_field_name("value")
+                    .filter(|value| value.kind() == "identifier"),
+            };
+            let span = match local {
+                Some(name) => span_of(name),
+                None => span_of(keyword),
+            };
+            if let Some(span) = span {
+                exports.push(ModuleExport {
+                    exported: "default".to_string(),
+                    local: local.map(|name| self.text(name)),
+                    type_only,
+                    span,
+                });
+            }
+        } else if let Some(declaration) = node.child_by_field_name("declaration") {
+            for name in declared_names(declaration) {
+                if let Some(span) = span_of(name) {
+                    let text = self.text(name);
+                    exports.push(ModuleExport {
+                        exported: text.clone(),
+                        local: Some(text),
+                        type_only: false,
+                        span,
+                    });
+                }
+            }
+        } else {
+            for clause in named_children(node) {
+                if clause.kind() != "export_clause" {
+                    continue;
+                }
+                for item in named_children(clause) {
+                    let Some(name) = item
+                        .child_by_field_name("name")
+                        .filter(|name| name.kind() == "identifier")
+                    else {
+                        continue;
+                    };
+                    let Some(span) = span_of(name) else {
+                        continue;
+                    };
+                    let local = self.text(name);
+                    let exported = item
+                        .child_by_field_name("alias")
+                        .map(|alias| self.export_name(alias))
+                        .unwrap_or_else(|| local.clone());
+                    exports.push(ModuleExport {
+                        exported,
+                        local: Some(local),
+                        type_only: type_only || has_token(item, "type"),
+                        span,
+                    });
+                }
+            }
+        }
+        self.scopes[scope].exports.extend(exports);
     }
 
     /// `export { a as b } from "m"`: each specifier is a re-export, and its
@@ -1674,12 +1848,23 @@ impl<'s> Walker<'s> {
                 let mut module_imports = scope.imports;
                 module_imports
                     .sort_by_key(|import| (import.span.start_byte(), import.span.end_byte()));
+                let mut module_exports = scope.exports;
+                module_exports
+                    .sort_by_key(|export| (export.span.start_byte(), export.span.end_byte()));
+                let mut value_type_uses = scope.value_type_uses;
+                value_type_uses.sort_by_key(|span| (span.start_byte(), span.end_byte()));
+                value_type_uses.dedup();
                 ExtractedScope {
                     scope_key: scope.key,
                     parent_scope_key: scope.parent.map(|parent| keys[parent].clone()),
                     facts: ScopeFacts {
                         locals,
                         module_imports,
+                        module_exports,
+                        value_type_uses,
+                        // A module's own scope other than the file's is a
+                        // string-named ambient module body.
+                        ambient_module: scope.module && scope.parent.is_some(),
                         declares,
                         ..ScopeFacts::default()
                     },
@@ -1894,6 +2079,74 @@ fn has_token(node: Node<'_>, token: &str) -> bool {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .any(|child| !child.is_named() && child.kind() == token)
+}
+
+/// The name nodes a declaration binds in its scope, for its exports (T44):
+/// the name of a function, class, interface, type alias, or enum; every name
+/// a `const`, `let`, or `var` declarator's pattern binds; the first segment of
+/// a namespace name; the alias of `import X = ...`; and, through `declare`,
+/// the names of the declaration it wraps. A string-named module and `declare
+/// global` bind none.
+fn declared_names(node: Node<'_>) -> Vec<Node<'_>> {
+    match node.kind() {
+        "function_declaration"
+        | "generator_function_declaration"
+        | "function_signature"
+        | "class_declaration"
+        | "abstract_class_declaration"
+        | "interface_declaration"
+        | "type_alias_declaration"
+        | "enum_declaration" => node.child_by_field_name("name").into_iter().collect(),
+        "lexical_declaration" | "variable_declaration" => {
+            let mut names = Vec::new();
+            for declarator in named_children(node) {
+                if declarator.kind() == "variable_declarator"
+                    && let Some(pattern) = declarator.child_by_field_name("name")
+                {
+                    pattern_names(pattern, &mut names);
+                }
+            }
+            names
+        }
+        "internal_module" | "module" => node
+            .child_by_field_name("name")
+            .and_then(leftmost_segment)
+            .into_iter()
+            .collect(),
+        "import_alias" => named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "identifier")
+            .into_iter()
+            .collect(),
+        "ambient_declaration" => named_children(node)
+            .into_iter()
+            .flat_map(declared_names)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Appends every name a binding pattern binds, in source order.
+fn pattern_names<'t>(node: Node<'t>, out: &mut Vec<Node<'t>>) {
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => out.push(node),
+        "object_pattern" | "array_pattern" | "rest_pattern" => {
+            for child in named_children(node) {
+                pattern_names(child, out);
+            }
+        }
+        "pair_pattern" => {
+            if let Some(value) = node.child_by_field_name("value") {
+                pattern_names(value, out);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                pattern_names(left, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The first identifier of a (possibly dotted) namespace name, or `None` for

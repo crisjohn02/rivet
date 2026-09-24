@@ -23,7 +23,7 @@ the pinned grammar.
 | `src/report.ts` | named, aliased, renamed-default, and namespace imports; the second `launch`; receivers typed by a field, a parameter (also with `?.`), a variable, and a preceding `new`; an unannotated receiver; top-level calls; template-literal text and interpolation; a local that shadows an import |
 | `src/anonymous.ts` | an anonymous default-exported class, a function-expression IIFE, an arrow IIFE, and callbacks inside and outside a named function |
 | `src/barrel.ts` | a re-export with an alias and an `export *` |
-| `src/unresolved.ts` | imports that must stay unresolved: through the barrel (re-export and `export *`), a path alias, a package, `require`, `import type`, and an ambiguous relative path |
+| `src/unresolved.ts` | imports that must stay unresolved: through the barrel (re-export and `export *`), a path alias, a package, `require`, and an ambiguous relative path; and an `import type`, which binds like any direct import (T44) |
 | `src/pick.ts`, `src/pick/index.ts` | both candidates for `./pick`, so the ordered candidate rule finds two modules |
 | `src/components/Button.tsx` | a props interface, a function component, a const arrow component, lowercase intrinsic elements |
 | `src/components/App.tsx` | component names as uses, intrinsic elements, literal JSX text with identifier-like words, a fragment, attribute names and string values, JSX expression containers with a callback, a closing tag, and an anonymous default-exported function component |
@@ -42,7 +42,9 @@ its gold entries.
   `SurveyService.launch`, and `ReportService.launch`.
 - **b** — direct relative imports: named, aliased (`launchAll as runAll`), and a
   default import under another name (`makeLabel` for `helper`), whose
-  spellings differ from their targets.
+  spellings differ from their targets; and `import type { Survey }` in
+  `src/unresolved.ts`, which T41 filed under **x** and T44 settled as an
+  ordinary direct import.
 - **c** — top-level calls with no containing symbol.
 - **d** — `this.launch()` inside `SurveyService`, scoped through `this`.
 - **e** — `created.launch()` after `const created = new SurveyService(...)`.
@@ -79,7 +81,9 @@ its gold entries.
   remains.
 - **v** — the parse failure.
 - **w** — unsupported extensions.
-- **x** — import forms that stay unresolved.
+- **x** — import forms that stay unresolved (T44 corrected the comment in
+  `src/unresolved.ts`, at the same byte length, when `import type` moved to
+  **b**).
 - **y** — an ambiguous relative module path.
 - **z** — same-file lexical bindings.
 

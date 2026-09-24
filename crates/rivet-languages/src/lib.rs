@@ -170,6 +170,16 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **13** — T44: TypeScript scopes gained `module_exports` (what a module
+///   exports from its own declarations: `export` on a declaration, `export
+///   default` of a named declaration or an identifier, local `export { a as
+///   b }` specifiers, and anonymous or expression defaults with no local name)
+///   and `value_type_uses` (the `type` uses that name values: `new` targets,
+///   `instanceof` and `typeof` operands, class `extends` expressions) and
+///   `ambient_module` (a string-named ambient module's body); and a
+///   TypeScript scope's `declares` no longer lists global declarations (those
+///   of a script file, which has no top-level `import` or `export`, and those
+///   inside `declare global`). PHP facts are unchanged.
 /// - **12** — T43: TypeScript and TSX files are indexed. Their facts are new
 ///   (symbols with case-sensitive lookup names, uses, scopes with
 ///   `locals` and `module_imports`, and `UseHint::Typed` with the new
@@ -227,13 +237,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=12";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=13";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=12";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=13";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=12";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=13";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";

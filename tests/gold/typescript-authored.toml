@@ -62,7 +62,10 @@
 #   `export { double as twice } from "./util"`) is an `import` use, which
 #   stays unresolved because re-exports are not followed; a JSX attribute name
 #   and a closing tag's name are not uses; `import type` is an `import` use
-#   like any named import (T44 corrects its binding entry).
+#   like any named import.
+# - Settled by T44: `import type` binds like any direct import, so T44
+#   corrected T41's two `Survey` entries in src/unresolved.ts from unresolved
+#   to `exact` (and their case from x to b).
 # - `container` is the id of the nearest enclosing function, method, class,
 #   interface or enum symbol (the PHP container rule), or "" for none. A module,
 #   const or property is not a container; an anonymous function or class is
@@ -72,7 +75,12 @@
 # Bindings name a [[use]] span. `expected_target` is an id, or "" when the use
 # stays unresolved; `expected_resolution` is the justified tier (spec 11.3,
 # 11.4). `not_target`, when present, is an id the use must never resolve to and
-# that reference mode for that id must exclude.
+# that reference mode for that id must exclude. The harnesses verify only the
+# first half for TypeScript: the one `not_target` use, case p's shadowed
+# `double(7)`, is bound to a function-local const, which is no symbol, so it
+# stays unresolved, and TypeScript has no evidence-based exclusion (spec
+# 11.5), so reference mode for src/util.ts#double still lists it as
+# `name_match`.
 #
 # Tables and task tags. Each entry carries the task that makes it verifiable:
 # - [[declaration]] T42: a named definition.
@@ -97,10 +105,12 @@
 # The tasks whose entries are verified. check_gold.py checks their spans and
 # names the harness that compares them with rivet (T42 and T43: the extractor,
 # in crates/rivet-languages/tests/typescript_gold.rs; T43 also end to end
-# through the CLI, in crates/rivet-cli/tests/typescript_index.rs); every other
-# entry is reported as pending, per task. Add a task in the same change that
-# makes its entries pass.
-done_tasks = ["T42", "T43"]
+# through the CLI, in crates/rivet-cli/tests/typescript_index.rs; T44: the
+# extractor and resolver, in crates/rivet-index/tests/typescript_gold.rs, and
+# end to end through the CLI, in crates/rivet-cli/tests/typescript_index.rs);
+# every other entry is reported as pending, per task. Add a task in the same
+# change that makes its entries pass.
+done_tasks = ["T42", "T43", "T44"]
 
 # Every occurrence of these names outside comments in a supported fixture file
 # is a declaration's name or exactly one [[use]], [[not_a_use]] or [[undecided]]
@@ -2026,7 +2036,7 @@ receiver = ""
 
 [[use]]
 task = "T43"
-case = "x"
+case = "b"
 file = "src/unresolved.ts"
 start_byte = 166
 end_byte = 172
@@ -2052,7 +2062,7 @@ receiver = ""
 
 [[use]]
 task = "T43"
-case = "x"
+case = "b"
 file = "src/unresolved.ts"
 start_byte = 385
 end_byte = 391
@@ -2818,15 +2828,15 @@ expected_resolution = "name_match"
 
 [[binding]]
 task = "T44"
-case = "x"
+case = "b"
 file = "src/unresolved.ts"
 start_byte = 166
 end_byte = 172
 line = 5
 column = 15
 text = "Survey"
-expected_target = ""
-expected_resolution = "name_match"
+expected_target = "src/models.ts#Survey"
+expected_resolution = "exact"
 
 [[binding]]
 task = "T44"
@@ -2842,15 +2852,15 @@ expected_resolution = "name_match"
 
 [[binding]]
 task = "T44"
-case = "x"
+case = "b"
 file = "src/unresolved.ts"
 start_byte = 385
 end_byte = 391
 line = 10
 column = 40
 text = "Survey"
-expected_target = ""
-expected_resolution = "name_match"
+expected_target = "src/models.ts#Survey"
+expected_resolution = "exact"
 
 [[binding]]
 task = "T44"
