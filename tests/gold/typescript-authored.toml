@@ -1,5 +1,5 @@
 # Gold expectations for the authored TypeScript/TSX fixture,
-# tests/fixtures/typescript/authored/ (cases a-z in its README.md).
+# tests/fixtures/typescript/authored/ (cases a-z and aa in its README.md).
 #
 # How it was made. T41 wrote this before any TypeScript extractor existed, so
 # nothing here came from rivet. Each entry was chosen by reading the fixture
@@ -63,6 +63,9 @@
 #   stays unresolved because re-exports are not followed; a JSX attribute name
 #   and a closing tag's name are not uses; `import type` is an `import` use
 #   like any named import.
+# - T44a added case aa (src/pick/dot.ts, directory-only specifiers) with the
+#   same marker method; its uses are tagged T43 and its bindings T44, the
+#   tasks whose harnesses verify them.
 # - Settled by T44: `import type` binds like any direct import, so T44
 #   corrected T41's two `Survey` entries in src/unresolved.ts from unresolved
 #   to `exact` (and their case from x to b).
@@ -1608,6 +1611,84 @@ receiver = ""
 
 [[use]]
 task = "T43"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 152
+end_byte = 159
+line = 3
+column = 18
+text = "fromDot"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 189
+end_byte = 196
+line = 4
+column = 18
+text = "fromDir"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 233
+end_byte = 241
+line = 5
+column = 18
+text = "fromFile"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 261
+end_byte = 268
+line = 7
+column = 1
+text = "fromDot"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 273
+end_byte = 280
+line = 8
+column = 1
+text = "fromDir"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 285
+end_byte = 293
+line = 9
+column = 1
+text = "fromFile"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
 case = "b"
 file = "src/report.ts"
 start_byte = 9
@@ -2525,6 +2606,78 @@ column = 31
 text = "ButtonProps"
 expected_target = "src/components/Button.tsx#ButtonProps"
 expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 152
+end_byte = 159
+line = 3
+column = 18
+text = "fromDot"
+expected_target = "src/pick/index.ts#pick"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 189
+end_byte = 196
+line = 4
+column = 18
+text = "fromDir"
+expected_target = "src/pick/index.ts#pick"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 233
+end_byte = 241
+line = 5
+column = 18
+text = "fromFile"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 261
+end_byte = 268
+line = 7
+column = 1
+text = "fromDot"
+expected_target = "src/pick/index.ts#pick"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 273
+end_byte = 280
+line = 8
+column = 1
+text = "fromDir"
+expected_target = "src/pick/index.ts#pick"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "aa"
+file = "src/pick/dot.ts"
+start_byte = 285
+end_byte = 293
+line = 9
+column = 1
+text = "fromFile"
+expected_target = ""
+expected_resolution = "name_match"
 
 [[binding]]
 task = "T44"

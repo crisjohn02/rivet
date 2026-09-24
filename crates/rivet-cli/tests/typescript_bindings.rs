@@ -174,10 +174,83 @@ fn candidates_match_indexed_paths_byte_for_byte() {
     repo.exact("src/app.ts", "dotted();", "src/util.ts#f");
     repo.unresolved("src/app.ts", "aboveRoot();");
     repo.unresolved("src/app.ts", "doubleSlash();");
-    repo.unresolved("src/app.ts", "trailing();");
+    // T44a: a trailing `/` names the directory, so its index.
+    repo.exact("src/app.ts", "trailing();", "src/dir/index.ts#g");
     repo.exact("src/app.ts", "directory();", "src/dir/index.ts#g");
     repo.exact("src/app.ts", "Shape = {", "src/types.d.ts#Shape");
     repo.unresolved("src/app.ts", "bare();");
+}
+
+// T44a: `.`, `..`, a last segment of `.` or `..`, and a trailing `/` name
+// only a directory, whose index is the only candidate.
+#[test]
+fn directory_only_specifiers_name_only_the_directory_index() {
+    let repo = Indexed::new(
+        "t44a-directory",
+        &[
+            (
+                "src/index.ts",
+                "export function top(): number {\n  return 0;\n}\n",
+            ),
+            // Named after the directory `src/`: `..` must never name it.
+            (
+                "src.ts",
+                "export function top(): number {\n  return 9;\n}\n",
+            ),
+            ("src/pick.ts", EXPORTS_F),
+            ("src/pick/index.ts", EXPORTS_F),
+            // `lone/` has no index, only a file named after it.
+            ("lone.ts", EXPORTS_F),
+            (
+                "lone/sub/x.ts",
+                "import { f as loneF } from \"..\";\nloneF();\n",
+            ),
+            // `both/` has two index candidates.
+            ("both/index.ts", EXPORTS_F),
+            ("both/index.tsx", EXPORTS_F),
+            ("both/x.ts", "import { f as bothF } from \".\";\nbothF();\n"),
+            (
+                "src/pick/x.ts",
+                "import { f as dotF } from \".\";\n\
+                 import { f as slashF } from \"./\";\n\
+                 import { f as dirF } from \"../pick/\";\n\
+                 import { f as fileF } from \"../pick\";\n\
+                 import { top as upTop } from \"..\";\n\
+                 import { top as upSlashTop } from \"../\";\n\
+                 import { f as backF } from \"./x/..\";\n\
+                 import * as here from \".\";\n\
+                 import { f as wrongCase } from \"../Pick/\";\n\
+                 import { f as doubleSlash } from \"..//pick\";\n\
+                 dotF(); slashF(); dirF(); fileF(); upTop(); upSlashTop(); backF();\n\
+                 here.f(); wrongCase(); doubleSlash();\n",
+            ),
+            (
+                "src/a/b/c.ts",
+                "import { top as twoUp } from \"../..\";\ntwoUp();\n",
+            ),
+            (
+                "top.ts",
+                "import { top as aboveRoot } from \"..\";\naboveRoot();\n",
+            ),
+        ],
+    );
+    let x = "src/pick/x.ts";
+    repo.exact(x, "dotF }", "src/pick/index.ts#f");
+    repo.exact(x, "dotF();", "src/pick/index.ts#f");
+    repo.exact(x, "slashF();", "src/pick/index.ts#f");
+    // `../pick/` is the directory only; `../pick` also names src/pick.ts.
+    repo.exact(x, "dirF();", "src/pick/index.ts#f");
+    repo.unresolved(x, "fileF();");
+    repo.exact(x, "upTop();", "src/index.ts#top");
+    repo.exact(x, "upSlashTop();", "src/index.ts#top");
+    repo.exact(x, "backF();", "src/pick/index.ts#f");
+    repo.exact(x, "f(); wrongCase", "src/pick/index.ts#f");
+    repo.unresolved(x, "wrongCase();");
+    repo.unresolved(x, "doubleSlash();");
+    repo.exact("src/a/b/c.ts", "twoUp();", "src/index.ts#top");
+    repo.unresolved("lone/sub/x.ts", "loneF();");
+    repo.unresolved("both/x.ts", "bothF();");
+    repo.unresolved("top.ts", "aboveRoot();");
 }
 
 #[test]

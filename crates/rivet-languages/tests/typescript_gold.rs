@@ -49,7 +49,7 @@ const BROKEN: &str = "src/broken.ts";
 
 /// Every fixture file and the grammar it must dispatch to. Adding a fixture
 /// file without listing it here fails [`fixture_files_use_the_intended_grammar`].
-const FIXTURE_FILES: [(&str, Option<LanguageId>); 17] = [
+const FIXTURE_FILES: [(&str, Option<LanguageId>); 18] = [
     ("README.md", None),
     ("src/anonymous.ts", Some(LanguageId::Typescript)),
     ("src/barrel.ts", Some(LanguageId::Typescript)),
@@ -60,6 +60,7 @@ const FIXTURE_FILES: [(&str, Option<LanguageId>); 17] = [
     ("src/legacy.js", None),
     ("src/models.ts", Some(LanguageId::Typescript)),
     ("src/pick.ts", Some(LanguageId::Typescript)),
+    ("src/pick/dot.ts", Some(LanguageId::Typescript)),
     ("src/pick/index.ts", Some(LanguageId::Typescript)),
     ("src/report.ts", Some(LanguageId::Typescript)),
     ("src/services/survey.ts", Some(LanguageId::Typescript)),

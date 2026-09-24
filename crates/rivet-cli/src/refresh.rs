@@ -275,6 +275,14 @@ impl RefreshMode {
 ///
 /// History, newest first:
 ///
+/// - **php-rules-v4;ts-rules-v3** — T44a: TypeScript relative module lookup
+///   only. A bare `.` or `..` is now a relative specifier, and a specifier
+///   that names only a directory (a trailing `/`, or a last segment of `.` or
+///   `..`: `.`, `../..`, `./x/..`, `./dir/`) tries only that directory's
+///   `index.ts`, `index.tsx`, `index.d.ts`, never the exact path or a file
+///   named after the directory. Imports and namespace-import members through
+///   such a module bind `exact` exactly as T44's do; every other specifier and
+///   binding rule is unchanged, and the PHP rules are exactly php-rules-v4's.
 /// - **php-rules-v4;ts-rules-v2** — T45: TypeScript receiver hints bind
 ///   member uses, all `scoped`. `this` names the enclosing named class; an
 ///   explicit parameter, field, or variable annotation names its type; and a
@@ -318,7 +326,7 @@ impl RefreshMode {
 ///   binding nothing (AF4).
 /// - **php-rules-v1** — T19: the first real binding rules (imports and
 ///   functions), later extended by T20/T21 receivers under the same value.
-const RESOLVER_FINGERPRINT: &str = "php-rules-v4;ts-rules-v2";
+const RESOLVER_FINGERPRINT: &str = "php-rules-v4;ts-rules-v3";
 
 /// The `meta` key recording whether the committed bindings were resolved with
 /// the global function fallback suppressed because an enabled PHP file was not

@@ -239,11 +239,11 @@ fn no_exclusion(value: &Value) {
 fn every_t43_gold_use_is_persisted() {
     let temp = typescript_repo("t43-gold");
     let index = success(&run(temp.path(), &["index", "--json"]));
-    // The 82 gold declarations; T44's 51 exact bindings and T45's 16 scoped
-    // ones.
+    // The 82 gold declarations; T44's 55 exact bindings (four of them
+    // through T44a's directory-only specifiers) and T45's 16 scoped ones.
     assert_eq!(
         (&index["symbols"], &index["uses"], &index["bindings"]),
-        (&Value::from(82), &Value::from(138), &Value::from(67)),
+        (&Value::from(82), &Value::from(144), &Value::from(71)),
         "{index}"
     );
     let gold = gold();
@@ -1083,11 +1083,11 @@ fn a_pre_t43_cache_refreshes_to_the_new_facts() {
             upgraded["index"]["coverage"], fresh_index["index"]["coverage"],
             "{freshness}"
         );
-        // Every enabled-language file (9 PHP, 13 TypeScript) is regenerated;
+        // Every enabled-language file (9 PHP, 14 TypeScript) is regenerated;
         // the 5 ordinary unsupported files are not.
         assert_eq!(
             (&upgraded["updated"], &upgraded["unchanged"]),
-            (&Value::from(22), &Value::from(5)),
+            (&Value::from(23), &Value::from(5)),
             "{freshness}"
         );
         assert_eq!(answers(temp.path()), expected, "{freshness}");
