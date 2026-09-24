@@ -9,11 +9,15 @@
 //! file), so a file that exceeds a bound or contains an error node yields
 //! diagnostics and no facts.
 //!
-//! TypeScript extraction is still a stub: its adapter returns an empty
-//! `ExtractedFile` until T42. The driver parses with the right grammar either
-//! way, so enabling the adapter later needs no CLI change. [`has_extractor`]
-//! reports which languages have an adapter, so refresh can refuse to count a
-//! file as indexed when nothing would extract it (AF5).
+//! T41 dispatches `.ts` (including `.d.ts`) to the TypeScript grammar and
+//! `.tsx` to the TSX grammar, and applies the v0.1 parse policy at this level
+//! too: [`parse_tree`] parses with a language's grammar and
+//! [`first_parse_error`] finds the first ERROR or MISSING node, which makes the
+//! file a parse failure. TypeScript has no extraction adapter until T42
+//! ([`LanguageId::has_extractor`] is the one switch), so [`parse_file`] yields
+//! no facts for it, only the `parse_error` diagnostic of a failing tree.
+//! Refresh never calls it for such a language: it counts the file as
+//! `unsupported` without reading it.
 
 use rivet_core::ExtractedFile;
 use rivet_languages::LanguageId;
@@ -35,53 +39,116 @@ pub fn parse_file_with_limits(
     bytes: &[u8],
     limits: ResourceLimits,
 ) -> ExtractedFile {
+    let tree = parse_tree(language, bytes);
+    dispatch(language, bytes, &tree, limits)
+}
+
+/// Parses `bytes` with the pinned grammar for `language`, without extracting.
+///
+/// `.ts` and `.d.ts` files use [`LanguageId::Typescript`] and `.tsx` files
+/// [`LanguageId::Tsx`] ([`rivet_languages::language_for_path`]). The tree may
+/// contain error nodes; [`first_parse_error`] applies the parse policy.
+pub fn parse_tree(language: LanguageId, bytes: &[u8]) -> tree_sitter::Tree {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&rivet_languages::grammar(language))
         .expect("pinned grammar must load");
-    let tree = parser
+    parser
         .parse(bytes, None)
-        .expect("parser must return a tree");
-    dispatch(language, bytes, &tree, limits)
+        .expect("parser must return a tree")
 }
 
-/// Whether `language` has an extraction adapter in this build.
+/// The first node that makes a tree a parse failure under the v0.1 policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseFailure {
+    /// The node's kind: `ERROR`, or the kind of a MISSING node (such as `)`).
+    pub kind: String,
+    /// The node's start byte.
+    pub start_byte: u32,
+}
+
+/// Applies the v0.1 parse policy (ARCHITECTURE "Parse and coverage policy")
+/// to `tree`: a tree containing any ERROR or MISSING node is a parse failure,
+/// reported at the first such node in pre-order. `None` means the file parses.
 ///
-/// A file in a language without one yields no facts even when it parses, so
-/// counting it as indexed would claim coverage rivet does not have (AF5,
-/// audit finding 14). This must stay in step with [`dispatch`]: it is true
-/// exactly for the languages `dispatch` hands to an adapter.
-pub fn has_extractor(language: LanguageId) -> bool {
-    #[cfg(feature = "lang-php")]
-    if language == LanguageId::Php {
-        return true;
+/// This is the rule the PHP adapter applies before extracting; a language's
+/// adapter also checks the node bound first, so a file that is both too large
+/// and malformed is `resource_limit` rather than `parse_error`.
+pub fn first_parse_error(tree: &tree_sitter::Tree) -> Option<ParseFailure> {
+    let root = tree.root_node();
+    if !root.has_error() {
+        return None;
     }
-    let _ = language;
-    false
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        if node.is_error() || node.is_missing() {
+            return Some(ParseFailure {
+                kind: node.kind().to_string(),
+                start_byte: node.start_byte() as u32,
+            });
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                // `has_error` was set, so some node is ERROR or MISSING.
+                return Some(ParseFailure {
+                    kind: "ERROR".to_string(),
+                    start_byte: root.start_byte() as u32,
+                });
+            }
+        }
+    }
 }
 
 /// Dispatches a parsed tree to the language adapter's `extract`.
 ///
-/// Only PHP has an adapter in this milestone. Other enabled grammars parse but
-/// extract nothing, which matches the previous CLI behavior; adding a
-/// TypeScript adapter later changes only this function.
+/// A language whose [`LanguageId::has_extractor`] is false has no adapter:
+/// its file yields no facts, and a tree that fails the parse policy yields
+/// one `parse_error` diagnostic, as an adapter would report it. When T42 adds
+/// the TypeScript adapter it replaces that arm and flips the switch; a test
+/// below fails if the two disagree.
 fn dispatch(
     language: LanguageId,
     bytes: &[u8],
     tree: &tree_sitter::Tree,
     limits: ResourceLimits,
 ) -> ExtractedFile {
-    #[cfg(feature = "lang-php")]
-    if language == LanguageId::Php {
-        return rivet_languages::php::extract_with_limits(bytes, tree, limits);
+    let _ = (bytes, tree, limits);
+    match language {
+        #[cfg(feature = "lang-php")]
+        LanguageId::Php => rivet_languages::php::extract_with_limits(bytes, tree, limits),
+        #[cfg(feature = "lang-typescript")]
+        LanguageId::Typescript | LanguageId::Tsx => without_extractor(tree),
     }
-    let _ = (language, bytes, tree, limits);
-    ExtractedFile::default()
+}
+
+/// The result for a language with no adapter: no facts, and the parse-policy
+/// diagnostic when the tree fails it.
+#[cfg(feature = "lang-typescript")]
+fn without_extractor(tree: &tree_sitter::Tree) -> ExtractedFile {
+    let diagnostics = first_parse_error(tree)
+        .map(|failure| rivet_core::Diagnostic {
+            code: "parse_error".to_string(),
+            detail: format!("{} at byte {}", failure.kind, failure.start_byte),
+            start_byte: Some(failure.start_byte),
+        })
+        .into_iter()
+        .collect();
+    ExtractedFile {
+        diagnostics,
+        ..ExtractedFile::default()
+    }
 }
 
 #[cfg(all(test, feature = "lang-php"))]
 mod tests {
-    use super::{ResourceLimits, has_extractor, parse_file, parse_file_with_limits};
+    use super::{ResourceLimits, parse_file, parse_file_with_limits};
     use rivet_languages::LanguageId;
 
     /// Two calls, three `unknown`/`call` uses: `f`, `g`, and `h`.
@@ -206,14 +273,31 @@ mod tests {
         assert_eq!(errored.diagnostics[0].code, "parse_error");
     }
 
-    /// PHP has an adapter; TypeScript does not until T42.
+    /// The extractor switch and the dispatch agree: a language whose switch
+    /// is on extracts a declared function, and one whose switch is off
+    /// extracts nothing from a valid file. T42 must flip the TypeScript switch
+    /// and add its dispatch arm together.
     #[test]
-    fn only_php_has_an_extractor() {
-        assert!(has_extractor(LanguageId::Php));
+    fn extractor_switch_matches_dispatch() {
+        #[cfg_attr(not(feature = "lang-typescript"), allow(unused_mut))]
+        let mut samples: Vec<(LanguageId, &[u8])> =
+            vec![(LanguageId::Php, b"<?php\nfunction f(): void {}\n")];
         #[cfg(feature = "lang-typescript")]
         {
-            assert!(!has_extractor(LanguageId::Typescript));
-            assert!(!has_extractor(LanguageId::Tsx));
+            samples.push((LanguageId::Typescript, b"function f(): void {}\n"));
+            samples.push((LanguageId::Tsx, b"function f() { return <div />; }\n"));
+        }
+        for (language, source) in samples {
+            let extracted = parse_file(language, source);
+            assert!(
+                extracted.diagnostics.is_empty(),
+                "{language:?}: {extracted:?}"
+            );
+            assert_eq!(
+                !extracted.symbols.is_empty(),
+                language.has_extractor(),
+                "{language:?}: the has_extractor switch disagrees with dispatch"
+            );
         }
     }
 
