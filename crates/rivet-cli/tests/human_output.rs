@@ -676,16 +676,17 @@ fn coverage_line_counts_more_than_two_diagnostics_by_code() {
 
 #[test]
 fn a_capped_diagnostic_list_counts_only_its_first_items() {
-    // 55 TypeScript files (`unsupported_language`) sort before 5 broken PHP
-    // files, so the 50 listed items are all TypeScript; the parse errors stay
-    // in the skip counts and the total.
+    // 55 binary PHP files (`binary_file`) sort before 5 broken PHP files, so
+    // the 50 listed items are all binary; the parse errors stay in the skip
+    // counts and the total. (Before T43 this used 55 `unsupported_language`
+    // TypeScript files; TypeScript is indexed now.)
     let temp = fixture_repo("coverage-capped");
     fs::create_dir_all(temp.path().join("a")).expect("create a/");
     fs::create_dir_all(temp.path().join("z")).expect("create z/");
     for index in 0..55 {
         fs::write(
-            temp.path().join(format!("a/f{index:02}.ts")),
-            "export const x = 1;\n",
+            temp.path().join(format!("a/f{index:02}.php")),
+            b"<?php\n\0\0binary\n",
         )
         .expect("write");
     }
@@ -702,23 +703,24 @@ fn a_capped_diagnostic_list_counts_only_its_first_items() {
     assert_eq!(value["index"]["diagnostics"]["truncated"], true);
     assert_coverage_line(
         temp.path(),
-        "coverage incomplete: 9/70 files indexed; skipped 56 unsupported, 5 parse_error; \
-         60 diagnostics (first 50: 50 unsupported_language)\n",
+        "coverage incomplete: 9/70 files indexed; skipped 1 unsupported, 55 binary, \
+         5 parse_error; 60 diagnostics (first 50: 50 binary_file)\n",
     );
 }
 
 #[test]
-fn coverage_line_names_diagnostics_when_only_unsupported_files_are_skipped() {
-    // A TypeScript file is counted as unsupported while no adapter extracts
-    // it, and it also has a diagnostic; README.md is an ordinary unsupported
-    // file, counted and never named.
+fn coverage_line_counts_an_indexed_typescript_file() {
+    // Since T43 a TypeScript file is indexed like a PHP file: counted, with
+    // no diagnostic. README.md is an ordinary unsupported file, counted and
+    // never named. (An enabled-language file with no adapter, which used to
+    // make "only unsupported skips, with a diagnostic", no longer exists; a
+    // non-UTF-8 path, below, still does.)
     let temp = fixture_repo("coverage-unsupported");
     fs::create_dir_all(temp.path().join("src")).expect("create src/");
     fs::write(temp.path().join("src/ok.ts"), "export const x = 1;\n").expect("write");
     assert_coverage_line(
         temp.path(),
-        "coverage incomplete: 9/11 files indexed; skipped 2 unsupported; \
-         1 diagnostic: src/ok.ts (unsupported_language)\n",
+        "coverage incomplete: 10/11 files indexed; skipped 1 unsupported; 0 diagnostics\n",
     );
 }
 

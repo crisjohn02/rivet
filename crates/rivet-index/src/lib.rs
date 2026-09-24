@@ -14,16 +14,23 @@
 //!
 //! LR2 adds [`exclusion`]: the two kinds of evidence that let reference mode
 //! leave out a same-name unresolved use that cannot refer to the target.
+//!
+//! T43 indexes TypeScript beside PHP. Three language gates keep PHP's rules
+//! to PHP: the resolver's rule table (`resolve::rules_for`), which binds no
+//! TypeScript use; [`excludes_by_evidence`], which excludes no TypeScript use
+//! or target; and [`folds_case`], which folds case for PHP declarations only.
 
 pub mod exclusion;
 pub mod hierarchy;
 mod query;
 pub mod resolve;
 
-pub use exclusion::{ClassRelation, SubtypeIndex, form_compatible, possibly_trait};
+pub use exclusion::{
+    ClassRelation, SubtypeIndex, excludes_by_evidence, form_compatible, possibly_trait,
+};
 pub use hierarchy::{Hierarchy, Supertype, ancestors, direct_supertypes};
 pub use query::{
-    InvalidFileLine, QueryOutcome, check_query_syntax, levenshtein, lookup_name_matches,
-    resolve_query, suggestions,
+    InvalidFileLine, QueryOutcome, check_query_syntax, folds_case, levenshtein,
+    lookup_name_matches, resolve_query, suggestions,
 };
 pub use resolve::{ResolvedLinks, Resolver, resolve_all, resolve_all_links, unindexed_php_files};

@@ -72,8 +72,11 @@ its gold entries.
 - **t** — ambient declarations in a `.d.ts` file.
 - **u** — constructs the docs did not settle when T41 wrote the fixture,
   recorded as `[[undecided]]`. T42 settled all of them (type alias, generic
-  parameter, accessors, overloads, string-named ambient module); the
-  remaining `[[undecided]]` entries are T43 use questions under other cases.
+  parameter, accessors, overloads, string-named ambient module), and T43
+  settled the three use questions filed under other cases: a re-export
+  specifier's name is an `import` use (case x), and a JSX attribute name and
+  a closing tag's name are not uses (case s). No `[[undecided]]` entry
+  remains.
 - **v** — the parse failure.
 - **w** — unsupported extensions.
 - **x** — import forms that stay unresolved.

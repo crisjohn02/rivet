@@ -12,6 +12,12 @@
 //! [`Evidence`] shows it cannot refer to the target (spec §11.5); the counts
 //! of excluded uses are returned with the matches.
 //!
+//! T43: a use matches a target by name only within the target's language,
+//! with that language's comparison ([`rivet_index::lookup_name_matches`]):
+//! a TypeScript use can never name a PHP declaration, nor the reverse. And
+//! evidence-based exclusion applies only when both are PHP
+//! ([`rivet_index::excludes_by_evidence`]).
+//!
 //! SY1: a `symbol` call list is collected at `name_match` and then filtered to
 //! its minimum tier by [`apply_call_list_minimum`], which counts the
 //! `name_match` rows the filter hid.
@@ -19,7 +25,10 @@
 use std::collections::{HashMap, HashSet};
 
 use rivet_core::{RefKind, Resolution};
-use rivet_index::{ClassRelation, Hierarchy, SubtypeIndex, form_compatible, lookup_name_matches};
+use rivet_index::{
+    ClassRelation, Hierarchy, SubtypeIndex, excludes_by_evidence, form_compatible,
+    lookup_name_matches,
+};
 use rivet_store::{BindingRow, ReceiverClassRow, Store, SymbolRow, UseRow};
 use serde_json::{Map, Value, json};
 
@@ -121,9 +130,16 @@ pub(crate) struct Evidence {
     /// hierarchy. Built from the real hierarchy only when some receiver class
     /// was recorded, since only rule 2 reads it.
     subtypes: SubtypeIndex,
+    /// Each stored file's language (T43).
+    languages: HashMap<String, String>,
 }
 
 impl Evidence {
+    /// The stored language of `file`.
+    fn language(&self, file: &str) -> Option<&str> {
+        self.languages.get(file).map(String::as_str)
+    }
+
     /// Loads the evidence of the acquired snapshot. `uses` and `bindings`
     /// must be the snapshot's complete use and binding rows.
     pub(crate) fn load(
@@ -159,10 +175,17 @@ impl Evidence {
             .map(|row| (row.id.clone(), row))
             .collect();
         let subtypes = SubtypeIndex::new(&hierarchy, class_like.values());
+        let languages = store
+            .list_file_languages()
+            .map_err(index::store_error)?
+            .into_iter()
+            .filter_map(|(path, language)| Some((path, language?)))
+            .collect();
         Ok(Evidence {
             receivers,
             class_like,
             subtypes,
+            languages,
         })
     }
 }
@@ -200,6 +223,11 @@ pub(crate) struct Matches {
 /// unrelated to the target's class ([`ClassRelation::unrelated`]), and counted
 /// in [`Matches::excluded`]. A bound use is never excluded, and exclusion
 /// changes no tier. Candidate mode and `Selection::Contained` are unchanged.
+///
+/// T43: a same-name use counts only when its file's language is the target's,
+/// compared by that language's rule, and exclusion applies only when that
+/// language is PHP; a TypeScript target keeps every same-name TypeScript
+/// use.
 pub(crate) fn collect_matches(
     uses: &[UseRow],
     bindings: &HashMap<i64, BindingRow>,
@@ -216,7 +244,9 @@ pub(crate) fn collect_matches(
     let mut matches = Vec::new();
     let mut excluded = ExclusionCounts::default();
 
-    let excluding = matches!(selection, Selection::Query(Mode::References));
+    let target_language = evidence.language(&target.file);
+    let excluding = matches!(selection, Selection::Query(Mode::References))
+        && excludes_by_evidence(target_language);
     let target_parent = target
         .parent_id
         .as_deref()
@@ -236,9 +266,15 @@ pub(crate) fn collect_matches(
         let (resolution, resolved_target, include, unbound) = match selection {
             Selection::Query(mode) => {
                 // Folded by the target declaration's kind, exactly as the
-                // `rivet symbol` short-name lookup folds (AF4).
-                let name_matches =
-                    lookup_name_matches(&row.lookup_name, target.kind, &target.lookup_name);
+                // `rivet symbol` short-name lookup folds (AF4), and only
+                // within the target's language (T43).
+                let name_matches = evidence.language(&row.file) == target_language
+                    && lookup_name_matches(
+                        &row.lookup_name,
+                        target_language,
+                        target.kind,
+                        &target.lookup_name,
+                    );
                 let bound_to_target = binding.is_some_and(|binding| binding.target_id == target.id);
 
                 // A use bound to the target is always kept, even when its
@@ -303,7 +339,7 @@ pub(crate) fn collect_matches(
         // Evidence-based exclusion (LR2): only an unresolved same-name use in
         // reference mode, after every filter, so each counted use is one the
         // page would otherwise have listed under the same filters.
-        if excluding && unbound {
+        if excluding && unbound && excludes_by_evidence(evidence.language(&row.file)) {
             if !form_compatible(target, target_parent, row) {
                 excluded.incompatible_form += 1;
                 continue;

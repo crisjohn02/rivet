@@ -58,6 +58,11 @@
 #   binding an import creates, the alias when there is one, as PHP records
 #   `use ... as Alias`; `unknown` for any other identifier in code, such as an
 #   object before `.`.
+# - Settled by T43: the local name in a re-export specifier (`double` in
+#   `export { double as twice } from "./util"`) is an `import` use, which
+#   stays unresolved because re-exports are not followed; a JSX attribute name
+#   and a closing tag's name are not uses; `import type` is an `import` use
+#   like any named import (T44 corrects its binding entry).
 # - `container` is the id of the nearest enclosing function, method, class,
 #   interface or enum symbol (the PHP container rule), or "" for none. A module,
 #   const or property is not a container; an anonymous function or class is
@@ -86,15 +91,16 @@
 # src/broken.ts, src/legacy.js and src/esm.mts have no entries: typescript_gold.rs
 # pins their parse outcome and grammar dispatch (and, since T42, that the
 # extractor yields no facts and one parse_error for src/broken.ts), and the CLI
-# test pins that indexing the fixture is unchanged while TypeScript is not
-# indexed (until T43).
+# tests pin that indexing the fixture reports src/broken.ts as a parse error
+# and the other two as unsupported (T43).
 
 # The tasks whose entries are verified. check_gold.py checks their spans and
-# names the harness that compares them with rivet (T42: the extractor, in
-# crates/rivet-languages/tests/typescript_gold.rs); every other entry is
-# reported as pending, per task. Add a task in the same change that makes its
-# entries pass.
-done_tasks = ["T42"]
+# names the harness that compares them with rivet (T42 and T43: the extractor,
+# in crates/rivet-languages/tests/typescript_gold.rs; T43 also end to end
+# through the CLI, in crates/rivet-cli/tests/typescript_index.rs); every other
+# entry is reported as pending, per task. Add a task in the same change that
+# makes its entries pass.
+done_tasks = ["T42", "T43"]
 
 # Every occurrence of these names outside comments in a supported fixture file
 # is a declaration's name or exactly one [[use]], [[not_a_use]] or [[undecided]]
@@ -1461,6 +1467,19 @@ receiver = ""
 
 [[use]]
 task = "T43"
+case = "x"
+file = "src/barrel.ts"
+start_byte = 59
+end_byte = 65
+line = 2
+column = 10
+text = "double"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
 case = "b"
 file = "src/components/App.tsx"
 start_byte = 9
@@ -2176,6 +2195,17 @@ text = "Button"
 task = "T43"
 case = "s"
 file = "src/components/App.tsx"
+why = "JSX attribute name"
+start_byte = 274
+end_byte = 279
+line = 10
+column = 15
+text = "label"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
 why = "literal JSX text"
 start_byte = 334
 end_byte = 340
@@ -2193,6 +2223,17 @@ end_byte = 347
 line = 11
 column = 20
 text = "launch"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+why = "JSX closing tag name"
+start_byte = 354
+end_byte = 358
+line = 11
+column = 33
+text = "Card"
 
 [[not_a_use]]
 task = "T43"
@@ -2353,6 +2394,18 @@ column = 3
 text = "double"
 expected_target = "src/util.ts#double"
 expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/barrel.ts"
+start_byte = 59
+end_byte = 65
+line = 2
+column = 10
+text = "double"
+expected_target = ""
+expected_resolution = "name_match"
 
 [[binding]]
 task = "T44"
@@ -3002,42 +3055,3 @@ column = 10
 text = "launch"
 expected_target = "src/services/survey.ts#SurveyService.launch"
 expected_resolution = "scoped"
-
-[[undecided]]
-task = "T43"
-case = "x"
-file = "src/barrel.ts"
-form = "use"
-question = "Is the local name in a re-export specifier a use? The PHP precedent records one import use per binding, at the alias; a re-export creates no local binding."
-proposal = "an `import` use of `double`, left unresolved because re-exports are not followed"
-start_byte = 59
-end_byte = 65
-line = 2
-column = 10
-text = "double"
-
-[[undecided]]
-task = "T43"
-case = "s"
-file = "src/components/App.tsx"
-form = "use"
-question = "Is a JSX attribute name a use? `label` names a field of ButtonProps; the column lists JSX expressions and component names only."
-proposal = "not a use in v0.1"
-start_byte = 274
-end_byte = 279
-line = 10
-column = 15
-text = "label"
-
-[[undecided]]
-task = "T43"
-case = "s"
-file = "src/components/App.tsx"
-form = "use"
-question = "Is a component's closing tag name a second use? The element is one reference; `</Card>` repeats the name."
-proposal = "not a use: only the opening or self-closing tag name is"
-start_byte = 354
-end_byte = 358
-line = 11
-column = 33
-text = "Card"

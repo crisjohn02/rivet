@@ -275,6 +275,12 @@ impl RefreshMode {
 ///
 /// History, newest first:
 ///
+/// - **php-rules-v4** — T43: resolution dispatches on each file's stored
+///   language (`rivet_index::resolve`'s rule table). The PHP rules bind only
+///   uses in PHP files and see only PHP declarations, so a TypeScript use is
+///   never bound (and gets no receiver class) until TypeScript rules exist,
+///   and a PHP use never binds, or is made ambiguous by, a TypeScript
+///   declaration. PHP-only snapshots bind exactly as under v3.
 /// - **php-rules-v3** — LR2: the resolver also records, for each member or
 ///   scoped use no rule bound, the receiver class a receiver rule determined
 ///   for it (`receiver_classes`), including a class that is not indexed.
@@ -291,7 +297,7 @@ impl RefreshMode {
 ///   binding nothing (AF4).
 /// - **php-rules-v1** — T19: the first real binding rules (imports and
 ///   functions), later extended by T20/T21 receivers under the same value.
-const RESOLVER_FINGERPRINT: &str = "php-rules-v3";
+const RESOLVER_FINGERPRINT: &str = "php-rules-v4";
 
 /// The `meta` key recording whether the committed bindings were resolved with
 /// the global function fallback suppressed because an enabled PHP file was not
@@ -539,9 +545,10 @@ fn refresh_inventory(
 
         let language_name = id.name().to_string();
 
-        // An enabled language with no extraction adapter (TypeScript until
-        // T43; `LanguageId::has_extractor` is the one switch) yields no facts
-        // even when it parses, so the file must not count as indexed. OUTPUT-CONTRACT "Common index metadata": "`complete` is
+        // An enabled language with no extraction adapter (none since T43
+        // gave TypeScript one; `LanguageId::has_extractor` is the one switch
+        // that keeps a future language unindexed) yields no facts even when it
+        // parses, so the file must not count as indexed. OUTPUT-CONTRACT "Common index metadata": "`complete` is
         // true only when all skip counts are zero", and ARCHITECTURE "Parse and
         // coverage policy": "Unsupported language, binary, oversize, encoding,
         // and deterministic parser-resource skips are counted separately."
@@ -648,7 +655,7 @@ fn refresh_inventory(
                             }
                         }
                         None => {
-                            let file_facts = build_facts(&entry.rel_path, &bytes, &extracted);
+                            let file_facts = build_facts(id, &entry.rel_path, &bytes, &extracted);
                             ParsedFileFacts {
                                 parse_status: ParseStatus::Ok,
                                 source: Some(bytes),
@@ -849,7 +856,10 @@ fn refresh_inventory(
         }
     }
     let (links, binding_count) = if resolve_needed {
-        let links = rivet_index::Resolver::new(&symbols, &uses, &scopes)
+        // Each file's language picks the rule set that may bind its uses
+        // (T43): PHP rules for PHP uses over PHP declarations, and none yet
+        // for TypeScript.
+        let links = rivet_index::Resolver::new(&files, &symbols, &uses, &scopes)
             .with_unindexed_php_files(php_unindexed)
             .resolve_links();
         let count = links.bindings.len() as u64;
@@ -1161,22 +1171,22 @@ struct ParsedFileFacts {
 
 /// Builds a file's persisted symbols, uses, and scopes from its extraction.
 ///
-/// Only PHP has an adapter in this milestone; the TypeScript adapter will fill
-/// this in later without changing the refresh path.
-#[cfg(feature = "lang-php")]
-fn build_facts(path: &str, source: &[u8], extracted: &rivet_core::ExtractedFile) -> FileFacts {
+/// The row shapes are generic; the language decides the persisted lookup
+/// names (PHP folds case for some kinds, TypeScript never does) and the shape
+/// of `scopes.facts_json`, which holds the facts that language's adapter
+/// records.
+fn build_facts(
+    language: rivet_languages::LanguageId,
+    path: &str,
+    source: &[u8],
+    extracted: &rivet_core::ExtractedFile,
+) -> FileFacts {
     let ids = symbol_ids(path, &extracted.symbols);
     FileFacts {
-        symbols: build_symbol_rows(path, source, &extracted.symbols, &ids),
-        uses: use_rows(path, source, extracted, &ids),
-        scopes: scope_rows(path, extracted, &ids),
+        symbols: build_symbol_rows(language, path, source, &extracted.symbols, &ids),
+        uses: use_rows(language, path, source, extracted, &ids),
+        scopes: scope_rows(language, path, extracted, &ids),
     }
-}
-
-/// No compiled language adapter yet: a parsed tree yields no persisted facts.
-#[cfg(not(feature = "lang-php"))]
-fn build_facts(_path: &str, _source: &[u8], _extracted: &rivet_core::ExtractedFile) -> FileFacts {
-    FileFacts::default()
 }
 
 /// The canonical IDs of one file's extracted symbols.
@@ -1184,7 +1194,6 @@ fn build_facts(_path: &str, _source: &[u8], _extracted: &rivet_core::ExtractedFi
 /// Duplicate qualified names within the file receive one-based ordinals in
 /// `(start_byte, end_byte, kind)` order (T03), and the canonical ID escapes `%`
 /// and `#`.
-#[cfg(feature = "lang-php")]
 fn symbol_ids(path: &str, extracted: &[rivet_core::ExtractedSymbol]) -> Vec<String> {
     use rivet_core::{Span, SymbolId, SymbolKind, assign_ordinals};
 
@@ -1204,9 +1213,27 @@ fn symbol_ids(path: &str, extracted: &[rivet_core::ExtractedSymbol]) -> Vec<Stri
         .collect()
 }
 
+/// The persisted `lookup_name` of a declaration, by its language's rule.
+fn symbol_lookup_name(
+    language: rivet_languages::LanguageId,
+    name: &str,
+    kind: rivet_core::SymbolKind,
+) -> String {
+    #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
+    let _ = (name, kind);
+    match language {
+        #[cfg(feature = "lang-php")]
+        rivet_languages::LanguageId::Php => rivet_languages::php::lookup_name(name, kind),
+        #[cfg(feature = "lang-typescript")]
+        rivet_languages::LanguageId::Typescript | rivet_languages::LanguageId::Tsx => {
+            rivet_languages::typescript::lookup_name(name, kind)
+        }
+    }
+}
+
 /// Turns extracted symbols into persisted rows for one file.
-#[cfg(feature = "lang-php")]
 fn build_symbol_rows(
+    language: rivet_languages::LanguageId,
     path: &str,
     source: &[u8],
     extracted: &[rivet_core::ExtractedSymbol],
@@ -1222,7 +1249,7 @@ fn build_symbol_rows(
             id: ids[index].clone(),
             file: path.to_string(),
             name: symbol.name.clone(),
-            lookup_name: rivet_languages::php::lookup_name(&symbol.name, symbol.kind),
+            lookup_name: symbol_lookup_name(language, &symbol.name, symbol.kind),
             qualified_name: symbol.qualified_name.clone(),
             kind: symbol.kind,
             parent_id: symbol.parent_index.map(|parent| ids[parent].clone()),
@@ -1237,8 +1264,8 @@ fn build_symbol_rows(
 }
 
 /// Turns extracted uses into persisted rows for one file.
-#[cfg(feature = "lang-php")]
 fn use_rows(
+    language: rivet_languages::LanguageId,
     path: &str,
     source: &[u8],
     extracted: &rivet_core::ExtractedFile,
@@ -1247,20 +1274,12 @@ fn use_rows(
     use rivet_core::{LineCol, LineIndex};
 
     let lines = LineIndex::new(source);
-    // The alias token of a `use const` import names a case-sensitive
-    // constant (AF4); the use itself records only `import`.
-    let const_imports: std::collections::HashSet<(u32, u32)> = extracted
-        .imports
-        .iter()
-        .filter(|import| import.kind == rivet_core::extract::ImportKind::Const)
-        .map(|import| (import.span.start_byte(), import.span.end_byte()))
-        .collect();
+    let lookup = use_lookup_names(language, extracted);
     extracted
         .uses
         .iter()
-        .map(|use_| {
-            let const_import = use_.ref_kind == rivet_core::RefKind::Import
-                && const_imports.contains(&(use_.span.start_byte(), use_.span.end_byte()));
+        .zip(lookup)
+        .map(|(use_, lookup_name)| {
             let position = lines
                 .line_col(use_.span.start_byte())
                 .unwrap_or(LineCol { line: 1, column: 1 });
@@ -1272,7 +1291,7 @@ fn use_rows(
                     .and_then(|index| ids.get(index).cloned()),
                 scope_key: use_.scope_key.clone(),
                 spelling: use_.spelling.clone(),
-                lookup_name: use_lookup_name(&use_.spelling, use_.ref_kind, const_import),
+                lookup_name,
                 ref_kind: use_.ref_kind,
                 start_byte: use_.span.start_byte(),
                 end_byte: use_.span.end_byte(),
@@ -1285,12 +1304,123 @@ fn use_rows(
         .collect()
 }
 
-/// Turns extracted scopes into persisted rows for one file.
+/// The persisted `lookup_name` of each extracted use, in use order, by the
+/// file's language: [`php_use_lookup_name`] for PHP, and the spelling exactly
+/// as written for TypeScript (`rivet_languages::typescript::use_lookup_name`),
+/// whose identifiers are case-sensitive.
+fn use_lookup_names(
+    language: rivet_languages::LanguageId,
+    extracted: &rivet_core::ExtractedFile,
+) -> Vec<String> {
+    #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
+    let _ = extracted;
+    match language {
+        #[cfg(feature = "lang-php")]
+        rivet_languages::LanguageId::Php => {
+            // The alias token of a `use const` import names a case-sensitive
+            // constant (AF4); the use itself records only `import`.
+            let const_imports: std::collections::HashSet<(u32, u32)> = extracted
+                .imports
+                .iter()
+                .filter(|import| import.kind == rivet_core::extract::ImportKind::Const)
+                .map(|import| (import.span.start_byte(), import.span.end_byte()))
+                .collect();
+            extracted
+                .uses
+                .iter()
+                .map(|use_| {
+                    let const_import = use_.ref_kind == rivet_core::RefKind::Import
+                        && const_imports.contains(&(use_.span.start_byte(), use_.span.end_byte()));
+                    php_use_lookup_name(&use_.spelling, use_.ref_kind, const_import)
+                })
+                .collect()
+        }
+        #[cfg(feature = "lang-typescript")]
+        rivet_languages::LanguageId::Typescript | rivet_languages::LanguageId::Tsx => extracted
+            .uses
+            .iter()
+            .map(|use_| rivet_languages::typescript::use_lookup_name(&use_.spelling))
+            .collect(),
+    }
+}
+
+/// Turns extracted scopes into persisted rows for one file, in the
+/// `scopes.facts_json` shape of the file's language.
 ///
 /// The adapter records declarations by symbol index; persistence rewrites each
 /// to its canonical ID, the only form usable after a reparse.
+fn scope_rows(
+    language: rivet_languages::LanguageId,
+    path: &str,
+    extracted: &rivet_core::ExtractedFile,
+    ids: &[String],
+) -> Vec<ScopeRow> {
+    #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
+    let _ = (path, extracted, ids);
+    match language {
+        #[cfg(feature = "lang-php")]
+        rivet_languages::LanguageId::Php => php_scope_rows(path, extracted, ids),
+        #[cfg(feature = "lang-typescript")]
+        rivet_languages::LanguageId::Typescript | rivet_languages::LanguageId::Tsx => {
+            typescript_scope_rows(path, extracted, ids)
+        }
+    }
+}
+
+/// The canonical IDs among `ids` of the symbol indices a scope declares.
+#[cfg(any(feature = "lang-php", feature = "lang-typescript"))]
+fn declared_ids<'a>(declares: &[usize], ids: &'a [String]) -> Vec<&'a str> {
+    declares
+        .iter()
+        .filter_map(|index| ids.get(*index).map(String::as_str))
+        .collect()
+}
+
+/// TypeScript scope rows (T43): each scope's bound names, its import
+/// bindings and re-exports, and the canonical IDs of the symbols among its
+/// names. No PHP-only field is written.
+#[cfg(feature = "lang-typescript")]
+fn typescript_scope_rows(
+    path: &str,
+    extracted: &rivet_core::ExtractedFile,
+    ids: &[String],
+) -> Vec<ScopeRow> {
+    use rivet_core::extract::{LocalBinding, ModuleImport};
+
+    /// The exact persisted `scopes.facts_json` shape of a TypeScript scope.
+    #[derive(serde::Serialize)]
+    struct PersistedScopeFacts<'a> {
+        locals: &'a [LocalBinding],
+        module_imports: &'a [ModuleImport],
+        declares: Vec<&'a str>,
+    }
+
+    extracted
+        .scopes
+        .iter()
+        .map(|scope| {
+            let facts = PersistedScopeFacts {
+                locals: &scope.facts.locals,
+                module_imports: &scope.facts.module_imports,
+                declares: declared_ids(&scope.facts.declares, ids),
+            };
+            ScopeRow {
+                file: path.to_string(),
+                scope_key: scope.scope_key.clone(),
+                parent_scope_key: scope.parent_scope_key.clone(),
+                facts_json: serde_json::to_string(&facts).expect("scope facts serialize"),
+            }
+        })
+        .collect()
+}
+
+/// PHP scope rows, in the shape the PHP resolver rules read.
 #[cfg(feature = "lang-php")]
-fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String]) -> Vec<ScopeRow> {
+fn php_scope_rows(
+    path: &str,
+    extracted: &rivet_core::ExtractedFile,
+    ids: &[String],
+) -> Vec<ScopeRow> {
     use rivet_core::Span;
     use rivet_core::extract::{CallArg, NewBinding, ScopeImport, SupertypeRelation, TypedBinding};
 
@@ -1336,12 +1466,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         .scopes
         .iter()
         .map(|scope| {
-            let declares: Vec<&str> = scope
-                .facts
-                .declares
-                .iter()
-                .filter_map(|index| ids.get(*index).map(String::as_str))
-                .collect();
+            let declares = declared_ids(&scope.facts.declares, ids);
             let parameter_lists: Vec<PersistedParameterList> = scope
                 .facts
                 .parameter_lists
@@ -1394,7 +1519,7 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
         .collect()
 }
 
-/// The persisted `lookup_name` for one use.
+/// The persisted `lookup_name` for one PHP use.
 ///
 /// The name is the use's normalized short name (AF4), so it is comparable with
 /// the `lookup_name` of the declaration it could name: the last segment of a
@@ -1411,7 +1536,11 @@ fn scope_rows(path: &str, extracted: &rivet_core::ExtractedFile, ids: &[String])
 /// keeps its exact spelling too, and the comparison folds it according to the
 /// candidate declaration's kind instead ([`rivet_index::lookup_name_matches`]).
 #[cfg(feature = "lang-php")]
-fn use_lookup_name(spelling: &str, ref_kind: rivet_core::RefKind, const_import: bool) -> String {
+fn php_use_lookup_name(
+    spelling: &str,
+    ref_kind: rivet_core::RefKind,
+    const_import: bool,
+) -> String {
     use rivet_core::{RefKind, SymbolKind};
 
     let short = rivet_languages::php::use_short_name(spelling);

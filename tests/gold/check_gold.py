@@ -18,10 +18,11 @@ or an unknown `done_tasks` value is an error.
 
 This script never runs rivet, so it never claims that rivet produced a
 TypeScript entry. Comparing a done task's entries with rivet's output is owned
-by a Rust test that `cargo test` runs, named per task in TS_HARNESS (T42: the
-extractor comparison in crates/rivet-languages/tests/typescript_gold.rs). The
-report names that harness and says it is not run here; a done task with no
-harness listed fails.
+by Rust tests that `cargo test` runs, named per task in TS_HARNESS (T42: the
+extractor comparison in crates/rivet-languages/tests/typescript_gold.rs; T43:
+that comparison plus the end-to-end check through the CLI in
+crates/rivet-cli/tests/typescript_index.rs). The report names those harnesses
+and says they are not run here; a done task with no harness listed fails.
 
 Private corpus gold (T35). The benchmark corpus is private, so its gold
 samples live outside this repository. When both environment variables are
@@ -42,11 +43,15 @@ FIXTURES = HERE.parent / "fixtures" / "php" / "authored"
 TS_GOLD = HERE / "typescript-authored.toml"
 TS_FIXTURES = HERE.parent / "fixtures" / "typescript" / "authored"
 TS_TASKS = ("T42", "T43", "T44", "T45")
-# The Rust test that compares each done task's entries with rivet, and the
-# command that runs it. check_gold.py does not run it.
+# The Rust tests that compare each done task's entries with rivet, and the
+# commands that run them. check_gold.py does not run them.
 TS_HARNESS = {
-    "T42": ("crates/rivet-languages/tests/typescript_gold.rs",
-            "cargo test -p rivet-languages --test typescript_gold"),
+    "T42": [("crates/rivet-languages/tests/typescript_gold.rs",
+             "cargo test -p rivet-languages --test typescript_gold")],
+    "T43": [("crates/rivet-languages/tests/typescript_gold.rs",
+             "cargo test -p rivet-languages --test typescript_gold"),
+            ("crates/rivet-cli/tests/typescript_index.rs",
+             "cargo test -p rivet-cli --test typescript_index")],
 }
 # Each table and whether its spans are declaration-like (a line range plus
 # `text`/`end_text`) or use-like (line and column plus the exact `text`).
@@ -207,10 +212,11 @@ def check_typescript():
         verified, ", ".join(done) if done else "none"))
     for task in done:
         if task in TS_HARNESS:
-            harness, command = TS_HARNESS[task]
+            owners = "; ".join("%s (`%s`)" % (harness, command)
+                               for harness, command in TS_HARNESS[task])
             print("typescript %s: %d entries span-verified here; their comparison with "
-                  "rivet is owned by %s (`%s`), which this script does not run" % (
-                      task, per_task[task], harness, command))
+                  "rivet is owned by %s, which this script does not run" % (
+                      task, per_task[task], owners))
     total = sum(pending.values())
     if total:
         detail = ", ".join("%s: %d" % (task, count) for task, count in pending.items() if count)

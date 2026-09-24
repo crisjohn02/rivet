@@ -467,12 +467,17 @@ fn a_file_that_becomes_a_parse_error_or_resource_limit_loses_its_facts() {
 // ---------------------------------------------------------------------------
 
 /// A repository holding one file of every non-indexed kind plus a valid one.
+///
+/// TypeScript is indexed since T43, so `src/app.ts` stands for an unsupported
+/// file of a known language by being in a language the configuration does not
+/// enable: it is an ordinary unsupported file whose error still names its
+/// language.
 fn direct_target_repo() -> TempDir {
     let temp = git_repo("direct");
     write(
         temp.path(),
         ".rivet/config.toml",
-        b"[index]\nmax_file_size_kb = 1\n",
+        b"[index]\nmax_file_size_kb = 1\n[languages]\nenabled = [\"php\"]\n",
     );
     write(temp.path(), "good.php", GOOD_PHP);
     write(temp.path(), "notes.txt", b"plain text\nsecond line\n");

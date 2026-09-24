@@ -1781,7 +1781,13 @@ fn call_receiver_from_hint(hint: &UseHint, receiver: Option<&str>) -> CallReceiv
         UseHint::NamedClass { class_spelling } => CallReceiver::Class {
             spelling: class_spelling.clone(),
         },
-        UseHint::Imported { .. } | UseHint::Unresolved => CallReceiver::Unknown,
+        // A variable annotation is TypeScript's (T43); PHP never records one.
+        UseHint::Typed {
+            origin: TypedOrigin::Variable,
+            ..
+        }
+        | UseHint::Imported { .. }
+        | UseHint::Unresolved => CallReceiver::Unknown,
     }
 }
 

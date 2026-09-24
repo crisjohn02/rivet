@@ -20,8 +20,12 @@
 //! T42 is the first done task, and [`t42_entries_match_the_extractor`] is its
 //! harness: it runs the TypeScript adapter on every supported fixture file and
 //! compares every T42 entry, `[[declaration]]` and `[[not_a_declaration]]`
-//! alike, with the extracted symbols. `tests/gold/check_gold.py` checks only
-//! the recorded spans and names this test as the owner of the comparison.
+//! alike, with the extracted symbols. T43's harness,
+//! [`t43_entries_match_the_extractor`], compares every `[[use]]` and
+//! `[[not_a_use]]` with the extracted uses, and requires the extracted uses of
+//! the focus names to be exactly the gold's. `tests/gold/check_gold.py`
+//! checks only the recorded spans and names these tests (and, for T43, the
+//! CLI's `typescript_index.rs`) as the owners of the comparison.
 
 #![cfg(feature = "lang-typescript")]
 
@@ -901,6 +905,11 @@ fn gold_spans_match_the_fixture_and_the_grammar() {
                 && node.start_byte() <= u.start_byte
                 && u.end_byte <= node.end_byte()
         });
+        // Settled by T43: a JSX attribute name, and a closing tag's name.
+        let jsx_name = kinds.iter().any(|(kind, parent)| {
+            (kind == "property_identifier" && parent.as_deref() == Some("jsx_attribute"))
+                || (kind == "identifier" && parent.as_deref() == Some("jsx_closing_element"))
+        });
         // A lowercase intrinsic JSX element name.
         let intrinsic = u.text.starts_with(|c: char| c.is_ascii_lowercase())
             && kinds.iter().any(|(kind, parent)| {
@@ -914,9 +923,10 @@ fn gold_spans_match_the_fixture_and_the_grammar() {
                         )
                     )
             });
-        if !(literal || intrinsic) {
+        if !(literal || intrinsic || jsx_name) {
             p.push(format!(
-                "not_a_use {} [{}, {}) {:?} is neither literal text nor an intrinsic element",
+                "not_a_use {} [{}, {}) {:?} is neither literal text, an intrinsic element, \
+                 a JSX attribute name, nor a closing tag name",
                 u.file, u.start_byte, u.end_byte, u.text
             ));
         }
@@ -1148,12 +1158,6 @@ fn t42_entries_match_the_extractor() {
         if !file_facts.diagnostics.is_empty() {
             problems.push(format!("{file}: diagnostics {:?}", file_facts.diagnostics));
         }
-        if !(file_facts.uses.is_empty()
-            && file_facts.imports.is_empty()
-            && file_facts.scopes.is_empty())
-        {
-            problems.push(format!("{file}: T42 extracts definitions only"));
-        }
         let ids = canonical_ids(file, file_facts);
         for (symbol, id) in file_facts.symbols.iter().zip(ids) {
             let key = (
@@ -1276,4 +1280,183 @@ fn t42_entries_match_the_extractor() {
             .filter(|d| d.task == "T42")
             .count();
     println!("typescript T42: {verified} entries verified against the extractor");
+}
+
+/// T43's harness: the extractor's uses match every T43 gold entry.
+///
+/// For every supported fixture file:
+///
+/// - every `[[use]]` is extracted exactly once at its span, with its
+///   `ref_kind`, its container (the canonical ID of the extracted
+///   `containing_symbol_index`, or none), and its receiver;
+/// - no extracted use lies inside a `[[not_a_use]]` span;
+/// - every extracted use of a focus name is a `[[use]]`, so candidate mode
+///   finds exactly the gold's same-name uses (the focus names are fully
+///   annotated, [`focus_names_are_fully_annotated`]);
+/// - every use's scope is recorded and its parent chain reaches the module
+///   scope, and every `import` use is the span of an import binding or
+///   re-export recorded in that scope;
+/// - `src/broken.ts` yields no uses or scopes.
+///
+/// Determinism across runs and file orders is checked over the whole
+/// extraction by [`t42_entries_match_the_extractor`].
+#[test]
+fn t43_entries_match_the_extractor() {
+    let gold = load_gold();
+    assert!(
+        gold.done_tasks.iter().any(|task| task == "T43"),
+        "this harness verifies T43; list it in done_tasks"
+    );
+    let order = walk(&fixture_root());
+    let extracted = extract_fixture(&order);
+    let mut problems: Vec<String> = Vec::new();
+
+    let (_, broken) = &extracted[BROKEN];
+    if !(broken.uses.is_empty() && broken.scopes.is_empty()) {
+        problems.push(format!("{BROKEN}: uses or scopes {broken:?}"));
+    }
+
+    type Key = (String, usize, usize);
+    // (ref_kind, container id or "", receiver or "") by (file, span).
+    let mut actual: BTreeMap<Key, Vec<(String, String, String)>> = BTreeMap::new();
+    for (file, (source, file_facts)) in &extracted {
+        if file == BROKEN {
+            continue;
+        }
+        let ids = canonical_ids(file, file_facts);
+        let scopes: BTreeMap<&str, &rivet_core::ExtractedScope> = file_facts
+            .scopes
+            .iter()
+            .map(|scope| (scope.scope_key.as_str(), scope))
+            .collect();
+        for scope in &file_facts.scopes {
+            if let Some(parent) = scope.parent_scope_key.as_deref()
+                && !scopes.contains_key(parent)
+            {
+                problems.push(format!(
+                    "{file}: scope {} has no parent {parent}",
+                    scope.scope_key
+                ));
+            }
+        }
+        if !scopes.contains_key(typescript::MODULE_SCOPE_KEY) {
+            problems.push(format!("{file}: no module scope"));
+        }
+        for use_ in &file_facts.uses {
+            let (start, end) = (
+                use_.span.start_byte() as usize,
+                use_.span.end_byte() as usize,
+            );
+            if source.get(start..end) != Some(use_.spelling.as_bytes()) {
+                problems.push(format!(
+                    "{file} [{start}, {end}): spelling {:?}",
+                    use_.spelling
+                ));
+            }
+            let container = use_
+                .containing_symbol_index
+                .map(|index| ids[index].clone())
+                .unwrap_or_default();
+            actual.entry((file.clone(), start, end)).or_default().push((
+                use_.ref_kind.as_str().to_string(),
+                container,
+                use_.receiver.clone().unwrap_or_default(),
+            ));
+            // The scope chain reaches the module scope.
+            let mut key = Some(use_.scope_key.as_str());
+            let mut chain = Vec::new();
+            while let Some(current) = key {
+                let Some(scope) = scopes.get(current) else {
+                    problems.push(format!("{file} [{start}, {end}): no scope {current}"));
+                    break;
+                };
+                if chain.contains(&current) {
+                    problems.push(format!("{file}: scope cycle at {current}"));
+                    break;
+                }
+                chain.push(current);
+                key = scope.parent_scope_key.as_deref();
+            }
+            if chain.last() != Some(&typescript::MODULE_SCOPE_KEY) {
+                problems.push(format!(
+                    "{file} [{start}, {end}): scope chain {chain:?} misses the module scope"
+                ));
+            }
+            // An import use is the span of an import or re-export of its scope.
+            if use_.ref_kind == rivet_core::RefKind::Import {
+                let recorded = scopes.get(use_.scope_key.as_str()).is_some_and(|scope| {
+                    scope
+                        .facts
+                        .module_imports
+                        .iter()
+                        .any(|import| import.span == use_.span)
+                });
+                if !recorded {
+                    problems.push(format!(
+                        "{file} [{start}, {end}) {:?}: an import use with no import binding",
+                        use_.spelling
+                    ));
+                }
+            }
+        }
+    }
+
+    // Every gold use, exactly.
+    let mut expected: BTreeMap<Key, (String, String, String)> = BTreeMap::new();
+    for u in gold.uses.iter().filter(|u| u.task == "T43") {
+        let key = (u.file.clone(), u.start_byte, u.end_byte);
+        let want = (u.ref_kind.clone(), u.container.clone(), u.receiver.clone());
+        match actual.get(&key).map(Vec::as_slice) {
+            Some([got]) if *got == want => {}
+            Some(got) => problems.push(format!(
+                "use {} [{}, {}) {:?}: want {want:?}, extracted {got:?}",
+                u.file, u.start_byte, u.end_byte, u.text
+            )),
+            None => problems.push(format!(
+                "use {} [{}, {}) {:?}: not extracted (want {want:?})",
+                u.file, u.start_byte, u.end_byte, u.text
+            )),
+        }
+        expected.insert(key, want);
+    }
+    // No use inside a not-a-use span.
+    for u in gold.not_a_use.iter().filter(|u| u.task == "T43") {
+        for (file, start, end) in actual.keys() {
+            if *file == u.file && u.start_byte <= *start && *end <= u.end_byte {
+                problems.push(format!(
+                    "not_a_use {} [{}, {}) ({}) is extracted as a use",
+                    u.file, u.start_byte, u.end_byte, u.why
+                ));
+            }
+        }
+    }
+    // Every extracted use of a focus name is in the gold.
+    for (file, (source, _)) in &extracted {
+        for (key, _) in actual.range((file.clone(), 0, 0)..(file.clone(), usize::MAX, usize::MAX)) {
+            let spelling = &source[key.1..key.2];
+            if gold
+                .focus_names
+                .iter()
+                .any(|name| name.as_bytes() == spelling)
+                && !expected.contains_key(key)
+            {
+                problems.push(format!(
+                    "extracted use {} [{}, {}) {:?} of a focus name is not in the gold",
+                    key.0,
+                    key.1,
+                    key.2,
+                    String::from_utf8_lossy(spelling)
+                ));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "T43 extractor problems:\n{}",
+        problems.join("\n")
+    );
+    let verified = gold.uses.iter().filter(|u| u.task == "T43").count()
+        + gold.not_a_use.iter().filter(|u| u.task == "T43").count();
+    println!("typescript T43: {verified} entries verified against the extractor");
 }

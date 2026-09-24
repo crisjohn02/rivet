@@ -14,6 +14,12 @@
 //! Exclusion is not resolution. It never binds a use, never changes a tier,
 //! and never applies to a use bound to the target; `--mode candidates` lists
 //! every excluded use exactly as before.
+//!
+//! Both kinds of evidence are PHP's (T43; spec §11.5): the form table is
+//! derived from the forms the PHP extractor records, and the receiver rule
+//! assumes nominal classes. [`excludes_by_evidence`] is the gate: for a
+//! target or use in a file of any other language, TypeScript included,
+//! neither rule applies and nothing is excluded.
 
 use std::collections::BTreeSet;
 
@@ -28,6 +34,20 @@ fn is_class_like(kind: SymbolKind) -> bool {
         kind,
         SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum
     )
+}
+
+/// Whether reference mode may exclude a use by evidence when the target or
+/// the use is in a file of `language` (T43).
+///
+/// Only PHP. TypeScript routinely references a function or a `const` through
+/// a qualifier (`Outer.f()`, a namespace import's `util.format()`, `Color.Red`),
+/// names a class through `new`, and puts a value in a type position
+/// (`typeof x`), so PHP's form table would drop real references. And its
+/// structural typing lets a receiver typed `Foo` hold any shape-compatible
+/// object, so a receiver class proves nothing about the target's class. A
+/// file with no stored language excludes nothing either.
+pub fn excludes_by_evidence(language: Option<&str>) -> bool {
+    language == Some("php")
 }
 
 /// Whether an unresolved use of this form can name `target` (rule 1).
@@ -48,8 +68,10 @@ fn is_class_like(kind: SymbolKind) -> bool {
 /// | TypeScript type alias (`type_alias`) | every form |
 ///
 /// A type alias is TypeScript-only, and no TypeScript use is excluded by
-/// evidence (docs/ADDING-A-LANGUAGE.md "MVP support boundary"), so it
-/// excludes nothing.
+/// evidence ([`excludes_by_evidence`]; docs/ADDING-A-LANGUAGE.md "MVP support
+/// boundary"), so it excludes nothing. The caller applies this table only
+/// when [`excludes_by_evidence`] holds for both the target's and the use's
+/// file.
 ///
 /// A `unknown` use is compatible with every target: the extractor records a
 /// bare constant name, a trait `use` inside a class body, and any other
