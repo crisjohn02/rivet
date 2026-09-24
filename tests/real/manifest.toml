@@ -1,0 +1,72 @@
+# Pinned public TypeScript project for the real-code contract checks (T46).
+# Read by tests/real/fetch.sh (the [project] string fields) and by
+# tests/real/check_real.py. Field names are stable; add fields rather than
+# renaming them.
+#
+# The project is public and MIT-licensed, but its source is never vendored
+# into this repository: fetch.sh checks the pinned commit out under
+# $RIVET_REAL_DIR (default target/real/, ignored by git).
+#
+# PHP has no public real project here. PHP's real-project coverage stays with
+# the private benchmark corpus (benchmark/corpus.toml, benchmark/CORPUS.md);
+# check_real.py exercises PHP only through the authored fixture, alone and
+# mixed with the authored TypeScript fixture.
+#
+# How the counts below were produced:
+#   files.*        tracked files at `commit`, by extension, from `git ls-files`.
+#                  `ts` excludes `.d.ts`. `ts_in_excluded_dirs` counts `.ts`
+#                  files under a spec §26 default exclusion (`build/`), which
+#                  rivet skips without counting them as seen;
+#                  `tracked_gitignored` counts tracked files the repository's
+#                  own .gitignore matches (two `.gitkeep` files), which the
+#                  walk also leaves out.
+#   rivet_index.*  `rivet index --json --timing`, release build of the rivet
+#                  commit in `measured_with` (the binary is unchanged by T46),
+#                  on a copy of the checkout. Timings follow
+#                  benchmark/corpus.toml's indicative protocol, from
+#                  `elapsed_ms`: `cold_ms` is the median of 5 runs with
+#                  `.rivet/` deleted first, `noop_refresh_ms` the median of 3
+#                  immediately repeated runs, `force_ms` one `--force` run.
+#                  Machine: Apple Silicon macOS laptop, 12 cores. Indicative
+#                  only. tests/real/RESULTS.md has the full record.
+
+schema_version = 1
+
+[project]
+name = "hono"
+url = "https://github.com/honojs/hono"
+tag = "v4.13.9"
+commit = "7c3b0df96dbf3e767968ff5afe4c0d999257b8ee"
+license = "MIT"
+languages = ["typescript"]
+rationale = "Public web framework with relative imports, classes read through typed and new-bound receivers, and TSX; exercises T44 and T45 on code rivet's authors did not write."
+
+[project.files]
+tracked = 488
+ts = 329
+d_ts = 1
+tsx = 32
+mts = 27
+js = 1
+mjs = 2
+ts_in_excluded_dirs = 5
+tracked_gitignored = 2
+
+[project.rivet_index]
+measured_with = "fca8f07"
+files_seen = 481
+files_indexed = 349
+skipped_unsupported = 124
+skipped_binary = 0
+skipped_size = 0
+skipped_encoding = 0
+skipped_parse_error = 8
+skipped_resource_limit = 0
+symbols = 2468
+uses = 92303
+bindings = 9285
+bindings_exact = 8215
+bindings_scoped = 1070
+cold_ms = 776
+noop_refresh_ms = 46
+force_ms = 1156

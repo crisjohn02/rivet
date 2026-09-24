@@ -365,3 +365,85 @@ uses`).
 Per `docs/ADDING-A-LANGUAGE.md` "MVP support boundary": path aliases, package
 resolution, re-exports, CommonJS, inheritance, structural typing,
 unions/generics, decorators' runtime effects, and computed dynamic names.
+
+## Known limitations on real code (T46)
+
+Measured on Hono v4.13.9 (`tests/real/manifest.toml`; details, method, and
+the raw audit in `tests/real/RESULTS.md`). No resolver rule changed for this
+measurement; these are the consequences of the rules above, with their
+frequency on one real project.
+
+**Grammar parse failures: 8 of 357 eligible files (2.2%).** The pinned
+`tree-sitter-typescript` 0.23.2 grammar reports errors, so the parse policy
+publishes no facts for these files:
+
+| Cause | Files | Minimal form |
+|---|---|---|
+| consecutive generic call signatures in an interface or type literal separated only by a newline | 6 (`src/context.ts`, `src/types.ts`, `src/helper/factory/index.ts`, `src/helper/ssg/middleware.ts`, `src/jsx/hooks/index.ts`, `src/utils/body.ts`) | `interface G {` / `<K>(key: K): number` / `<K>(key: K): string` / `}` (a `;` after the first signature parses) |
+| `export type * from '...'` (TypeScript 5.0) | 2 (`src/jsx/index.ts`, `src/jsx/dom/index.ts`) | `export type * from './x'` |
+
+Two of the failed files are central: `src/context.ts` declares the `Context`
+class, so the project's most common typed receiver (`c: Context`) never binds,
+and 299 of the 1,634 named and default imports (18.3%) name a declaration in a
+failed module and stay unresolved.
+
+**Named and default imports (1,634):**
+
+| Outcome | Count | Share |
+|---|---:|---:|
+| bound `exact` | 971 | 59.4% |
+| relative, module not indexed (parse failure above) | 299 | 18.3% |
+| bare `.` or `..` specifier (not `./` or `../`, so not a relative specifier under the module rule) | 140 | 8.6% |
+| package or built-in (`vitest`, `node:fs`) | 124 | 7.6% |
+| relative, the module re-exports the name (`export { a } from`, `export *`) | 76 | 4.7% |
+| relative, the module exports an import binding (`import { a } from './x'; export { a }`) | 20 | 1.2% |
+| relative, other (not exported under that name, anonymous default) | 3 | 0.2% |
+| relative, no candidate module | 1 | 0.1% |
+
+No import used a path alias: Hono configures no tsconfig `paths`, and its
+`@std/...` and `@hono/...` specifiers are packages.
+
+**Member calls through a receiver (20,508):** 607 (3.0%) bind `scoped` through
+a receiver hint, 117 (0.6%) bind `exact` as namespace-import members, and
+19,784 (96.5%) stay `name_match`. By receiver shape over all 19,784
+(mechanical, from the receiver text and recorded hint):
+
+| Receiver shape | Count | Share |
+|---|---:|---:|
+| call or other expression (`expect(x).toBe()`, `(await f()).text()`) | 8,490 | 42.9% |
+| identifier with no hint (a callback parameter `c`, an untyped `const`) | 5,060 | 25.6% |
+| `new` hint whose class has no own member of that name, or no class resolved | 2,506 | 12.7% |
+| property chain (`c.req.header()`, `this.a.b()`) | 1,909 | 9.6% |
+| capitalized identifier with no hint (class name or global object: `Buffer.from()`, `Reflect.set()`) | 960 | 4.9% |
+| annotation hint with no own member bound, or no class resolved | 853 | 4.3% |
+| annotation with a qualified type name | 5 | 0.03% |
+| `this` hint with no own member | 1 | 0.01% |
+
+A seeded sample of 40, classified by reading the source (`tests/real/RESULTS.md`
+lists each):
+
+| Why it stays unresolved | Sample | Share |
+|---|---:|---:|
+| call or expression result as receiver (other) | 21 | 52.5% |
+| untyped receiver | 8 | 20.0% |
+| inherited member (`new Hono()` from `src/hono.ts`; `get`, `use`, `request` are declared on the base class in `src/hono-base.ts`) | 4 | 10.0% |
+| re-export (the class is imported through `src/index.ts`, which exports its import binding of `Hono`) | 2 | 5.0% |
+| class-name receiver (global `Buffer`, `Reflect`) | 2 | 5.0% |
+| chained property | 2 | 5.0% |
+| non-class annotation (`times: string[]`) (other) | 1 | 2.5% |
+| qualified type annotation | 0 | 0% |
+| package import | 0 | 0% |
+| path alias | 0 | 0% |
+
+The five qualified annotations are all `NodeJS.WritableStream`, a global
+namespace from `@types/node` that is not in the repository. Neither
+conservative gap the T45 review found (`ns.Inner.Foo`, deeper than one
+namespace-import member, and `Local.Foo` through a same-file `namespace
+Local`) occurs in Hono.
+
+**Precision.** A seeded sample of 40 `exact` and 40 `scoped` bindings, each
+checked against the source, found no wrong target (with 0 of 40, the one-sided
+95% upper bound on the error rate is 7.2% per tier). `scoped` bindings on an
+interface receiver (`let router: Router<string>; router.add()`) name the
+interface's own method, as the receiver rule states, not the implementation
+that runs.
