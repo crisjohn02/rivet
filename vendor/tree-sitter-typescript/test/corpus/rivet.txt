@@ -1,0 +1,508 @@
+================================================================================
+rivet: generic call signatures separated by a newline in an interface
+================================================================================
+
+interface G {
+  <K>(key: K): number
+  <K extends string>(key: K): string
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (interface_declaration
+    (type_identifier)
+    (interface_body
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (predefined_type)))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)
+            (constraint
+              (predefined_type))))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (predefined_type))))))
+
+================================================================================
+rivet: generic call signatures separated by a newline in an object type
+================================================================================
+
+type G = {
+  (): void
+  <K>(key: K)
+  // a comment between members
+  <K>(key: K): K[]
+  new <T>(): T
+  <K>(key: K): Map<K, string>
+  <T>(value: T): E['a'][T]
+  /* block */ <T>(value: T): T
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (type_alias_declaration
+    (type_identifier)
+    (object_type
+      (call_signature
+        (formal_parameters)
+        (type_annotation
+          (predefined_type)))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier)))))
+      (comment)
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (array_type
+            (type_identifier))))
+      (construct_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters)
+        (type_annotation
+          (type_identifier)))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (generic_type
+            (type_identifier)
+            (type_arguments
+              (type_identifier)
+              (predefined_type)))))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (lookup_type
+            (lookup_type
+              (type_identifier)
+              (literal_type
+                (string
+                  (string_fragment))))
+            (type_identifier))))
+      (comment)
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (type_identifier))))))
+
+================================================================================
+rivet: a generic call signature after a type that could take type arguments
+================================================================================
+
+interface G {
+  a: Foo
+  <K>(key: K): Promise
+  <K>(key: K): typeof f
+  <K>(key: K): K
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (interface_declaration
+    (type_identifier)
+    (interface_body
+      (property_signature
+        (property_identifier)
+        (type_annotation
+          (type_identifier)))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (type_identifier)))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (type_query
+            (identifier))))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (type_identifier))))))
+
+================================================================================
+rivet: type parameters on the line after a method signature's name
+================================================================================
+
+interface G {
+  a
+  <K>(key: K): K
+  b?
+  <K>(key: K): K
+  [Symbol.iterator]
+  <T>(): T
+  'c'
+  <T>(): T
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (interface_declaration
+    (type_identifier)
+    (interface_body
+      (method_signature
+        (property_identifier)
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (type_identifier)))
+      (method_signature
+        (property_identifier)
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (type_identifier)))
+      (method_signature
+        (computed_property_name
+          (member_expression
+            (identifier)
+            (property_identifier)))
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters)
+        (type_annotation
+          (type_identifier)))
+      (method_signature
+        (string
+          (string_fragment))
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters)
+        (type_annotation
+          (type_identifier))))))
+
+================================================================================
+rivet: type arguments opened on the same line keep their parse
+================================================================================
+
+interface G {
+  a: Map<
+    string,
+    number
+  >
+  b: Record<K,
+    string>
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (interface_declaration
+    (type_identifier)
+    (interface_body
+      (property_signature
+        (property_identifier)
+        (type_annotation
+          (generic_type
+            (type_identifier)
+            (type_arguments
+              (predefined_type)
+              (predefined_type)))))
+      (property_signature
+        (property_identifier)
+        (type_annotation
+          (generic_type
+            (type_identifier)
+            (type_arguments
+              (type_identifier)
+              (predefined_type))))))))
+
+================================================================================
+rivet: a less-than on a new line in expressions keeps its parse
+================================================================================
+
+a
+<b>(c)
+x
+< y
+
+--------------------------------------------------------------------------------
+
+(program
+  (expression_statement
+    (call_expression
+      (identifier)
+      (type_arguments
+        (type_identifier))
+      (arguments
+        (identifier))))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier))))
+
+================================================================================
+rivet: a less-than on a new line outside object types keeps its parse
+================================================================================
+
+function f() {
+  return
+  <T>(x: T) => x
+}
+class A {
+  m
+  <T>() {}
+}
+let x: Map
+<string, number> = y
+
+--------------------------------------------------------------------------------
+
+(program
+  (function_declaration
+    (identifier)
+    (formal_parameters)
+    (statement_block
+      (return_statement
+        (arrow_function
+          (type_parameters
+            (type_parameter
+              (type_identifier)))
+          (formal_parameters
+            (required_parameter
+              (identifier)
+              (type_annotation
+                (type_identifier))))
+          (identifier)))))
+  (class_declaration
+    (type_identifier)
+    (class_body
+      (method_definition
+        (property_identifier)
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters)
+        (statement_block))))
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (type_annotation
+        (generic_type
+          (type_identifier)
+          (type_arguments
+            (predefined_type)
+            (predefined_type))))
+      (identifier))))
+
+================================================================================
+rivet: export type star
+================================================================================
+
+export type * from './x'
+export type * as ns from "./y";
+export type * as "string name" from './z'
+export * from './w'
+
+--------------------------------------------------------------------------------
+
+(program
+  (export_statement
+    (string
+      (string_fragment)))
+  (export_statement
+    (namespace_export
+      (identifier))
+    (string
+      (string_fragment)))
+  (export_statement
+    (namespace_export
+      (string
+        (string_fragment)))
+    (string
+      (string_fragment)))
+  (export_statement
+    (string
+      (string_fragment))))
+
+================================================================================
+rivet: export type star without a source is an error
+:error
+================================================================================
+
+export type *
+
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+rivet: export type star as a namespace without a source is an error
+:error
+================================================================================
+
+export type * as ns;
+
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+rivet: export type star with a clause is an error
+:error
+================================================================================
+
+export type * as ns, { a } from './x'
+
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+rivet: TSX generic call signatures, export type star, and a JSX return
+:language(tsx)
+================================================================================
+
+interface G {
+  <K>(key: K): number
+  <K>(key: K): string
+}
+export type * from './x'
+function f() {
+  return <div>
+    <b />
+  </div>
+}
+function g() {
+  return
+  <p />
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (interface_declaration
+    (type_identifier)
+    (interface_body
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (predefined_type)))
+      (call_signature
+        (type_parameters
+          (type_parameter
+            (type_identifier)))
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (type_annotation
+          (predefined_type)))))
+  (export_statement
+    (string
+      (string_fragment)))
+  (function_declaration
+    (identifier)
+    (formal_parameters)
+    (statement_block
+      (return_statement
+        (jsx_element
+          (jsx_opening_element
+            (identifier))
+          (jsx_self_closing_element
+            (identifier))
+          (jsx_closing_element
+            (identifier))))))
+  (function_declaration
+    (identifier)
+    (formal_parameters)
+    (statement_block
+      (return_statement
+        (jsx_self_closing_element
+          (identifier))))))

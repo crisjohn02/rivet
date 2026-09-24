@@ -60,6 +60,19 @@ cargo build -p rivet-cli --release --features lang-php,lang-typescript
 
 `default = ["lang-php", "lang-typescript"]` for the MVP. Adding a language is described in [ADDING-A-LANGUAGE.md](ADDING-A-LANGUAGE.md).
 
+## Grammar pins and the vendored TypeScript grammar
+
+The PHP grammar is the registry crate `tree-sitter-php = "=0.24.2"`. The TypeScript and TSX grammars are a vendored path crate, `vendor/tree-sitter-typescript/` (`tree-sitter-typescript` version `0.23.2-rivet.1`, a workspace member): upstream tag `v0.23.2`, the latest release, with two minimal grammar patches (GR1) so that generic call signatures separated only by a newline and `export type * from` parse. `vendor/tree-sitter-typescript/RIVET-PATCHES.md` lists every change from upstream, why, and how it was verified; upstream's MIT license is kept beside it. Both grammar crates expose `tree-sitter-language` 0.1 for the `tree-sitter = "=0.27.0"` runtime.
+
+The generated parser C is committed, so a build needs only the C compiler: the `tree-sitter` CLI, Node, and npm are never needed to build or test rivet. To change the grammar, edit `common/define-grammar.js` or `common/scanner.h` under the vendored crate, then regenerate:
+
+```bash
+vendor/tree-sitter-typescript/regenerate.sh           # regenerate typescript/src and tsx/src, run the grammar corpus
+vendor/tree-sitter-typescript/regenerate.sh --check   # verify the committed C matches the grammar sources
+```
+
+The script needs Node/npm, a C compiler, and the network for npm. It works in `target/grammar-regen/` (ignored by git), where it installs the pinned `tree-sitter-cli@0.24.4` (the CLI upstream generated v0.23.2 with; it reproduces upstream's committed C byte for byte) and `tree-sitter-javascript@0.23.1` (the base grammar `define-grammar.js` requires), and runs the CLI with `HOME` inside that directory. A grammar change must also update `EXTRACTOR_FINGERPRINT` in `crates/rivet-languages/src/lib.rs` and the version in the vendored `Cargo.toml` (`0.23.2-rivet.N`).
+
 ## Tests
 
 ```bash

@@ -494,3 +494,90 @@ diagnostic in the existing `diagnostics` table (no schema change), so a
 rather than `stored parse error`, and size, binary, and encoding skips report
 the same detail a content refresh does. Cached answers on Hono now differ from
 refreshed ones only in `freshness`.
+
+## GR1 addendum (2026-09-24): vendored, patched TypeScript grammar
+
+GR1 replaces the registry `tree-sitter-typescript` 0.23.2 with a vendored copy
+of the same release, `vendor/tree-sitter-typescript/` (`0.23.2-rivet.1`), with
+two grammar patches: generic call signatures separated only by a newline, and
+`export type * from` (`RIVET-PATCHES.md` there has the root causes and the
+diff). The extractor fingerprint's TypeScript component is now
+`ts=0.23.2-rivet.1`; no resolver rule changed. T46's and T44a's numbers above
+are left as they were measured. This addendum records one full
+`python3 tests/real/check_real.py` run (release build of the task/GR1 working
+tree on `0c20546`, same pin and machine; 11 min 27 s) and one `--audit` run
+with each binary.
+
+`check_real: PASS (0 failed check(s))`: coverage, determinism (Hono 800
+queries over 200 of 2,684 symbols), two-language, budget, and full versus
+incremental (Hono 8 steps, 12,548 queries per store; PHP 1,620; TypeScript
+2,344; mixed 8,436) all pass.
+
+| Tree | Seen | Indexed | Skipped | Symbols | Uses | Bindings `exact` | Bindings `scoped` |
+|---|---:|---:|---|---:|---:|---:|---:|
+| hono | 481 | 357 | 124 unsupported | 2,684 | 102,981 | 13,401 (+4,751) | 1,380 (+301) |
+| php fixture | 10 | 9 | 1 unsupported | 50 | 14 | 6 | 7 |
+| typescript fixture | 18 | 13 | 4 unsupported, 1 parse_error | 82 | 144 | 55 | 16 |
+| mixed (both fixtures) | 27 | 22 | 4 unsupported, 1 parse_error | 132 (50 PHP, 82 TS) | 158 (14 PHP, 144 TS) | 61 (6 PHP, 55 TS) | 23 (7 PHP, 16 TS) |
+
+(Deltas against the T44a addendum.) **Hono's parse failures drop from 8 to 0.**
+All eight T46 failures were the two constructs: six newline-separated generic
+call signatures, two `export type * from`. The fixtures' counts are unchanged;
+the TypeScript fixture's one failure is its deliberately broken
+`src/broken.ts`.
+
+Against a release build of `0c20546` (the grammar before GR1) on the same
+checkout: symbol rows and use rows outside the eight formerly failed files are
+identical (row ids aside), and the eight files add 216 symbols and 10,678
+uses. Binding by binding (file, byte range, spelling, target, tier): none lost
+or changed, 5,052 gained; 3,276 are in the eight files (3,209 `exact`, 67
+`scoped`) and 1,776 elsewhere bind a declaration in one of them (1,542
+`exact`, 234 `scoped`, such as `c: Context` receivers now binding members of
+`src/context.ts#Context`). Every PHP and TypeScript fixture answer (`index
+--json` and the four queries per symbol: 200 PHP, 328 TypeScript, 528 mixed)
+is byte-identical to that build apart from the snapshot digest.
+
+Named and default imports, from `check_real.py --audit` (the same mechanical
+classifier as T46, run with both binaries; more imports are counted because the
+eight files' own imports are now extracted):
+
+| Outcome | Before GR1 (1,634) | After GR1 (1,765) |
+|---|---:|---:|
+| bound `exact` | 1,023 | 1,435 (81.3%) |
+| relative, module not indexed (parse failure) | 299 | 0 |
+| package or built-in | 124 | 124 |
+| relative, re-export (`export ... from`, including `export type *`) | 76 | 113 |
+| bare `.` or `..` specifier, not bound | 88 | 69 |
+| relative, exported import binding | 20 | 20 |
+| relative, other | 3 | 3 |
+| relative, no candidate module | 1 | 1 |
+
+Unresolved member calls fall from 19,779 to 19,685 although eight more files
+are indexed; by receiver shape the largest change is annotation hints with no
+own member bound, 851 to 700 (the `Context` class is now indexed). The seeded
+`exact` and `scoped` audit samples were re-drawn (seed 46) and read at a
+glance, with no wrong target seen; they were not re-classified by hand as T46's
+were.
+
+Grammar tree identity (throwaway harness, not committed: every node's kind,
+field, named/missing/extra flags, and byte range, plus the S-expression, from
+the crates.io 0.23.2 grammar and from the vendored one):
+
+| Input | Files | Upstream parsed without error | Identical tree | Upstream error, now parses | Upstream error, still error (identical tree) |
+|---|---:|---:|---:|---:|---:|
+| authored TypeScript fixture (`.ts`, `.tsx`) | 14 | 13 | 13 | 0 | 1 (`src/broken.ts`) |
+| Hono `.ts`, `.tsx`, `.d.ts` (including `build/`) | 362 | 354 | 354 | 8 | 0 |
+| Hono `.mts` (TypeScript grammar) | 27 | 27 | 27 | 0 | 0 |
+| other local TypeScript (TypeScript's `lib.*.d.ts`, zod, and other packages bundled with an installed editor and npm) | 1,141 | 990 | 990 | 0 | 151 |
+
+The 151 still-failing extra files (most of them zod's `.d.cts` locale files)
+fail on constructs GR1 does not touch (among them variance annotations
+`in`/`out` on type parameters and `export =` of a function); none contains
+`export type *`, and each fails with an identical tree under both grammars. A mutation run inserted a newline
+before 4,070 seeded `<` characters in Hono and extra files: the only
+error-free inputs whose tree changed (367) are type arguments moved to the
+line after their type inside an object type or interface body
+(`headers: Record` / `<string, string>`), which TypeScript does not read as
+type arguments either; the patched grammar ends the member at the line break,
+as TypeScript does. The grammar's own corpus (`tree-sitter test`, CLI 0.24.4)
+passes: 112 upstream cases and 12 new ones.

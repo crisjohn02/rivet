@@ -87,3 +87,20 @@ uses = 92303
 bindings = 9729
 bindings_exact = 8650
 bindings_scoped = 1079
+
+# GR1 addendum (2026-09-24): one full `check_real.py` run with the vendored,
+# patched grammar tree-sitter-typescript 0.23.2-rivet.1 (extractor
+# fingerprint ts=0.23.2-rivet.1), release build of the task/GR1 working tree
+# on 0c20546. Coverage counts only; no timings were taken. The blocks above
+# stay T46's and T44a's measurements.
+[project.rivet_index_gr1]
+measured_with = "0c20546+GR1"
+files_seen = 481
+files_indexed = 357
+skipped_unsupported = 124
+skipped_parse_error = 0
+symbols = 2684
+uses = 102981
+bindings = 14781
+bindings_exact = 13401
+bindings_scoped = 1380
