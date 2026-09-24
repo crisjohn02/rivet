@@ -247,9 +247,11 @@ fn file_not_indexed(
                     ),
                 )
             };
-            // The refresh that produced the snapshot reported the parser's own
-            // detail; a cached or truncated report falls back to the stable
-            // stored-status detail.
+            // The report carries the parser's own detail, from this refresh or,
+            // for a cached report, persisted by the refresh that produced the
+            // snapshot (PF2). A report whose diagnostics were truncated past
+            // this file, or a snapshot written before PF2, falls back to the
+            // stable stored-status detail.
             let detail = report
                 .diagnostics
                 .iter()
