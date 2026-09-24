@@ -7,13 +7,21 @@ Stdlib only. Exits non-zero and prints the failing entry on any mismatch.
 
 TypeScript gold (T41). tests/gold/typescript-authored.toml tags every entry
 with the task that makes it verifiable (T42-T45) and lists the finished ones
-in `done_tasks`. Only entries of a done task are verified (the recorded text,
-and the line and column or line range, as for PHP entries); every other entry
-is counted as pending, per task, and printed, never skipped silently. A done task that still has an [[undecided]]
-entry fails. Independently of task state, a span self-check requires every
-TypeScript entry's recorded text to be the fixture's bytes at its span, so a
-pending entry is never unchecked. An unknown table, an unknown or missing task
-tag, or an unknown `done_tasks` value is an error.
+in `done_tasks`. Only entries of a done task are span-verified here (the
+recorded text, and the line and column or line range, as for PHP entries);
+every other entry is counted as pending, per task, and printed, never skipped
+silently. A done task that still has an [[undecided]] entry fails.
+Independently of task state, a span self-check requires every TypeScript
+entry's recorded text to be the fixture's bytes at its span, so a pending
+entry is never unchecked. An unknown table, an unknown or missing task tag,
+or an unknown `done_tasks` value is an error.
+
+This script never runs rivet, so it never claims that rivet produced a
+TypeScript entry. Comparing a done task's entries with rivet's output is owned
+by a Rust test that `cargo test` runs, named per task in TS_HARNESS (T42: the
+extractor comparison in crates/rivet-languages/tests/typescript_gold.rs). The
+report names that harness and says it is not run here; a done task with no
+harness listed fails.
 
 Private corpus gold (T35). The benchmark corpus is private, so its gold
 samples live outside this repository. When both environment variables are
@@ -34,6 +42,12 @@ FIXTURES = HERE.parent / "fixtures" / "php" / "authored"
 TS_GOLD = HERE / "typescript-authored.toml"
 TS_FIXTURES = HERE.parent / "fixtures" / "typescript" / "authored"
 TS_TASKS = ("T42", "T43", "T44", "T45")
+# The Rust test that compares each done task's entries with rivet, and the
+# command that runs it. check_gold.py does not run it.
+TS_HARNESS = {
+    "T42": ("crates/rivet-languages/tests/typescript_gold.rs",
+            "cargo test -p rivet-languages --test typescript_gold"),
+}
 # Each table and whether its spans are declaration-like (a line range plus
 # `text`/`end_text`) or use-like (line and column plus the exact `text`).
 TS_TABLES = (
@@ -132,8 +146,14 @@ def check_typescript():
         print("FAIL typescript gold: done_tasks %r must list tasks from %s" % (
             done, ", ".join(TS_TASKS)))
         done = []
+    for task in done:
+        if task not in TS_HARNESS:
+            failures += 1
+            print("FAIL typescript gold: done task %s names no harness in TS_HARNESS, "
+                  "so nothing compares its entries with rivet" % task)
     cache = {}
     verified = 0
+    per_task = {task: 0 for task in TS_TASKS}
     self_checked = 0
     self_failed = 0
     pending = {task: 0 for task in TS_TASKS}
@@ -173,6 +193,7 @@ def check_typescript():
                 continue
             error = ts_verify(entry, cache[name], is_block)
             verified += 1
+            per_task[task] += 1
             if error:
                 failures += 1
                 print("FAIL typescript %s %s: %s" % (table, name, error))
@@ -182,8 +203,14 @@ def check_typescript():
                     table, name, entry["start_byte"], entry["end_byte"]))
     print("span self-check: %d of %d typescript entries match the fixture bytes" % (
         self_checked - self_failed, self_checked))
-    print("verified %d typescript entries (done: %s)" % (
+    print("span-verified %d typescript entries of done tasks (done: %s)" % (
         verified, ", ".join(done) if done else "none"))
+    for task in done:
+        if task in TS_HARNESS:
+            harness, command = TS_HARNESS[task]
+            print("typescript %s: %d entries span-verified here; their comparison with "
+                  "rivet is owned by %s (`%s`), which this script does not run" % (
+                      task, per_task[task], harness, command))
     total = sum(pending.values())
     if total:
         detail = ", ".join("%s: %d" % (task, count) for task, count in pending.items() if count)

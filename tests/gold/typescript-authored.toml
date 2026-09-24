@@ -40,6 +40,12 @@
 # - A const bound to an arrow or function expression is one `function`.
 # - An ambient declaration in a .d.ts file is named exactly as the same
 #   declaration in a .ts file; the file path distinguishes modules.
+# - Settled by T42 (docs/ADDING-A-LANGUAGE.md): a type alias is a `type_alias`;
+#   a generic type parameter, a function-local declaration, a string-named
+#   ambient module and its members are not symbols; a getter and a setter are
+#   each a `method`, with ordinals when they share a name; overload signatures
+#   fold into the implementation in the same scope (or, with none, into the
+#   first signature), so only that one is a symbol.
 # - `id` is `<path>#<qualified name>` with the fixture root as the repository
 #   root, `%` and `#` escaped as `%25`/`%23`, and a one-based `#<n>` ordinal on
 #   every duplicate qualified name in a file in (start_byte, end_byte, kind)
@@ -78,13 +84,17 @@
 #   still has an undecided entry.
 #
 # src/broken.ts, src/legacy.js and src/esm.mts have no entries: typescript_gold.rs
-# pins their parse outcome and grammar dispatch, and the CLI test pins that
-# indexing the fixture is unchanged while no TypeScript extractor exists.
+# pins their parse outcome and grammar dispatch (and, since T42, that the
+# extractor yields no facts and one parse_error for src/broken.ts), and the CLI
+# test pins that indexing the fixture is unchanged while TypeScript is not
+# indexed (until T43).
 
-# The tasks whose entries check_gold.py verifies. Every other entry is reported
-# as pending, per task. Add a task in the same change that makes its entries
-# pass.
-done_tasks = []
+# The tasks whose entries are verified. check_gold.py checks their spans and
+# names the harness that compares them with rivet (T42: the extractor, in
+# crates/rivet-languages/tests/typescript_gold.rs); every other entry is
+# reported as pending, per task. Add a task in the same change that makes its
+# entries pass.
+done_tasks = ["T42"]
 
 # Every occurrence of these names outside comments in a supported fixture file
 # is a declaration's name or exactly one [[use]], [[not_a_use]] or [[undecided]]
@@ -482,6 +492,20 @@ start_line = 48
 end_line = 50
 text = "export function old(): number {\n    retu"
 end_text = "number {\n    return Geometry.ORIGIN;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+id = "src/models.ts#SurveyId"
+qualified_name = "SurveyId"
+kind = "type_alias"
+start_byte = 1177
+end_byte = 1216
+start_line = 54
+end_line = 54
+text = "export type SurveyId = number | string;"
+end_text = "export type SurveyId = number | string;"
 
 [[declaration]]
 task = "T42"
@@ -933,6 +957,34 @@ end_text = "elaunch(): void {\n    this.launch();\n  }"
 
 [[declaration]]
 task = "T42"
+case = "u"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.label#1"
+qualified_name = "SurveyService.label"
+kind = "method"
+start_byte = 1272
+end_byte = 1321
+start_line = 48
+end_line = 50
+text = "get label(): string {\n    return this.pr"
+end_text = "(): string {\n    return this.prefix;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.label#2"
+qualified_name = "SurveyService.label"
+kind = "method"
+start_byte = 1325
+end_byte = 1376
+start_line = 52
+end_line = 54
+text = "set label(value: string) {\n    this.log("
+end_text = "alue: string) {\n    this.log(value);\n  }"
+
+[[declaration]]
+task = "T42"
 case = "t"
 file = "src/types.d.ts"
 id = "src/types.d.ts#greet"
@@ -1256,6 +1308,78 @@ start_line = 18
 end_line = 20
 text = "export default function () {\n  return <A"
 end_text = "efault function () {\n  return <App />;\n}"
+
+[[not_a_declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+why = "generic type parameter"
+start_byte = 1303
+end_byte = 1304
+start_line = 57
+end_line = 57
+text = "T"
+end_text = "T"
+
+[[not_a_declaration]]
+task = "T42"
+case = "p"
+file = "src/report.ts"
+why = "function-local const"
+start_byte = 1573
+end_byte = 1617
+start_line = 58
+end_line = 58
+text = "const double = (n: number): number => n "
+end_text = "t double = (n: number): number => n + n;"
+
+[[not_a_declaration]]
+task = "T42"
+case = "u"
+file = "src/types.d.ts"
+why = "string-named ambient module"
+start_byte = 392
+end_byte = 456
+start_line = 23
+end_line = 25
+text = "declare module \"legacy-lib\" {\n  export f"
+end_text = "ib\" {\n  export function start(): void;\n}"
+
+[[not_a_declaration]]
+task = "T42"
+case = "u"
+file = "src/types.d.ts"
+why = "member of a string-named ambient module"
+start_byte = 424
+end_byte = 454
+start_line = 24
+end_line = 24
+text = "export function start(): void;"
+end_text = "export function start(): void;"
+
+[[not_a_declaration]]
+task = "T42"
+case = "u"
+file = "src/util.ts"
+why = "overload signature folded into its implementation"
+start_byte = 67
+end_byte = 114
+start_line = 2
+end_line = 2
+text = "export function toLabel(value: number): "
+end_text = "function toLabel(value: number): string;"
+
+[[not_a_declaration]]
+task = "T42"
+case = "u"
+file = "src/util.ts"
+why = "overload signature folded into its implementation"
+start_byte = 115
+end_byte = 162
+start_line = 3
+end_line = 3
+text = "export function toLabel(value: string): "
+end_text = "function toLabel(value: string): string;"
 
 [[use]]
 task = "T43"
@@ -2878,132 +3002,6 @@ column = 10
 text = "launch"
 expected_target = "src/services/survey.ts#SurveyService.launch"
 expected_resolution = "scoped"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/models.ts"
-form = "declaration"
-question = "Is a type alias a v0.1 definition? ADDING-A-LANGUAGE's TypeScript column does not name type aliases, and the contract's closed `kind` list has no fitting value."
-proposal = "not a symbol in v0.1; adding one needs a contract kind"
-start_byte = 1177
-end_byte = 1216
-start_line = 54
-end_line = 54
-text = "export type SurveyId = number | string;"
-end_text = "export type SurveyId = number | string;"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/models.ts"
-form = "declaration"
-question = "Is a generic type parameter a definition? The column is silent; its 'Not resolved' row excludes unions/generics from resolution only."
-proposal = "not a symbol; the generic class, interface or function is one ordinary symbol"
-start_byte = 1303
-end_byte = 1304
-start_line = 57
-end_line = 57
-text = "T"
-end_text = "T"
-
-[[undecided]]
-task = "T42"
-case = "p"
-file = "src/report.ts"
-form = "declaration"
-question = "Is a function-local const a symbol? The column says 'named const bindings' without saying module level. This applies to every const in a function body (created, annotated, x here; count in App.tsx; legacy in unresolved.ts). If it becomes `shadowed.double`, update the (p) binding's expected_target."
-proposal = "not a symbol: locals are never symbols, as in PHP"
-start_byte = 1573
-end_byte = 1617
-start_line = 58
-end_line = 58
-text = "const double = (n: number): number => n "
-end_text = "t double = (n: number): number => n + n;"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/services/survey.ts"
-form = "declaration"
-question = "Is a getter a method symbol? With its setter it shares the qualified name SurveyService.label, so both would carry spec 10.1 ordinals (#1, #2) and a short query would be ambiguous."
-proposal = "a `method` symbol each, with ordinals; the alternative is one `property` symbol"
-start_byte = 1272
-end_byte = 1321
-start_line = 48
-end_line = 50
-text = "get label(): string {\n    return this.pr"
-end_text = "(): string {\n    return this.prefix;\n  }"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/services/survey.ts"
-form = "declaration"
-question = "Is a setter a method symbol? See the getter entry above."
-proposal = "a `method` symbol, as for the getter"
-start_byte = 1325
-end_byte = 1376
-start_line = 52
-end_line = 54
-text = "set label(value: string) {\n    this.log("
-end_text = "alue: string) {\n    this.log(value);\n  }"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/types.d.ts"
-form = "declaration"
-question = "How is a string-named ambient module named? Its name is a string literal (\"legacy-lib\"), not an identifier, so 'lexical nesting with .' does not say whether the qualified name is legacy-lib, \"legacy-lib\", or no symbol at all."
-proposal = "no symbol in v0.1: the name is a module specifier, not an identifier"
-start_byte = 392
-end_byte = 456
-start_line = 23
-end_line = 25
-text = "declare module \"legacy-lib\" {\n  export f"
-end_text = "ib\" {\n  export function start(): void;\n}"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/types.d.ts"
-form = "declaration"
-question = "The member of the string-named ambient module; its qualified name follows the module's."
-proposal = "no symbol, following the module"
-start_byte = 424
-end_byte = 454
-start_line = 24
-end_line = 24
-text = "export function start(): void;"
-end_text = "export function start(): void;"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/util.ts"
-form = "declaration"
-question = "Is an overload signature a definition? Separate `function` symbols would give toLabel#1..#3 ordinals (and renumber the implementation); folding them into the implementation keeps one symbol."
-proposal = "not a separate symbol; the implementation is the one `toLabel` symbol"
-start_byte = 67
-end_byte = 114
-start_line = 2
-end_line = 2
-text = "export function toLabel(value: number): "
-end_text = "function toLabel(value: number): string;"
-
-[[undecided]]
-task = "T42"
-case = "u"
-file = "src/util.ts"
-form = "declaration"
-question = "The second overload signature; see the first."
-proposal = "not a separate symbol"
-start_byte = 115
-end_byte = 162
-start_line = 3
-end_line = 3
-text = "export function toLabel(value: string): "
-end_text = "function toLabel(value: string): string;"
 
 [[undecided]]
 task = "T43"

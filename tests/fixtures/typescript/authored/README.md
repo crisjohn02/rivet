@@ -17,7 +17,7 @@ the pinned grammar.
 
 | File | Covers |
 |---|---|
-| `src/models.ts` | interfaces with property and method signatures, interface declaration merging, a regular and a `const` enum, an exported namespace with a nested namespace, a `module` block; the undecided type alias and generic type parameter next to a generic interface, class, and function |
+| `src/models.ts` | interfaces with property and method signatures, interface declaration merging, a regular and a `const` enum, an exported namespace with a nested namespace, a `module` block; a type alias and a generic type parameter (settled by T42) next to a generic interface, class, and function |
 | `src/services/survey.ts` | an abstract class; a subclass with static, annotated, and ES private (`#`) fields, a constructor with parameter properties, a static method with a `new` expression, same-name `launch`, `this.launch()`, an inherited `this.log()` call, and a getter/setter pair |
 | `src/util.ts` | overload signatures and their implementation, consts bound to an arrow and to a function expression, plain and multi-name consts, a default export naming a local function |
 | `src/report.ts` | named, aliased, renamed-default, and namespace imports; the second `launch`; receivers typed by a field, a parameter (also with `?.`), a variable, and a preceding `new`; an unannotated receiver; top-level calls; template-literal text and interpolation; a local that shadows an import |
@@ -70,7 +70,10 @@ its gold entries.
 - **s** — TSX uses: capitalized components are uses; intrinsic elements, JSX
   text, and string attribute values are not.
 - **t** — ambient declarations in a `.d.ts` file.
-- **u** — constructs the docs do not settle (recorded as `[[undecided]]`).
+- **u** — constructs the docs did not settle when T41 wrote the fixture,
+  recorded as `[[undecided]]`. T42 settled all of them (type alias, generic
+  parameter, accessors, overloads, string-named ambient module); the
+  remaining `[[undecided]]` entries are T43 use questions under other cases.
 - **v** — the parse failure.
 - **w** — unsupported extensions.
 - **x** — import forms that stay unresolved.

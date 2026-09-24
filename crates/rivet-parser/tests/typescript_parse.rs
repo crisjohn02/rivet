@@ -2,9 +2,10 @@
 //!
 //! `.ts` and `.d.ts` files parse with the TypeScript grammar and `.tsx` files
 //! with the TSX grammar, chosen by [`language_for_path`]. A tree with an
-//! ERROR or MISSING node is a parse failure ([`first_parse_error`]). No
-//! TypeScript adapter exists until T42, so [`parse_file`] extracts nothing
-//! from these files and reports only the parse-policy diagnostic.
+//! ERROR or MISSING node is a parse failure ([`first_parse_error`]).
+//! TypeScript is not dispatched to its adapter until T43 flips
+//! `LanguageId::has_extractor`, so [`parse_file`] extracts nothing from these
+//! files and reports only the parse-policy diagnostic.
 
 #![cfg(feature = "lang-typescript")]
 

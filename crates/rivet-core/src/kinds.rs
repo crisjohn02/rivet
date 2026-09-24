@@ -29,6 +29,11 @@ pub enum SymbolKind {
     Property,
     /// A constant declaration.
     Const,
+    /// A type alias declaration (TypeScript `type X = ...`, T42).
+    ///
+    /// Declared last so the derived order, which breaks duplicate-ordinal
+    /// ties (spec §10.1), is unchanged for every earlier kind.
+    TypeAlias,
 }
 
 impl SymbolKind {
@@ -44,6 +49,7 @@ impl SymbolKind {
             SymbolKind::Module => "module",
             SymbolKind::Property => "property",
             SymbolKind::Const => "const",
+            SymbolKind::TypeAlias => "type_alias",
         }
     }
 }
@@ -62,6 +68,7 @@ impl FromStr for SymbolKind {
             "module" => Ok(SymbolKind::Module),
             "property" => Ok(SymbolKind::Property),
             "const" => Ok(SymbolKind::Const),
+            "type_alias" => Ok(SymbolKind::TypeAlias),
             _ => Err(KindParseError::new("symbol_kind", value)),
         }
     }
@@ -296,6 +303,7 @@ mod tests {
             SymbolKind::Module,
             SymbolKind::Property,
             SymbolKind::Const,
+            SymbolKind::TypeAlias,
         ];
         let expected = [
             "class",
@@ -307,6 +315,7 @@ mod tests {
             "module",
             "property",
             "const",
+            "type_alias",
         ];
         for (kind, text) in kinds.iter().zip(expected) {
             assert_eq!(kind.as_str(), text);
@@ -316,6 +325,17 @@ mod tests {
             SymbolKind::from_str("namespace").unwrap_err(),
             KindParseError::new("symbol_kind", "namespace")
         );
+        // The contract spelling is snake_case, never `type` or `typeAlias`.
+        assert!(SymbolKind::from_str("type").is_err());
+        assert!(SymbolKind::from_str("typeAlias").is_err());
+    }
+
+    /// `type_alias` sorts after every earlier kind, so adding it cannot
+    /// reorder an existing duplicate-ordinal tie (spec §10.1).
+    #[test]
+    fn type_alias_sorts_last() {
+        assert!(SymbolKind::Const < SymbolKind::TypeAlias);
+        assert!(SymbolKind::Class < SymbolKind::TypeAlias);
     }
 
     #[test]

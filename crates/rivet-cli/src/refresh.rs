@@ -540,7 +540,7 @@ fn refresh_inventory(
         let language_name = id.name().to_string();
 
         // An enabled language with no extraction adapter (TypeScript until
-        // T42; `LanguageId::has_extractor` is the one switch) yields no facts
+        // T43; `LanguageId::has_extractor` is the one switch) yields no facts
         // even when it parses, so the file must not count as indexed. OUTPUT-CONTRACT "Common index metadata": "`complete` is
         // true only when all skip counts are zero", and ARCHITECTURE "Parse and
         // coverage policy": "Unsupported language, binary, oversize, encoding,

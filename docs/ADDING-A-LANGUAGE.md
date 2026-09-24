@@ -9,7 +9,7 @@ Language-specific extraction, identifier comparison, import interpretation, and 
 | Construct | PHP | TypeScript / TSX |
 |---|---|---|
 | Files | `.php` using the PHP grammar with mixed HTML support | `.ts` and `.tsx` using their respective grammars; `.d.ts` declarations allowed |
-| Named definitions | Namespaces, classes, interfaces, traits represented as class-kind, enums, named functions/methods, properties, constants | Named functions/classes/interfaces, enums, methods, fields, namespaces/modules, named const bindings including arrow functions |
+| Named definitions | Namespaces, classes, interfaces, traits represented as class-kind, enums, named functions/methods, properties, constants | Named functions/classes/interfaces, enums, methods, fields, namespaces/modules, named const bindings including arrow functions, type aliases (`type_alias`) |
 | Qualified names | Namespace `\`, member `::`; properties retain `$` | Lexical nesting with `.`; file path distinguishes modules |
 | Lexical imports | `use` class/function/const bindings and aliases, including grouped forms | Direct relative named/default imports of explicitly exported declarations; namespace imports only for direct named members |
 | Local receiver hints | `$this`, `self`, preceding `new`, native explicit parameter/property types including promotion | `this`, preceding `new`, explicit parameter/field/variable annotations |
@@ -20,6 +20,18 @@ Language-specific extraction, identifier comparison, import interpretation, and 
 Unsupported resolution stays unresolved; it does not silently become `exact`. Runtime-generated names and literal strings are not semantic references. Extraction coverage is about documented syntax, not arbitrary dynamic behavior. PHP kind-dependent case rules apply to lookup (for example, methods versus properties); TypeScript identifiers are case-sensitive. Record exact normalization rules and tests in the adapter README.
 
 A TypeScript binding to an arrow/function expression is a named `function` symbol rather than a second duplicate `const` symbol. Anonymous expressions have no independently addressable symbol in v0.1; their uses attach to the nearest named container or null. TSX JSX lowercase intrinsic element names are not symbol references.
+
+TypeScript definitions (T42) follow these rules; the adapter README has the full list:
+
+- A type alias is a `type_alias` symbol, one per alias even when generic. Its lookup is case-sensitive, like every TypeScript identifier.
+- Generic type parameters are not symbols; the generic class, interface, function, or alias is one ordinary symbol.
+- Function-local declarations (consts, functions, classes inside a function body) are not symbols, as PHP locals are not. Their uses attach to the enclosing named symbol (T43).
+- A getter and a setter are each a `method`. A pair sharing a name gets spec §10.1 ordinals in source order, and each signature keeps `get`/`set`.
+- Overload signatures fold into one `function` or `method` symbol. When an implementation exists in the same scope, the symbol is the implementation's declaration, with its span and signature. When none exists (`.d.ts` files, ambient declarations, interface method overloads), the symbol is the first signature. The other signatures are not symbols, and no output records how many folded, so IDs stay stable.
+- A string-named ambient module (`declare module "x" {}`) is not a symbol, and neither are its members. Identifier-named ambient declarations are named as the same declaration in a `.ts` file.
+- A span includes `export`, `export default`, and `declare`. Class and interface member spans follow the grammar and exclude a trailing `;`.
+- As in PHP, enum members are `const`; interface members are `method` or `property`; fields and constructor parameter properties are `property`; the constructor is `Class.constructor`; an ES `#private` name keeps its `#`, escaped per spec §10.1; declaration merging (an interface or namespace declared twice) gets ordinals.
+- `const X = class {}` is one `class` symbol named `X`, by the arrow-function rule. An anonymous default-exported class or function is no symbol, and neither are its members (the PHP anonymous-class rule).
 
 PHP namespace lookup uses indexed qualified names without executing Composer/autoload code. TypeScript relative module lookup checks an explicit ordered candidate set: exact supported path, `.ts`, `.tsx`, `.d.ts`, `/index.ts`, `/index.tsx`, `/index.d.ts`; require a unique valid module candidate across the applicable set, never guess among duplicates. Resolve named/default exports only when they identify an explicit local declaration; anonymous default exports remain unresolved. Extensions outside this matrix, including `.js`, `.jsx`, `.mts`, and `.cts`, are not enabled by inference in v0.1.
 
@@ -60,7 +72,7 @@ Use names such as `@symbol.<kind>`, `@symbol.name`, `@symbol.body`, `@call.name`
 
 ## Fixtures and gold data
 
-Authored fixtures should isolate same-name classes, aliases, local shadowing, reassignment, top-level uses, nested/anonymous functions, interpolation, malformed source, CRLF, and Unicode. Pair them with a small real repository, roughly 100–500 files, pinned under `tests/fixtures/<lang>/repo/` as a submodule. Keep `tests/gold/<lang>.toml` in the parent repository, not inside the submodule.
+Authored fixtures should isolate same-name classes, aliases, local shadowing, reassignment, top-level uses, nested/anonymous functions, interpolation, malformed source, CRLF, and Unicode. Pair them with a small real repository, roughly 100–500 files, pinned under `tests/fixtures/<lang>/repo/` as a submodule. Keep gold in the parent repository, not inside the submodule: the authored fixture's gold is `tests/gold/<lang>-authored.toml` (`php-authored.toml`, `typescript-authored.toml`).
 
 Gold data records exact `(file, start_byte, end_byte, ref_kind)` use spans, resolved declaration IDs where supported, and the justified tier. Counts alone can hide both a missing reference and an extra false positive. Include at least ten representative named symbols, plus negative same-name cases and alias uses whose spelling differs from the target.
 

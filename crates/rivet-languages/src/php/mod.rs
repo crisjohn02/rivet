@@ -477,6 +477,7 @@ fn build_symbols(mut raw: Vec<RawSymbol>) -> Vec<ExtractedSymbol> {
                 kind: record.kind,
                 span: Span::new(record.start_byte, record.end_byte)
                     .expect("a declaration span is non-empty"),
+                name_span: None,
                 parent_index,
                 signature: Some(record.signature.clone()),
                 doc_comment: record.doc_comment.clone(),

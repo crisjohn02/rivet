@@ -538,12 +538,14 @@ pub fn context_entries(
 ///
 /// `parent_index` is `None`: the summary reads spans, kinds, names, and
 /// signatures, never parent indices, and members are passed separately.
+/// `name_span` is `None` because the store persists no name span.
 fn extracted(row: &SymbolRow) -> Option<ExtractedSymbol> {
     Some(ExtractedSymbol {
         qualified_name: row.qualified_name.clone(),
         name: row.name.clone(),
         kind: row.kind,
         span: Span::new(row.start_byte, row.end_byte).ok()?,
+        name_span: None,
         parent_index: None,
         signature: row.signature.clone(),
         doc_comment: row.doc_comment.clone(),

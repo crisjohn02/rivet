@@ -417,6 +417,7 @@ Reject conflicting hints and multiple candidates. No inferred types, inheritance
    | global constant | `import` |
    | class, interface, enum, trait | `type` (including `new`, `instanceof`, `extends`/`implements`, the class before `::`); `import` |
    | namespace | every form |
+   | TypeScript type alias (`type_alias`) | every form: no TypeScript use is excluded by evidence ([ADDING-A-LANGUAGE](docs/ADDING-A-LANGUAGE.md)) |
 
    Any other form is excluded. `unknown` is never excluded: the extractor records bare constant names, qualified constant names, and a trait `use` inside a class body that way. `assignment` is never recorded by the PHP extractor and is never excluded. Rule 1 does not tell a class-constant read from an instance-property read with a receiver (both are `read`), so neither excludes the other. The extractor records no callable strings or callable arrays (single-quoted strings and literal string portions are not code), so no such form exists to keep or exclude.
 
@@ -1001,7 +1002,7 @@ PageRank · JSON Lines · multi-target --all/--first · JavaScript support
 |---|---|---|
 | 0 | Contract fixtures and dependency spike | Executable JSON examples, pinned grammar/toolchain choices, and tiny PHP/TSX grammar smoke tests; see IMPLEMENTATION-PLAN.md |
 | 1 | Repository scanner: root detection, `.gitignore`, language detection, hashing, SQLite persistence, freshness check | `rivet index` tracks files incrementally; a query after an edit reflects the edit |
-| 2 | Symbol extraction: classes, functions, methods, interfaces, structs, enums, modules; canonical IDs | `rivet symbol Foo` locates symbols; ambiguous queries return candidates |
+| 2 | Symbol extraction: classes, functions, methods, interfaces, structs, enums, modules, type aliases; canonical IDs | `rivet symbol Foo` locates symbols; ambiguous queries return candidates |
 | 3 | References and relationships with resolution tiers; coverage and binding tests (§11.5) pass | `rivet refs Foo` returns labeled references; `calls` and `called_by` populate |
 | 4 | Context builder: ranking, collapse, budget fitting | `rivet context Foo --tokens 3000` returns relevant source within the estimate |
 | 5 | Harness snippet and help text | A fresh Claude Code or Codex session with the snippet uses `rivet` unprompted on a navigation task |
