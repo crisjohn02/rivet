@@ -20,19 +20,13 @@ pub const END_MARKER: &str = "<!-- rivet:end -->";
 
 /// The exact managed block `rivet snippet` prints, ending in one LF.
 pub const SNIPPET: &str = r#"<!-- rivet:start -->
-## Code navigation with rivet
+## rivet (code navigation)
 
-Use `rivet` for structural lookup in supported source files:
+- `rivet symbol <name>`: definition, signature, calls and callers.
+- `rivet refs <name>`: references with their containing symbols.
+- `rivet context <name> --tokens 1500`: the symbol plus related source; a `signature` segment is not the full body.
 
-Choose the command that answers the current question; these commands are not a required sequence. For understanding a known symbol, start directly with `context`.
-
-- `rivet symbol <name>` locates a definition, signature, and call sites. Use it before searching a definition and reading its whole file.
-- `rivet refs <name>` returns likely references with their containing symbols. `?` means name-only evidence; verify before relying on it. `--mode candidates` also includes unrelated same-name uses for auditing. Neither mode proves runtime completeness.
-- `rivet context <name> --tokens 3000` returns target and related source within an estimated source-text budget. Inspect segment forms: `signature` is a summary, not the full body. Metadata and actual model-token counts are outside this budget.
-
-Names can be short, dotted, or repository-relative `file:line`. Ambiguity returns candidate IDs; rerun with a quoted canonical ID. Lists default to 50 results; check totals and use `--offset` to page references/call lists. Use `rivet symbol` to page ambiguity candidates for a context query.
-
-The default text output is compact and meant for you to read; `--json` emits the full machine contract at several times the size, so reserve it for scripts that parse the result. Queries refresh automatically; no routine `rivet index` call is needed. Check coverage/skipped files and resolution tiers before relying on an empty result. Use text tools for unsupported syntax/languages, comments, strings, dynamic references, or missing context. Results describe the indexed snapshot; verify live source before editing.
+Names may be short, `Class.method`, a canonical ID, or `file:line`. Results refresh automatically. `?` marks a name-only match: verify it. rivet does not see comments, strings, dynamic calls, framework wiring or unsupported files, so an empty or short result is not proof of absence; use text search there.
 <!-- rivet:end -->
 "#;
 

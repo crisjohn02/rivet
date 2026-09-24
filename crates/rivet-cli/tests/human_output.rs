@@ -1072,7 +1072,8 @@ fn shell_words_handles_single_quotes() {
 ///
 /// SY1 re-captured `03-symbol`, `04-symbol-source`, and `05-symbol-page`:
 /// the call lists now default to `scoped`, so `called_by` drops its one
-/// name-only row, and each list gains `hidden_name_match`. Every other golden
+/// name-only row, and each list gains `hidden_name_match`. SN1 and SN2
+/// re-captured `13-snippet` for each new managed block. Every other golden
 /// is unchanged; `symbol_tiers.rs` checks the pre-SY1 bytes under
 /// `--min-resolution name_match`.
 const JSON_GOLDENS: [(&str, &[&str]); 16] = [
