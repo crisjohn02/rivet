@@ -189,3 +189,24 @@ fn parse_file_dispatches_to_the_typescript_adapter() {
             .is_empty()
     );
 }
+
+/// GR1: the two constructs upstream `tree-sitter-typescript` 0.23.2 rejected
+/// (Hono's parse failures) pass the parse policy under every dispatched
+/// grammar with the vendored, patched `0.23.2-rivet.1`; `export type *`
+/// without `from` still fails.
+#[test]
+fn patched_grammar_constructs_pass_the_parse_policy() {
+    let generic_call_signatures = "\
+export interface Get<E> {
+  <Key extends keyof E>(key: Key): E[Key]
+  <Key extends string>(key: Key): unknown
+}
+";
+    let export_type_star = "export type * from './types'\nexport type * as ns from './ns'\n";
+    for path in ["src/a.ts", "src/a.d.ts", "src/a.tsx"] {
+        assert_eq!(policy(path, generic_call_signatures), None, "{path}");
+        assert_eq!(policy(path, export_type_star), None, "{path}");
+        let failure = policy(path, "export type *\n").expect("no `from` clause");
+        assert_eq!(failure.start_byte, 0, "{path}: {failure:?}");
+    }
+}

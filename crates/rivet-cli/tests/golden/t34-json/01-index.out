@@ -1,4 +1,4 @@
 exit 0
 --- stdout
-{"schema_version":1,"index":{"snapshot":"blake3:847ab716a263711447616c9d8dde9551feedd6000648282d768b59517130e304","freshness":"content","coverage":{"complete":false,"files_seen":10,"files_indexed":9,"skipped":{"unsupported":1,"binary":0,"size":0,"encoding":0,"parse_error":0,"resource_limit":0}},"diagnostics":{"total":0,"truncated":false,"items":[]}},"symbols":50,"uses":14,"bindings":13,"updated":10,"unchanged":0,"deleted":0}
+{"schema_version":1,"index":{"snapshot":"blake3:4c7cefb32b016ebfc9b6c24f58c39704d39eb77dcaf0733a783298bd621cf4c1","freshness":"content","coverage":{"complete":false,"files_seen":10,"files_indexed":9,"skipped":{"unsupported":1,"binary":0,"size":0,"encoding":0,"parse_error":0,"resource_limit":0}},"diagnostics":{"total":0,"truncated":false,"items":[]}},"symbols":50,"uses":14,"bindings":13,"updated":10,"unchanged":0,"deleted":0}
 --- stderr

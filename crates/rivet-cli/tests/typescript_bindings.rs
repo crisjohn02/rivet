@@ -586,6 +586,46 @@ fn re_exports_and_exported_imports_are_not_followed() {
     repo.exact("src/relay.ts", "f };", "src/m.ts#f");
 }
 
+/// GR1: the patched grammar parses newline-separated generic call signatures
+/// and `export type * from`, so both files are indexed (upstream 0.23.2 made
+/// them parse failures). The interface binds exactly; a name imported
+/// through `export type *` is a re-export and is not followed, as `export *`.
+#[test]
+fn patched_grammar_constructs_index_and_type_star_is_not_followed() {
+    let repo = Indexed::new(
+        "gr1-patched-grammar",
+        &[
+            ("src/m.ts", "export interface Shape {\n  a: number\n}\n"),
+            (
+                "src/relay.ts",
+                "export type * from \"./m\";\nexport type * as ns from \"./m\";\n",
+            ),
+            (
+                "src/api.ts",
+                "export interface Getter {\n  <K extends string>(key: K): number\n  \
+                 <K extends number>(key: K): string\n}\n",
+            ),
+            (
+                "src/app.ts",
+                "import type { Shape, ns } from \"./relay\";\n\
+                 import type { Getter } from \"./api\";\n\
+                 export const s: Shape = { a: 1 };\n\
+                 export const g: Getter | null = null;\n\
+                 export type N = ns.Shape;\n",
+            ),
+        ],
+    );
+    let index = success(&run(repo.root.path(), &["index", "--json"]));
+    let coverage = &index["index"]["coverage"];
+    assert_eq!(coverage["files_indexed"], 4, "{index}");
+    assert_eq!(coverage["skipped"]["parse_error"], 0, "{index}");
+    repo.exact("src/app.ts", "Getter } from", "src/api.ts#Getter");
+    repo.exact("src/app.ts", "Getter | null", "src/api.ts#Getter");
+    repo.unresolved("src/app.ts", "Shape, ns");
+    repo.unresolved("src/app.ts", "Shape = {");
+    repo.unresolved("src/app.ts", "ns } from");
+}
+
 #[test]
 fn import_type_and_type_only_exports_bind() {
     let repo = Indexed::new(

@@ -377,19 +377,30 @@ the raw audit in `tests/real/RESULTS.md`). No resolver rule changed for this
 measurement; these are the consequences of the rules above, with their
 frequency on one real project.
 
-**Grammar parse failures: 8 of 357 eligible files (2.2%).** The pinned
-`tree-sitter-typescript` 0.23.2 grammar reports errors, so the parse policy
-publishes no facts for these files:
+**Grammar parse failures: 8 of 357 eligible files (2.2%) at T46; 0 since
+GR1.** The registry `tree-sitter-typescript` 0.23.2 grammar reported errors in
+these files, so the parse policy published no facts for them. GR1 vendors that
+release with two minimal patches (`vendor/tree-sitter-typescript/`, version
+`0.23.2-rivet.1`; `RIVET-PATCHES.md` there has the root causes), which resolve
+both causes:
 
-| Cause | Files | Minimal form |
-|---|---|---|
-| consecutive generic call signatures in an interface or type literal separated only by a newline | 6 (`src/context.ts`, `src/types.ts`, `src/helper/factory/index.ts`, `src/helper/ssg/middleware.ts`, `src/jsx/hooks/index.ts`, `src/utils/body.ts`) | `interface G {` / `<K>(key: K): number` / `<K>(key: K): string` / `}` (a `;` after the first signature parses) |
-| `export type * from '...'` (TypeScript 5.0) | 2 (`src/jsx/index.ts`, `src/jsx/dom/index.ts`) | `export type * from './x'` |
+| Cause | Files | Minimal form | Status |
+|---|---|---|---|
+| consecutive generic call signatures in an interface or type literal separated only by a newline | 6 (`src/context.ts`, `src/types.ts`, `src/helper/factory/index.ts`, `src/helper/ssg/middleware.ts`, `src/jsx/hooks/index.ts`, `src/utils/body.ts`) | `interface G {` / `<K>(key: K): number` / `<K>(key: K): string` / `}` (a `;` after the first signature parsed) | parses since GR1 |
+| `export type * from '...'` (TypeScript 5.0) | 2 (`src/jsx/index.ts`, `src/jsx/dom/index.ts`) | `export type * from './x'` | parses since GR1: a type-only re-export-all `ModuleImport`, like `export *`, and never followed |
 
-Two of the failed files are central: `src/context.ts` declares the `Context`
-class, so the project's most common typed receiver (`c: Context`) never binds,
-and 299 of the 1,634 named and default imports (18.3%) name a declaration in a
-failed module and stay unresolved.
+At T46, two of the failed files were central: `src/context.ts` declares the
+`Context` class, so the project's most common typed receiver (`c: Context`)
+never bound, and 299 of the 1,634 named and default imports (18.3%) named a
+declaration in a failed module. After GR1 (`tests/real/RESULTS.md`, "GR1
+addendum") Hono indexes all 357 files: bindings rise from 9,729 (after T44a)
+to 14,781 (13,401 `exact`, 1,380 `scoped`), none lost or changed; 1,435 of
+1,765 named and default imports bind `exact` and none points into a failed
+module. Inside an object type or interface body the patched grammar, like
+TypeScript, no longer reads type arguments that start on the line after their
+type (`headers: Record` / `<string, string>`); upstream accepted that.
+
+The tables below are T46's measurement, before T44a and GR1.
 
 **Named and default imports (1,634):**
 

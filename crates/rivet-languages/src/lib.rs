@@ -158,7 +158,17 @@ pub fn is_language_compiled(name: &str) -> bool {
 /// set or bumping a grammar invalidates stored facts. `env!("CARGO_PKG_VERSION")`
 /// names this crate rather than its dependencies, so the grammar crate versions
 /// are compile-time constants kept in sync with the root `Cargo.toml` pins
-/// (`tree-sitter-php = "=0.24.2"`, `tree-sitter-typescript = "=0.23.2"`).
+/// (`tree-sitter-php = "=0.24.2"`, and the vendored path crate
+/// `tree-sitter-typescript = "=0.23.2-rivet.1"`).
+///
+/// Grammar component history: GR1 replaced the registry
+/// `tree-sitter-typescript` 0.23.2 with the vendored, patched
+/// `0.23.2-rivet.1` (`vendor/tree-sitter-typescript/RIVET-PATCHES.md`), and the
+/// TypeScript component went from `ts=0.23.2` to `ts=0.23.2-rivet.1`. The patch
+/// changes no tree upstream parsed without error, but files that failed to
+/// parse (newline-separated generic call signatures, `export type * from`) now
+/// yield facts, so every store re-extracts TypeScript and TSX. The PHP
+/// component and `fact-schema` are unchanged.
 ///
 /// The trailing `fact-schema=N` component covers the *shape and meaning* of the
 /// persisted extractor facts, not just the grammar. Grammar versions alone are
@@ -246,13 +256,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=14";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2-rivet.1;fact-schema=14";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=14";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=14";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2-rivet.1;fact-schema=14";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";
