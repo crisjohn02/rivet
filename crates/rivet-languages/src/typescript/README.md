@@ -335,7 +335,11 @@ bindings"):
 
 - a named, aliased, default, or `import type` import of a relative module
   binds its `import` use and every unshadowed use of its local name to the
-  declaration the module exports under the imported name;
+  declaration the module exports under the imported name; a relative
+  specifier starts with `./` or `../` or is a bare `.` or `..`, and one that
+  names only a directory (a trailing `/`, or a last segment of `.` or `..`)
+  names only that directory's `index.ts`, `index.tsx`, or `index.d.ts`
+  (T44a);
 - `ns.member` after `import * as ns` binds `member` to the module's export of
   that name, a lexical module-qualified name rather than receiver access;
 - a use bound lexically, with shadowing and value/type spaces accounted for,
@@ -393,7 +397,7 @@ failed module and stay unresolved.
 |---|---:|---:|
 | bound `exact` | 971 | 59.4% |
 | relative, module not indexed (parse failure above) | 299 | 18.3% |
-| bare `.` or `..` specifier (not `./` or `../`, so not a relative specifier under the module rule) | 140 | 8.6% |
+| bare `.` or `..` specifier (not `./` or `../`, so not a relative specifier under the module rule); resolved by T44a, which treats them, and any specifier ending in `/`, `.` or `..`, as a directory whose `index.ts`, `index.tsx`, or `index.d.ts` is the only candidate (not re-measured here) | 140 | 8.6% |
 | package or built-in (`vitest`, `node:fs`) | 124 | 7.6% |
 | relative, the module re-exports the name (`export { a } from`, `export *`) | 76 | 4.7% |
 | relative, the module exports an import binding (`import { a } from './x'; export { a }`) | 20 | 1.2% |

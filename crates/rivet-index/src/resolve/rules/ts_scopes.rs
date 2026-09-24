@@ -35,15 +35,22 @@
 //!   once in its file, a body sees the other bodies' exported members, so a
 //!   use there binds only a declaration inside its own body, and only when no
 //!   other body has a member of that name ([`merged_body_conflict`]).
-//! - **Modules.** A relative specifier (`./`, `../`) is joined to the
-//!   importing file's directory and checked against the ordered candidate set
-//!   of docs/ADDING-A-LANGUAGE.md: the exact path when it has a supported
-//!   extension, then `.ts`, `.tsx`, `.d.ts`, `/index.ts`, `/index.tsx`,
-//!   `/index.d.ts` ([`lookup_module`]). Candidates are compared byte for byte
-//!   with the snapshot's file paths, never the filesystem, so `./Util` does
-//!   not name `util.ts` on a case-insensitive disk. Exactly one candidate may
-//!   be in the snapshot, and it must be an indexed TypeScript file; two
-//!   candidates, or one that failed to index, leave the import unresolved.
+//! - **Modules.** A relative specifier (`./`, `../`, or a bare `.` or `..`)
+//!   is joined to the importing file's directory and checked against the
+//!   ordered candidate set of docs/ADDING-A-LANGUAGE.md: the exact path when
+//!   it has a supported extension, then `.ts`, `.tsx`, `.d.ts`, `/index.ts`,
+//!   `/index.tsx`, `/index.d.ts` ([`lookup_module`]). A specifier that names
+//!   only a directory (T44a: it ends in `/`, or its last segment is `.` or
+//!   `..`, as in `.`, `../..`, `./x/..`, `./dir/`) tries only that
+//!   directory's `index.ts`, `index.tsx`, `index.d.ts`, never a file named
+//!   after the directory, so `..` from `src/a/b.ts` never names `src.ts`. A
+//!   specifier that climbs above the repository root, or has an empty segment
+//!   other than one trailing `/` (`.//x`), names no module. Candidates are
+//!   compared byte for byte with the snapshot's file paths, never the
+//!   filesystem, so `./Util` does not name `util.ts` on a case-insensitive
+//!   disk. Exactly one candidate may be in the snapshot, and it must be an
+//!   indexed TypeScript file; two candidates, or one that failed to index,
+//!   leave the import unresolved.
 //! - **Exports.** A module exports `name` as the declaration its module-scope
 //!   local of the export's local name identifies ([`exported`]). A re-export
 //!   of the name (`export { x as name } from`, `export * as name from`) is
@@ -81,6 +88,10 @@ const CANDIDATE_SUFFIXES: [&str; 6] = [
     "/index.tsx",
     "/index.d.ts",
 ];
+
+/// The only candidates of a directory-only specifier (T44a), joined to the
+/// directory it names, in docs/ADDING-A-LANGUAGE.md order.
+const DIRECTORY_CANDIDATES: [&str; 3] = ["index.ts", "index.tsx", "index.d.ts"];
 
 /// Which declarations a use's name can name (T43's value and type spaces).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -589,40 +600,71 @@ pub(crate) fn import_target<'a>(
 /// The indexed TypeScript file a relative `specifier` written in `importer`
 /// names, or `None` when it is not relative, leaves the repository, names no
 /// candidate, names more than one, or names one that is not indexed.
+///
+/// A specifier is relative when it is `.` or `..` or starts with `./` or
+/// `../`. It names only a directory (T44a) when it ends in `/` or its last
+/// segment is `.` or `..` (`.`, `../..`, `./x/..`, `./dir/`), as TypeScript's
+/// own lookup treats it: its candidates are then only that directory's
+/// `index.ts`, `index.tsx`, and `index.d.ts`, never a file named after the
+/// directory. Any other relative specifier tries the exact path when it has a
+/// supported extension, then [`CANDIDATE_SUFFIXES`]. An empty segment other
+/// than the one trailing `/` (`.//x`, `./x//`) names no module.
 pub(crate) fn lookup_module<'a>(
     ctx: &RuleCtx<'a>,
     importer: &str,
     specifier: &str,
 ) -> Option<&'a str> {
-    if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+    let relative = matches!(specifier, "." | "..")
+        || specifier.starts_with("./")
+        || specifier.starts_with("../");
+    if !relative {
         return None;
     }
+    let (path, trailing_slash) = match specifier.strip_suffix('/') {
+        Some(path) => (path, true),
+        None => (specifier, false),
+    };
+    let directory_only = trailing_slash || matches!(path.rsplit('/').next(), Some("." | ".."));
     let mut segments: Vec<&str> = importer.split('/').collect();
     segments.pop();
-    for segment in specifier.split('/') {
+    for segment in path.split('/') {
         match segment {
             "." => {}
             ".." => {
                 segments.pop()?;
             }
-            // `.//x` and a trailing `/` have no candidate rule.
+            // `.//x` and a second trailing `/` have no candidate rule.
             "" => return None,
             other => segments.push(other),
         }
     }
-    if segments.is_empty() {
-        return None;
-    }
-    let base = segments.join("/");
-    let mut candidates = Vec::with_capacity(CANDIDATE_SUFFIXES.len() + 1);
-    if base.ends_with(".ts") || base.ends_with(".tsx") {
-        candidates.push(base.clone());
-    }
-    candidates.extend(
-        CANDIDATE_SUFFIXES
+    let candidates: Vec<String> = if directory_only {
+        // The repository root is a directory too: `..` from `src/a.ts`.
+        let prefix = if segments.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", segments.join("/"))
+        };
+        DIRECTORY_CANDIDATES
             .iter()
-            .map(|suffix| format!("{base}{suffix}")),
-    );
+            .map(|index| format!("{prefix}{index}"))
+            .collect()
+    } else {
+        if segments.is_empty() {
+            return None;
+        }
+        let base = segments.join("/");
+        let mut candidates = Vec::with_capacity(CANDIDATE_SUFFIXES.len() + 1);
+        if base.ends_with(".ts") || base.ends_with(".tsx") {
+            candidates.push(base.clone());
+        }
+        candidates.extend(
+            CANDIDATE_SUFFIXES
+                .iter()
+                .map(|suffix| format!("{base}{suffix}")),
+        );
+        candidates
+    };
     let mut present = candidates
         .iter()
         .filter_map(|candidate| ctx.typescript.files.get_key_value(candidate.as_str()));
@@ -758,7 +800,22 @@ mod tests {
             lookup_module(&ctx, "src/app.ts", "../util"),
             Some("util.ts")
         );
-        for specifier in ["util", "@/util", "/src/util", ".", "..", "", "src/util"] {
+        // `.` and `..` are relative (T44a) but name only a directory, and
+        // neither `src/` nor the root has an index here.
+        for specifier in [
+            "util",
+            "@/util",
+            "/src/util",
+            ".",
+            "..",
+            "",
+            "src/util",
+            "...",
+            ".../util",
+            ".util",
+            "..util",
+            "/",
+        ] {
             assert_eq!(
                 lookup_module(&ctx, "src/app.ts", specifier),
                 None,
@@ -852,8 +909,168 @@ mod tests {
         assert_eq!(lookup_module(&ctx, "a/b/x.ts", "../../../e"), None);
         assert_eq!(lookup_module(&ctx, "e.ts", "../e"), None);
         assert_eq!(lookup_module(&ctx, "a/b/x.ts", ".//c"), None);
+        // A trailing `/` names the directory `a/b/c/`, which has no index.
         assert_eq!(lookup_module(&ctx, "a/b/x.ts", "./c/"), None);
         assert_eq!(lookup_module(&ctx, "a/b/x.ts", "./C"), None);
         assert_eq!(lookup_module(&ctx, "a/b/x.ts", "./c.TS"), None);
+    }
+
+    #[test]
+    fn directory_only_specifiers_name_the_directory_index() {
+        let files = [
+            ts("index.ts"),
+            ts("src/index.ts"),
+            ts("src/pick/index.ts"),
+            ts("src/pick/x.ts"),
+            ts("src/a/b/c.ts"),
+            ts("src/dir/index.ts"),
+        ];
+        let ctx = ctx(&files);
+        let cases = [
+            ("src/pick/x.ts", ".", Some("src/pick/index.ts")),
+            ("src/pick/x.ts", "./", Some("src/pick/index.ts")),
+            ("src/pick/x.ts", "./.", Some("src/pick/index.ts")),
+            ("src/pick/x.ts", "..", Some("src/index.ts")),
+            ("src/pick/x.ts", "../", Some("src/index.ts")),
+            ("src/pick/x.ts", "../..", Some("index.ts")),
+            ("src/pick/x.ts", "../../", Some("index.ts")),
+            ("src/a/b/c.ts", "../..", Some("src/index.ts")),
+            ("src/a/b/c.ts", "../../", Some("src/index.ts")),
+            ("src/app.ts", "./dir/", Some("src/dir/index.ts")),
+            ("src/app.ts", "./dir", Some("src/dir/index.ts")),
+            ("src/pick/x.ts", "./x/..", Some("src/pick/index.ts")),
+            ("src/pick/x.ts", "./y/../", Some("src/pick/index.ts")),
+            ("src/pick/x.ts", "../pick/", Some("src/pick/index.ts")),
+            // The repository root is a directory inside the repository.
+            ("src/app.ts", "..", Some("index.ts")),
+            ("app.ts", ".", Some("index.ts")),
+            ("app.ts", "./", Some("index.ts")),
+        ];
+        for (importer, specifier, want) in cases {
+            assert_eq!(
+                lookup_module(&ctx, importer, specifier),
+                want,
+                "{specifier} from {importer}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_only_specifier_never_names_a_file() {
+        // `..` from `src/a/b.ts` is the directory `src/`: never `src.ts`, even
+        // when that is the only file the other rule could name.
+        for only in ["src.ts", "src.tsx", "src.d.ts", "src"] {
+            let files = [ts(only), ts("src/a/b.ts")];
+            let ctx = ctx(&files);
+            assert_eq!(lookup_module(&ctx, "src/a/b.ts", ".."), None, "{only}");
+            assert_eq!(lookup_module(&ctx, "src/a/b.ts", "../"), None, "{only}");
+            assert_eq!(lookup_module(&ctx, "src/a/b.ts", "../a/.."), None, "{only}");
+        }
+        // `.` from `src/a/b.ts` is `src/a/`: never `src/a.ts`.
+        let files = [ts("src/a.ts")];
+        assert_eq!(lookup_module(&ctx(&files), "src/a/b.ts", "."), None);
+        assert_eq!(lookup_module(&ctx(&files), "src/a/b.ts", "./"), None);
+        // `./m/` is `src/m/`: never `src/m.ts`, where `./m` would find it.
+        let files = [ts("src/m.ts")];
+        assert_eq!(lookup_module(&ctx(&files), "src/app.ts", "./m/"), None);
+        assert_eq!(
+            lookup_module(&ctx(&files), "src/app.ts", "./m"),
+            Some("src/m.ts")
+        );
+        // `./m.ts/` is a directory named `m.ts`, never the file.
+        assert_eq!(lookup_module(&ctx(&files), "src/app.ts", "./m.ts/"), None);
+        // `./x/..` never names `src/x.ts` or `src/x/index.ts`.
+        let files = [ts("src/x.ts"), ts("src/x/index.ts")];
+        assert_eq!(lookup_module(&ctx(&files), "src/app.ts", "./x/.."), None);
+        // A directory index beside a file named after the directory: only
+        // the index is a candidate, so `../pick/` is unique where `../pick`
+        // is ambiguous.
+        let files = [ts("src/pick.ts"), ts("src/pick/index.ts")];
+        let ctx = ctx(&files);
+        assert_eq!(
+            lookup_module(&ctx, "src/pick/dot.ts", "../pick/"),
+            Some("src/pick/index.ts")
+        );
+        assert_eq!(
+            lookup_module(&ctx, "src/pick/dot.ts", "."),
+            Some("src/pick/index.ts")
+        );
+        assert_eq!(lookup_module(&ctx, "src/pick/dot.ts", "../pick"), None);
+    }
+
+    #[test]
+    fn directory_only_specifiers_keep_the_other_rules() {
+        let files = [ts("index.ts"), ts("src/index.ts"), ts("src/x/index.ts")];
+        let repo = ctx(&files);
+        // Climbing above the repository root names nothing.
+        assert_eq!(lookup_module(&repo, "app.ts", ".."), None);
+        assert_eq!(lookup_module(&repo, "app.ts", "../"), None);
+        assert_eq!(lookup_module(&repo, "src/app.ts", "../.."), None);
+        assert_eq!(lookup_module(&repo, "src/app.ts", "../../src/"), None);
+        // An empty interior segment, or a second trailing `/`, names nothing.
+        for specifier in [".//x", "..//x", ".//", "..//", "./x//", "././/", "//"] {
+            assert_eq!(
+                lookup_module(&repo, "src/app.ts", specifier),
+                None,
+                "{specifier}"
+            );
+        }
+        // Byte-exact: `./X/` does not name `src/x/index.ts`.
+        assert_eq!(lookup_module(&repo, "src/app.ts", "./X/"), None);
+        assert_eq!(
+            lookup_module(&repo, "src/app.ts", "./x/"),
+            Some("src/x/index.ts")
+        );
+
+        // Each index candidate is found; any two are ambiguous.
+        for candidate in ["src/d/index.ts", "src/d/index.tsx", "src/d/index.d.ts"] {
+            let files = [ts(candidate)];
+            let found = lookup_module(&ctx(&files), "src/d/x.ts", ".");
+            assert_eq!(found, Some(candidate), "{candidate}");
+        }
+        for (a, b) in [
+            ("src/d/index.ts", "src/d/index.tsx"),
+            ("src/d/index.ts", "src/d/index.d.ts"),
+            ("src/d/index.tsx", "src/d/index.d.ts"),
+        ] {
+            let files = [ts(a), ts(b)];
+            let snapshot = ctx(&files);
+            assert_eq!(lookup_module(&snapshot, "src/d/x.ts", "."), None, "{a} {b}");
+            assert_eq!(
+                lookup_module(&snapshot, "src/app.ts", "./d/"),
+                None,
+                "{a} {b}"
+            );
+        }
+
+        // An index that failed to index is not valid, and still counts toward
+        // ambiguity.
+        for status in [ParseStatus::ParseError, ParseStatus::Size] {
+            let files = [file("src/d/index.ts", Some("typescript"), status)];
+            let snapshot = ctx(&files);
+            assert_eq!(
+                lookup_module(&snapshot, "src/d/x.ts", "."),
+                None,
+                "{status:?}"
+            );
+            let files = [
+                file("src/d/index.ts", Some("typescript"), status),
+                ts("src/d/index.d.ts"),
+            ];
+            let snapshot = ctx(&files);
+            assert_eq!(
+                lookup_module(&snapshot, "src/d/x.ts", ".."),
+                None,
+                "{status:?}"
+            );
+            assert_eq!(
+                lookup_module(&snapshot, "src/d/x.ts", "."),
+                None,
+                "{status:?}"
+            );
+        }
+        // A `.tsx`-named path stored under another language is not valid.
+        let files = [file("src/d/index.tsx", None, ParseStatus::Unsupported)];
+        assert_eq!(lookup_module(&ctx(&files), "src/d/x.ts", "."), None);
     }
 }

@@ -70,3 +70,20 @@ bindings_scoped = 1070
 cold_ms = 776
 noop_refresh_ms = 46
 force_ms = 1156
+
+# T44a addendum (2026-09-24): one `check_real.py --only coverage` run with
+# the directory-only specifier rule (resolver php-rules-v4;ts-rules-v3),
+# release build of the task/T44a working tree on 971a4c3. Coverage counts
+# only; no timings were taken. [project.rivet_index] above stays T46's
+# measurement.
+[project.rivet_index_t44a]
+measured_with = "971a4c3+T44a"
+files_seen = 481
+files_indexed = 349
+skipped_unsupported = 124
+skipped_parse_error = 8
+symbols = 2468
+uses = 92303
+bindings = 9729
+bindings_exact = 8650
+bindings_scoped = 1079

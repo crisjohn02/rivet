@@ -404,9 +404,44 @@ the tables; in short:
    default imports (18.3%) point into a failed module.
 2. **Imports (1,634 named and default):** 971 bound (59.4%); 299 into a
    parse-failed module; 140 bare `.` or `..` specifiers (8.6%), which are not
-   `./` or `../` and so are not relative specifiers under the module rule; 124
+   `./` or `../` and so were not relative specifiers under the T46 module rule
+   (T44a makes them directory-only relative specifiers; see the addendum); 124
    packages or built-ins (7.6%); 76 re-exported (4.7%) and 20 exported import
    bindings (1.2%); 3 other; 1 with no candidate module; no path aliases.
 3. **Member calls:** 96.5% stay `name_match`, mostly because the receiver is
    a call result or an untyped name; inheritance (`new Hono()` whose methods
    live on the base class) is the largest share among hinted receivers.
+
+## Addendum: T44a directory-only specifiers (2026-09-24)
+
+T44a makes `.`, `..`, any specifier whose last segment is `.` or `..`, and
+any specifier ending in `/` relative specifiers that name only a directory:
+their only candidates are its `index.ts`, `index.tsx`, `index.d.ts`
+(docs/ADDING-A-LANGUAGE.md; resolver `php-rules-v4;ts-rules-v3`). T46's
+numbers above are left as they were measured. This addendum records one
+`python3 tests/real/check_real.py --only coverage` run (release build of the
+task/T44a working tree on `971a4c3`, same pin and machine); only the coverage
+check was run, and the import-outcome table was not re-measured.
+
+`check_real: PASS (0 failed check(s))`.
+
+| Tree | Seen | Indexed | Skipped | Symbols | Uses | Bindings `exact` | Bindings `scoped` |
+|---|---:|---:|---|---:|---:|---:|---:|
+| hono | 481 | 349 | 124 unsupported, 8 parse_error | 2,468 | 92,303 | 8,650 (+435) | 1,079 (+9) |
+| php fixture | 10 | 9 | 1 unsupported | 50 | 14 | 6 | 7 |
+| typescript fixture | 18 | 13 | 4 unsupported, 1 parse_error | 82 | 144 | 55 | 16 |
+| mixed (both fixtures) | 27 | 22 | 4 unsupported, 1 parse_error | 132 (50 PHP, 82 TS) | 158 (14 PHP, 144 TS) | 61 (6 PHP, 55 TS) | 23 (7 PHP, 16 TS) |
+
+Hono's files, symbols, and uses are unchanged; its bindings rise from 9,285
+to 9,729. A binding-by-binding diff against a release build of `971a4c3` on
+the same checkout (file, line, column, spelling, receiver, target, tier)
+found no binding lost or changed and 444 gained, every one targeting a
+declaration in one of 26 directory `index.ts`/`index.tsx` files. The 9 new
+`scoped` bindings are all in `src/helper/websocket/index.test.ts`, whose
+receivers are annotated or `new`-bound with `WSContext`, imported from `'.'`;
+T45 looks the class name up by the same T44 rules. The TypeScript fixture gained `src/pick/dot.ts`
+(case aa: 6 uses, 4 `exact` bindings), so its counts differ from T46's for
+that reason alone; PHP's are unchanged. Many directory-only imports still
+stay unresolved because the directory's `index.ts` re-exports the name
+(`src/index.ts` exports `Hono` from `./hono`) or failed to parse
+(`src/jsx/index.ts`).

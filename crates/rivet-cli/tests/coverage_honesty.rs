@@ -359,7 +359,7 @@ fn without_index(output: &Output) -> Value {
     value
 }
 
-// T43: adding the TypeScript fixture indexes its twelve `.ts`/`.d.ts`/`.tsx`
+// T43: adding the TypeScript fixture indexes its thirteen `.ts`/`.d.ts`/`.tsx`
 // files and reports its broken one as a parse error, and changes nothing rivet
 // reports for PHP.
 #[test]
@@ -375,8 +375,8 @@ fn typescript_fixture_is_indexed_beside_unchanged_php() {
         value["index"]["coverage"],
         json!({
             "complete": false,
-            "files_seen": 27,
-            "files_indexed": 21,
+            "files_seen": 28,
+            "files_indexed": 22,
             "skipped": {
                 "unsupported": 5,
                 "binary": 0,
@@ -394,17 +394,18 @@ fn typescript_fixture_is_indexed_beside_unchanged_php() {
     assert_eq!(items[0]["file"], "typescript/src/broken.ts");
     assert_eq!(items[0]["code"], "parse_error");
 
-    // The TypeScript fixture adds its 82 gold declarations and 138 uses,
-    // T44's 51 exact TypeScript bindings (direct relative imports, namespace
-    // members, same-file declarations), and T45's 16 scoped receiver
-    // bindings; the 13 PHP bindings are unchanged.
+    // The TypeScript fixture adds its 82 gold declarations and 144 uses,
+    // T44's 55 exact TypeScript bindings (direct relative imports, including
+    // T44a's directory-only specifiers, namespace members, same-file
+    // declarations), and T45's 16 scoped receiver bindings; the 13 PHP
+    // bindings are unchanged.
     assert_eq!(
         (&before["symbols"], &before["uses"], &before["bindings"]),
         (&json!(50), &json!(14), &json!(13))
     );
     assert_eq!(
         (&value["symbols"], &value["uses"], &value["bindings"]),
-        (&json!(132), &json!(152), &json!(80))
+        (&json!(132), &json!(158), &json!(84))
     );
 
     // PHP answers are the PHP-only repository's.
@@ -448,7 +449,7 @@ fn typescript_fixture_is_indexed_beside_unchanged_php() {
     assert_eq!(human.status.code(), Some(0));
     assert!(
         String::from_utf8_lossy(&human.stdout).ends_with(
-            "coverage incomplete: 21/27 files indexed; skipped 5 unsupported, 1 parse_error; \
+            "coverage incomplete: 22/28 files indexed; skipped 5 unsupported, 1 parse_error; \
              1 diagnostic: typescript/src/broken.ts (parse_error)\n"
         ),
         "{}",

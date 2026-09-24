@@ -25,6 +25,7 @@ the pinned grammar.
 | `src/barrel.ts` | a re-export with an alias and an `export *` |
 | `src/unresolved.ts` | imports that must stay unresolved: through the barrel (re-export and `export *`), a path alias, a package, `require`, and an ambiguous relative path; and an `import type`, which binds like any direct import (T44) |
 | `src/pick.ts`, `src/pick/index.ts` | both candidates for `./pick`, so the ordered candidate rule finds two modules |
+| `src/pick/dot.ts` | directory-only specifiers (T44a): `.` and `../pick/` name only `src/pick/index.ts`, while `../pick` still finds both modules |
 | `src/components/Button.tsx` | a props interface, a function component, a const arrow component, lowercase intrinsic elements |
 | `src/components/App.tsx` | component names as uses, intrinsic elements, literal JSX text with identifier-like words, a fragment, attribute names and string values, JSX expression containers with a callback, a closing tag, and an anonymous default-exported function component |
 | `src/types.d.ts` | ambient declarations: a function, a const, a class, a namespace with members, a top-level interface, and a string-named ambient module |
@@ -86,6 +87,12 @@ its gold entries.
   **b**).
 - **y** — an ambiguous relative module path.
 - **z** — same-file lexical bindings.
+- **aa** — directory-only specifiers (T44a): `import ... from "."` and
+  `from "../pick/"` in `src/pick/dot.ts` name only the directory's index,
+  `src/pick/index.ts`, and bind `exact`; `from "../pick"` is not
+  directory-only, so `src/pick.ts` is a candidate too and the import stays
+  unresolved as in **y**. Its entries carry T43's and T44's task tags, the
+  harnesses that verify them.
 
 `export default class { ... }` is deliberately not followed by a statement
 that starts with `(`: the pinned grammar reads that pair as one call
