@@ -41,8 +41,8 @@ use rivet_core::{
 use rivet_languages::{EXTRACTOR_FINGERPRINT, language_for_path};
 use rivet_parser::parse_file_with_limits;
 use rivet_store::{
-    FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, StagePlan, Store,
-    SymbolRow, UseRow, clamp_mtime_ns,
+    DiagnosticRow, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput, ScopeRow, StagePlan,
+    Store, SymbolRow, UseRow, clamp_mtime_ns,
 };
 
 use crate::index::{
@@ -529,6 +529,19 @@ fn refresh_inventory(
         .map(|(path, file)| (path.clone(), StoredState::of(file)))
         .collect();
 
+    // The parser diagnostics persisted with the stored inventory (PF2), keyed
+    // by path. A metadata-mode refresh that reuses a failed file's stored
+    // status reports, and carries forward, its stored detail. `--force` trusts
+    // no stored row, and reuses no status either.
+    let stored_diagnostics = if force {
+        HashMap::new()
+    } else {
+        stored_diagnostics_by_file(store)?
+    };
+    // The diagnostics this refresh persists: the parser's own diagnostic for
+    // every current file recorded as `parse_error` or `resource_limit`.
+    let mut persisted_diagnostics: Vec<DiagnosticRow> = Vec::new();
+
     // Walk regular eligible files with local ignore rules. The walked entries
     // carry the metadata observed for each file; the recheck compares it.
     let walk = walk_eligible(root, config).map_err(walk_error)?;
@@ -618,9 +631,14 @@ fn refresh_inventory(
                 pending.push(PendingFacts::Stored(entry.rel_path.clone()));
             }
             count_status(file.parse_status, &mut files_indexed, &mut skipped);
-            if let Some(item) = reused_status_diagnostic(&entry.rel_path, file.parse_status) {
+            let stored_diagnostic =
+                stored_parser_diagnostic(&stored_diagnostics, &entry.rel_path, file.parse_status);
+            if let Some(item) =
+                reused_status_diagnostic(&entry.rel_path, file.parse_status, stored_diagnostic)
+            {
                 diagnostics.push(item);
             }
+            persisted_diagnostics.extend(stored_diagnostic.cloned());
             files.push(FileRow {
                 path: entry.rel_path.clone(),
                 language: Some(language_name),
@@ -653,6 +671,7 @@ fn refresh_inventory(
                         source,
                         facts: PendingFacts::Stored(entry.rel_path.clone()),
                         diagnostic: None,
+                        persisted: None,
                     }
                 } else {
                     reparsed.push(entry.rel_path.clone());
@@ -664,14 +683,21 @@ fn refresh_inventory(
                                 "resource_limit" => ParseStatus::ResourceLimit,
                                 _ => ParseStatus::ParseError,
                             };
+                            let code = static_diagnostic_code(&diagnostic.code);
                             ParsedFileFacts {
                                 parse_status: status,
                                 source: None,
                                 facts: PendingFacts::Fresh(FileFacts::default()),
                                 diagnostic: Some(DiagnosticItem {
                                     file: entry.rel_path.clone(),
-                                    code: static_diagnostic_code(&diagnostic.code),
+                                    code,
                                     detail: diagnostic.detail.clone(),
+                                }),
+                                persisted: Some(DiagnosticRow {
+                                    file: entry.rel_path.clone(),
+                                    code: code.to_string(),
+                                    detail: diagnostic.detail.clone(),
+                                    start_byte: diagnostic.start_byte.map(i64::from),
                                 }),
                             }
                         }
@@ -682,6 +708,7 @@ fn refresh_inventory(
                                 source: Some(bytes),
                                 facts: PendingFacts::Fresh(file_facts),
                                 diagnostic: None,
+                                persisted: None,
                             }
                         }
                     }
@@ -691,6 +718,7 @@ fn refresh_inventory(
                 if let Some(item) = facts.diagnostic {
                     diagnostics.push(item);
                 }
+                persisted_diagnostics.extend(facts.persisted);
                 pending.push(facts.facts);
                 files.push(FileRow {
                     path: entry.rel_path.clone(),
@@ -945,6 +973,10 @@ fn refresh_inventory(
         .map_err(store_error)?;
     txn.set_meta(UNINDEXED_PHP_META_KEY, unindexed_php_value)
         .map_err(store_error)?;
+    // Persist the parser diagnostics with the facts they explain, in the same
+    // transaction; equal rows are left untouched (PF2).
+    txn.replace_diagnostics(&persisted_diagnostics)
+        .map_err(store_error)?;
     debug_point!("refresh-staged-{attempt}");
 
     // Recheck observed metadata and the eligible path set (spec §12.4 step 3).
@@ -1046,11 +1078,21 @@ impl StoredState {
 ///
 /// Coverage is reconstructed from the stored `files.parse_status` values and
 /// `freshness` is always [`Freshness::Cached`]. Diagnostics are reconstructed
-/// from the same statuses with stable codes and generic details; the exact
-/// parser detail strings are not persisted. Non-UTF-8 path diagnostics are also
-/// not persisted, so a cached `complete` can be optimistic relative to the
-/// refresh that produced the snapshot. A database without a committed
+/// from the same statuses: a `parse_error` or `resource_limit` file reports the
+/// parser detail the refresh persisted with it (PF2), and a size, binary, or
+/// encoding skip the fixed detail a refresh reports for that skip, so a cached
+/// report's items equal the ones the producing content-mode refresh reported.
+/// Only a snapshot written before PF2, which persisted no parser detail, falls
+/// back to a generic stored-status detail. Non-UTF-8 path diagnostics are not
+/// persisted, so a cached `complete` can be optimistic relative to the refresh
+/// that produced the snapshot. A database without a committed
 /// `snapshot_digest` is refused rather than reported as an empty success.
+///
+/// PF2: every count comes from a `COUNT(*)` and the file statuses from a
+/// query that reads no source bytes, so building the report decodes no fact
+/// row. It previously decoded every stored use, symbol, and binding (and every
+/// source blob) only to count them, which made a `--no-refresh` query slower
+/// than a refreshed one.
 pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliError> {
     let snapshot = store
         .get_meta("snapshot_digest")
@@ -1062,11 +1104,11 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
             )
         })?;
 
+    let stored_diagnostics = stored_diagnostics_by_file(store)?;
     let mut skipped = Skipped::default();
     let mut files_indexed = 0_u64;
-    let mut uses = 0_u64;
     let mut diagnostics = Vec::new();
-    for file in store.list_files().map_err(store_error)? {
+    for file in store.list_file_statuses().map_err(store_error)? {
         // A row in an enabled language without an extractor is `unsupported`
         // exactly as a refresh would report it, even when an older snapshot
         // stored it as `ok` (AF5, audit finding 14).
@@ -1080,13 +1122,13 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
             file.parse_status
         };
         count_status(status, &mut files_indexed, &mut skipped);
-        uses += store
-            .list_uses_for_file(&file.path)
-            .map_err(store_error)?
-            .len() as u64;
         if let Some(name) = no_extractor {
             diagnostics.push(no_extractor_diagnostic(&file.path, name));
-        } else if let Some(item) = reused_status_diagnostic(&file.path, status) {
+        } else if let Some(item) = reused_status_diagnostic(
+            &file.path,
+            status,
+            stored_parser_diagnostic(&stored_diagnostics, &file.path, status),
+        ) {
             diagnostics.push(item);
         }
     }
@@ -1103,8 +1145,11 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
     diagnostics.truncate(DIAGNOSTIC_CAP);
 
     let skipped_total = skipped.total();
-    let symbols = store.list_symbols().map_err(store_error)?.len() as u64;
-    let bindings = store.list_bindings().map_err(store_error)?.len() as u64;
+    // Every use belongs to a stored file (`uses.file` references
+    // `files.path`), so the table count equals the per-file sum.
+    let symbols = store.count_symbols().map_err(store_error)?;
+    let uses = store.count_uses().map_err(store_error)?;
+    let bindings = store.count_bindings().map_err(store_error)?;
     Ok(Report {
         snapshot,
         freshness: Freshness::Cached,
@@ -1148,20 +1193,33 @@ fn no_extractor_diagnostic(file: &str, language: &str) -> DiagnosticItem {
     }
 }
 
-/// One reconstructed diagnostic for a cached non-`ok` file.
-fn cached_diagnostic(file: &str, code: &'static str) -> DiagnosticItem {
-    let detail = match code {
-        "file_too_large" => "stored as an oversized file",
-        "binary_file" => "stored as binary content",
-        "invalid_utf8" => "stored as non-UTF-8 content",
-        "resource_limit" => "stored as a parser resource limit",
-        _ => "stored parse error",
-    };
-    DiagnosticItem {
-        file: file.to_string(),
-        code,
-        detail: detail.to_string(),
+/// The persisted parser diagnostics of a snapshot, keyed by file (PF2).
+///
+/// A file has at most one parser diagnostic (a refresh records the first);
+/// should a store hold several, the first in the contract order wins, which is
+/// deterministic.
+fn stored_diagnostics_by_file(store: &Store) -> Result<HashMap<String, DiagnosticRow>, CliError> {
+    let mut by_file: HashMap<String, DiagnosticRow> = HashMap::new();
+    for row in store.list_diagnostics().map_err(store_error)? {
+        by_file.entry(row.file.clone()).or_insert(row);
     }
+    Ok(by_file)
+}
+
+/// The persisted parser diagnostic of `file` when it explains the file's
+/// stored `status`: a `parse_error` row for a `parse_error` file, a
+/// `resource_limit` row for a `resource_limit` file, and nothing otherwise.
+fn stored_parser_diagnostic<'a>(
+    stored: &'a HashMap<String, DiagnosticRow>,
+    file: &str,
+    status: ParseStatus,
+) -> Option<&'a DiagnosticRow> {
+    let code = match status {
+        ParseStatus::ParseError => "parse_error",
+        ParseStatus::ResourceLimit => "resource_limit",
+        _ => return None,
+    };
+    stored.get(file).filter(|row| row.code == code)
 }
 
 /// The persisted facts for one file, built together so symbols, uses, and
@@ -1188,6 +1246,8 @@ struct ParsedFileFacts {
     source: Option<Vec<u8>>,
     facts: PendingFacts,
     diagnostic: Option<DiagnosticItem>,
+    /// The parser diagnostic persisted for a failed parse (PF2).
+    persisted: Option<DiagnosticRow>,
 }
 
 /// Builds a file's persisted symbols, uses, and scopes from its extraction.
@@ -1626,21 +1686,43 @@ fn count_status(status: ParseStatus, files_indexed: &mut u64, skipped: &mut Skip
     }
 }
 
-/// The diagnostic for a non-`ok` status reused from stored metadata.
+/// The diagnostic for a non-`ok` status reused from the stored snapshot, by a
+/// metadata-mode refresh or a `--no-refresh` report.
 ///
-/// Metadata mode does not reread the file, so parser details are unavailable;
-/// the stable code and a stored-status detail are reported instead. Ordinary
-/// `unsupported` files stay counted only.
-fn reused_status_diagnostic(file: &str, status: ParseStatus) -> Option<DiagnosticItem> {
-    let code = match status {
-        ParseStatus::ParseError => "parse_error",
-        ParseStatus::ResourceLimit => "resource_limit",
-        ParseStatus::Size => "file_too_large",
-        ParseStatus::Binary => "binary_file",
-        ParseStatus::Encoding => "invalid_utf8",
+/// Neither rereads the file. A parse failure reports the parser detail
+/// persisted with it (`stored`, PF2), so it matches the refresh that recorded
+/// the failure; only a snapshot from before PF2, which persisted none, falls
+/// back to a generic stored-status detail. A size, binary, or encoding skip
+/// reports the fixed detail a rereading refresh reports for that skip
+/// ([`skip_diagnostic`]). Ordinary `unsupported` files stay counted only.
+fn reused_status_diagnostic(
+    file: &str,
+    status: ParseStatus,
+    stored: Option<&DiagnosticRow>,
+) -> Option<DiagnosticItem> {
+    use rivet_core::SkipReason;
+
+    let (code, detail) = match status {
+        ParseStatus::ParseError => (
+            "parse_error",
+            stored.map_or("stored parse error", |row| row.detail.as_str()),
+        ),
+        ParseStatus::ResourceLimit => (
+            "resource_limit",
+            stored.map_or("stored as a parser resource limit", |row| {
+                row.detail.as_str()
+            }),
+        ),
+        ParseStatus::Size => skip_diagnostic(SkipReason::Size)?,
+        ParseStatus::Binary => skip_diagnostic(SkipReason::Binary)?,
+        ParseStatus::Encoding => skip_diagnostic(SkipReason::Encoding)?,
         ParseStatus::Ok | ParseStatus::Unsupported => return None,
     };
-    Some(cached_diagnostic(file, code))
+    Some(DiagnosticItem {
+        file: file.to_string(),
+        code,
+        detail: detail.to_string(),
+    })
 }
 
 /// Increments the skip count for `reason` and returns the persisted status.

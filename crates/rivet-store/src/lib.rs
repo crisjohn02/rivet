@@ -44,6 +44,12 @@ const DEFAULT_BUSY_TIMEOUT_MS: i64 = 5_000;
 ///
 /// - **2** — LR2: the `receiver_classes` table.
 /// - **1** — T08: the first schema.
+///
+/// PF2 began filling the `diagnostics` table, which every format already has,
+/// with each failed file's parser diagnostic. That is no schema change, so the
+/// version stays `2`: a format-2 store written before PF2 simply holds no
+/// diagnostic rows, readers fall back to a generic detail for it, and its next
+/// content-mode refresh (which reparses every failed file) fills the table.
 pub const INDEX_FORMAT_VERSION: &str = "2";
 
 /// Older `meta.index_format_version` values this build recognizes. A writable
@@ -336,6 +342,41 @@ pub struct ReceiverClassRow {
     pub class_qname: String,
     /// The canonical ID of that class when it is indexed, else `None`.
     pub class_id: Option<String>,
+}
+
+/// One file's path, stored language, and parse status, without its source
+/// bytes (PF2).
+///
+/// Enough to reconstruct coverage and status diagnostics for a `--no-refresh`
+/// report without decoding every stored source blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStatusRow {
+    /// Repo-relative `/`-separated path (the `files` primary key).
+    pub path: String,
+    /// Detected language, or `None` when unknown.
+    pub language: Option<String>,
+    /// Parse/skip classification persisted in `files.parse_status`.
+    pub parse_status: ParseStatus,
+}
+
+/// One row of the `diagnostics` table (PF2).
+///
+/// A refresh persists the parser's own diagnostic for each file it recorded
+/// as `parse_error` or `resource_limit`, so a later answer from the stored
+/// snapshot (`--no-refresh`, or a metadata-mode refresh that reuses the file's
+/// stored status) reports the same `detail` the refresh reported. The table has
+/// no foreign key; rows are replaced as a whole by
+/// [`WriteTxn::replace_diagnostics`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticRow {
+    /// Repo-relative `/`-separated path of the diagnosed file.
+    pub file: String,
+    /// Stable diagnostic code, such as `parse_error` or `resource_limit`.
+    pub code: String,
+    /// The parser's detail text, exactly as the refresh reported it.
+    pub detail: String,
+    /// The offending byte offset, when the diagnostic has one.
+    pub start_byte: Option<i64>,
 }
 
 /// The four fingerprint inputs that identify an indexed snapshot's
@@ -871,6 +912,36 @@ impl Store {
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()?)
         })
+    }
+
+    /// Returns every file's path, stored language, and parse status, ordered
+    /// by path bytes, without reading source bytes (PF2).
+    pub fn list_file_statuses(&self) -> Result<Vec<FileStatusRow>, Error> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT path, language, parse_status FROM files ORDER BY path COLLATE BINARY",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let status: String = row.get(2)?;
+                let parse_status = status.parse::<ParseStatus>().map_err(|error| {
+                    // `parse_status` is the third selected column (index 2).
+                    rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+                })?;
+                Ok(FileStatusRow {
+                    path: row.get(0)?,
+                    language: row.get(1)?,
+                    parse_status,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<FileStatusRow>>>()?)
+        })
+    }
+
+    /// Returns every persisted diagnostic ordered by `(file bytes, code bytes,
+    /// start_byte or 0, detail bytes)`, the OUTPUT-CONTRACT diagnostics order
+    /// (PF2).
+    pub fn list_diagnostics(&self) -> Result<Vec<DiagnosticRow>, Error> {
+        self.read(select_diagnostics)
     }
 
     /// Deletes the `files` row for `path`; dependent facts cascade.
@@ -1431,6 +1502,33 @@ impl WriteTxn<'_> {
             unchanged,
             deleted,
         })
+    }
+
+    /// Replaces the whole `diagnostics` table with `rows` inside this
+    /// transaction, writing nothing when the stored rows already equal them
+    /// (PF2).
+    ///
+    /// Rows are compared and written in the [`Store::list_diagnostics`] order,
+    /// so the caller's order does not matter. Leaving equal rows untouched
+    /// keeps a refresh that changes nothing free of writes (PF1), even though a
+    /// content-mode refresh reparses every failed file and so reproduces its
+    /// diagnostic each time.
+    pub fn replace_diagnostics(&self, rows: &[DiagnosticRow]) -> Result<(), Error> {
+        let mut sorted = rows.to_vec();
+        sorted.sort_by(compare_diagnostics);
+        sorted.dedup();
+        let tx: &Connection = &self.store.conn;
+        if select_diagnostics(tx)? == sorted {
+            return Ok(());
+        }
+        tx.execute("DELETE FROM diagnostics", [])?;
+        let mut insert = tx.prepare(
+            "INSERT INTO diagnostics (file, code, detail, start_byte) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for row in &sorted {
+            insert.execute(params![row.file, row.code, row.detail, row.start_byte])?;
+        }
+        Ok(())
     }
 
     /// Sets one `meta` value inside this transaction, writing nothing when the
@@ -2067,6 +2165,35 @@ impl PreviousFile {
     }
 }
 
+/// Reads every `diagnostics` row in the [`compare_diagnostics`] order.
+fn select_diagnostics(conn: &Connection) -> Result<Vec<DiagnosticRow>, Error> {
+    let mut stmt = conn.prepare("SELECT file, code, detail, start_byte FROM diagnostics")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DiagnosticRow {
+            file: row.get(0)?,
+            code: row.get(1)?,
+            detail: row.get(2)?,
+            start_byte: row.get(3)?,
+        })
+    })?;
+    let mut rows = rows.collect::<rusqlite::Result<Vec<DiagnosticRow>>>()?;
+    rows.sort_by(compare_diagnostics);
+    Ok(rows)
+}
+
+/// The OUTPUT-CONTRACT diagnostics order: `(file bytes, code bytes,
+/// start_byte or 0, detail bytes)`, with a present `start_byte` after an
+/// absent one as a final tiebreak so the order is total.
+fn compare_diagnostics(a: &DiagnosticRow, b: &DiagnosticRow) -> std::cmp::Ordering {
+    a.file
+        .as_bytes()
+        .cmp(b.file.as_bytes())
+        .then_with(|| a.code.as_bytes().cmp(b.code.as_bytes()))
+        .then_with(|| a.start_byte.unwrap_or(0).cmp(&b.start_byte.unwrap_or(0)))
+        .then_with(|| a.detail.as_bytes().cmp(b.detail.as_bytes()))
+        .then_with(|| a.start_byte.is_some().cmp(&b.start_byte.is_some()))
+}
+
 /// Loads the current inventory keyed by path, without source bytes.
 fn load_previous_inventory(tx: &Connection) -> Result<HashMap<String, PreviousFile>, Error> {
     let mut stmt = tx.prepare(
@@ -2135,9 +2262,9 @@ fn upsert_meta_if_changed(tx: &Connection, key: &str, value: &str) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{
-        BindingRow, Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION, InventoryInput,
-        PublishReport, ScopeRow, StagePlan, Store, SymbolRow, UseRow, WRITER_BUSY_TIMEOUT,
-        clamp_mtime_ns, snapshot_digest,
+        BindingRow, DiagnosticRow, Error, FileRow, Fingerprint, INDEX_FORMAT_VERSION,
+        InventoryInput, PublishReport, ScopeRow, StagePlan, Store, SymbolRow, UseRow,
+        WRITER_BUSY_TIMEOUT, clamp_mtime_ns, snapshot_digest,
     };
     use rivet_core::{ParseStatus, RefKind, Resolution, SymbolKind, content_hash};
     use rusqlite::params;
@@ -2649,6 +2776,96 @@ mod tests {
                 "scopes",
                 "symbols",
                 "uses"
+            ]
+        );
+    }
+
+    fn diagnostic(file: &str, code: &str, detail: &str, start_byte: Option<i64>) -> DiagnosticRow {
+        DiagnosticRow {
+            file: file.to_string(),
+            code: code.to_string(),
+            detail: detail.to_string(),
+            start_byte,
+        }
+    }
+
+    #[test]
+    fn replace_diagnostics_sorts_and_writes_only_a_changed_set() {
+        let store = Store::open_in_memory().unwrap();
+        let rows = vec![
+            diagnostic("b.ts", "parse_error", ") at byte 9", Some(9)),
+            diagnostic("a.php", "resource_limit", "too deep", None),
+            diagnostic("a.php", "parse_error", "ERROR at byte 6", Some(6)),
+        ];
+        let txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+        txn.replace_diagnostics(&rows).unwrap();
+        txn.rollback().unwrap();
+        assert!(store.list_diagnostics().unwrap().is_empty(), "rolled back");
+
+        let before = store.total_changes();
+        let mut txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+        txn.replace_diagnostics(&rows).unwrap();
+        // Commit without staging an inventory: this test writes no files.
+        txn.open = false;
+        drop(txn);
+        store.conn.execute_batch("COMMIT").unwrap();
+        assert_eq!(store.total_changes() - before, 3);
+        // Contract order: file bytes, then code bytes.
+        assert_eq!(
+            store.list_diagnostics().unwrap(),
+            vec![rows[2].clone(), rows[1].clone(), rows[0].clone()]
+        );
+
+        // The same set in another order writes nothing.
+        let before = store.total_changes();
+        let txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+        let reordered = vec![rows[1].clone(), rows[0].clone(), rows[2].clone()];
+        txn.replace_diagnostics(&reordered).unwrap();
+        txn.rollback().unwrap();
+        assert_eq!(store.total_changes(), before);
+
+        // A changed detail replaces the whole set; an empty set clears it.
+        let txn = store.begin_write(WRITER_BUSY_TIMEOUT).unwrap();
+        let changed = vec![diagnostic("b.ts", "parse_error", "} at byte 2", Some(2))];
+        txn.replace_diagnostics(&changed).unwrap();
+        assert_eq!(txn.store().list_diagnostics().unwrap(), changed);
+        txn.replace_diagnostics(&[]).unwrap();
+        assert!(txn.store().list_diagnostics().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_file_statuses_reads_no_source_and_orders_by_path_bytes() {
+        let store = Store::open_in_memory().unwrap();
+        let mut broken = sample_file("b.php");
+        broken.source = None;
+        broken.parse_status = ParseStatus::ParseError;
+        let mut readme = sample_file("B.md");
+        readme.language = None;
+        readme.source = None;
+        readme.parse_status = ParseStatus::Unsupported;
+        for row in [&broken, &sample_file("a.php"), &readme] {
+            store.upsert_file(row).unwrap();
+        }
+        let statuses: Vec<(String, Option<String>, ParseStatus)> = store
+            .list_file_statuses()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.path, row.language, row.parse_status))
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                ("B.md".to_string(), None, ParseStatus::Unsupported),
+                (
+                    "a.php".to_string(),
+                    Some("php".to_string()),
+                    ParseStatus::Ok
+                ),
+                (
+                    "b.php".to_string(),
+                    Some("php".to_string()),
+                    ParseStatus::ParseError
+                ),
             ]
         );
     }

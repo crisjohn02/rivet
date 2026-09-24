@@ -198,6 +198,7 @@ after the run: `symbol`, `refs`, and `context` take 178-199 ms with the
 default content refresh and 252-284 ms with `--no-refresh`, so a cached read
 is slower than a verified one on this tree. Reported as a follow-up, not
 investigated here.
+PF2 fixed this; see "PF2 addendum" at the end.
 
 ## Honesty audit
 
@@ -410,3 +411,51 @@ the tables; in short:
 3. **Member calls:** 96.5% stay `name_match`, mostly because the receiver is
    a call result or an untyped name; inheritance (`new Hono()` whose methods
    live on the base class) is the largest share among hinted receivers.
+
+## PF2 addendum (2026-09-24): `--no-refresh` speed and cached diagnostics
+
+Wall clock of one process on the pinned Hono checkout (a copy, warm cache,
+release build), median of 5 runs, query
+`src/request.ts#HonoRequest.queries --json`. The two binaries were measured
+back to back, alternating three times; the third pair is shown, and the other
+two agree within about 10 ms.
+
+| Command | Before PF2 | After PF2 |
+|---|---:|---:|
+| `index` (no change) | 45 ms | 45 ms |
+| `symbol` | 171 ms | 170 ms |
+| `symbol --no-refresh` | 242 ms | 131 ms |
+| `refs` | 168 ms | 169 ms |
+| `refs --no-refresh` | 241 ms | 128 ms |
+| `context` | 180 ms | 182 ms |
+| `context --no-refresh` | 248 ms | 138 ms |
+
+Cause: building the `cached` report decoded every stored use (one query per
+file, 92,303 rows), every symbol, every binding, and every file's source blob
+only to count them, about 112 ms. It now uses `COUNT(*)` and a file-status
+query that reads no source, so a cached query costs a refreshed one minus the
+refresh (about 40 ms).
+
+Where a refreshed query's ~170 ms goes (instrumented locally, not committed):
+
+| Phase | Time |
+|---|---:|
+| process start, root discovery, config, store open | ~2 ms |
+| refresh: load inventory 1 ms, walk 5 ms, read and hash 9 ms | ~15 ms |
+| refresh: reparse the 8 files that failed to parse (`src/types.ts` alone 12.5 ms) | ~19 ms |
+| refresh: stage 1 ms, recheck walk 5 ms, commit | ~7 ms |
+| query: load every use (`references::all_uses`) | ~100 ms |
+| query: bindings map 2 ms, evidence 5 ms, matching and JSON ~10 ms | ~17 ms |
+
+The use load is the largest share: SQLite's ordered scan over the uses index
+takes about 35 ms and decoding 92,303 rows into `UseRow` (columns looked up by
+name, seven heap strings per row) about 65 ms. Every `symbol`, `refs`, and
+`context` query does it, refreshed or not. Content-mode refreshes also reparse
+every failed file each time, because only an `ok` file's facts are reused.
+
+Cached diagnostics: a refresh now persists each failed file's parser
+diagnostic in the existing `diagnostics` table (no schema change), so a
+`--no-refresh` answer and a metadata-mode refresh report `} at byte 2885`
+rather than `stored parse error`, and size, binary, and encoding skips report
+the same detail a content refresh does. Cached answers on Hono now differ from
+refreshed ones only in `freshness`.
