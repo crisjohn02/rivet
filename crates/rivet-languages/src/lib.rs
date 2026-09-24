@@ -2,8 +2,9 @@
 //!
 //! T02 exposes the grammar surface: language identifiers, the Tree-sitter
 //! grammars for the enabled features, and the extension dispatch that decides
-//! which files a build can handle. Extraction, queries, and receiver hints
-//! arrive in later tasks.
+//! which files a build can handle. T41 adds [`LanguageId::has_extractor`], the
+//! one switch that says whether a language's files can be indexed. The PHP
+//! adapter lives in [`php`]; TypeScript extraction arrives in T42.
 
 use std::path::Path;
 
@@ -38,6 +39,28 @@ impl LanguageId {
             LanguageId::Php => "php",
             #[cfg(feature = "lang-typescript")]
             LanguageId::Typescript | LanguageId::Tsx => "typescript",
+        }
+    }
+
+    /// Whether this language has an extraction adapter in this build.
+    ///
+    /// This is the single switch that decides whether a file in an enabled
+    /// language can be indexed. A language without an adapter yields no facts
+    /// even when its file parses, so refresh counts such a file as
+    /// `unsupported` with an `unsupported_language` diagnostic instead of
+    /// claiming coverage rivet does not have (AF5, audit finding 14). The
+    /// CLI's refresh and cached-coverage paths consult this method directly;
+    /// nothing else decides it.
+    ///
+    /// TypeScript and TSX parse with their grammars (T41) but have no adapter
+    /// until T42, which flips their arm here and dispatches them to the adapter
+    /// in `rivet_parser`. `rivet_parser`'s tests fail if the two disagree.
+    pub const fn has_extractor(self) -> bool {
+        match self {
+            #[cfg(feature = "lang-php")]
+            LanguageId::Php => true,
+            #[cfg(feature = "lang-typescript")]
+            LanguageId::Typescript | LanguageId::Tsx => false,
         }
     }
 }
@@ -87,9 +110,12 @@ impl Default for ResourceLimits {
 /// Returns the language whose grammar handles `rel_path`, or `None` when the
 /// extension maps to no compiled language.
 ///
-/// `rel_path` is a repository-relative `/`-separated path. Only `.php` (PHP)
-/// and `.ts`/`.tsx` (TypeScript) are registered in v0.1; JavaScript extensions
-/// are deliberately not inferred (docs/ADDING-A-LANGUAGE.md).
+/// `rel_path` is a repository-relative `/`-separated path. Only `.php` (PHP),
+/// `.ts` (the TypeScript grammar, which includes `.d.ts` declaration files),
+/// and `.tsx` (the TSX grammar) are registered in v0.1. JavaScript extensions
+/// and the module-kind TypeScript extensions `.mts`, `.cts`, `.d.mts`, and
+/// `.d.cts` are deliberately not inferred, although the TypeScript grammar
+/// could parse the latter (docs/ADDING-A-LANGUAGE.md).
 pub fn language_for_path(rel_path: &str) -> Option<LanguageId> {
     let extension = Path::new(rel_path).extension()?.to_str()?;
     match extension {
@@ -344,6 +370,42 @@ mod tests {
             summary,
             "final class K\n{\n    public int $b;\n    public int $a;\n    public function go(): void { … }\n}"
         );
+    }
+
+    /// `.ts` (including `.d.ts`) and `.tsx` dispatch to their grammars; every
+    /// other JavaScript or TypeScript-family extension stays unsupported, even
+    /// `.mts`/`.cts`, which the TypeScript grammar could parse (T41).
+    #[test]
+    #[cfg(feature = "lang-typescript")]
+    fn typescript_dispatch_claims_only_ts_dts_and_tsx() {
+        use super::{LanguageId, language_for_path};
+
+        assert_eq!(language_for_path("src/a.ts"), Some(LanguageId::Typescript));
+        assert_eq!(
+            language_for_path("src/types.d.ts"),
+            Some(LanguageId::Typescript)
+        );
+        assert_eq!(language_for_path("src/App.tsx"), Some(LanguageId::Tsx));
+
+        const UNSUPPORTED: [&str; 8] = [
+            ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".d.mts", ".d.cts",
+        ];
+        for extension in UNSUPPORTED {
+            let path = format!("src/a{extension}");
+            assert_eq!(language_for_path(&path), None, "{path}");
+        }
+    }
+
+    /// Only PHP has an extractor; TypeScript and TSX get one in T42.
+    #[test]
+    fn only_php_has_an_extractor() {
+        #[cfg(feature = "lang-php")]
+        assert!(super::LanguageId::Php.has_extractor());
+        #[cfg(feature = "lang-typescript")]
+        {
+            assert!(!super::LanguageId::Typescript.has_extractor());
+            assert!(!super::LanguageId::Tsx.has_extractor());
+        }
     }
 
     /// A language without a renderer reports no summary rather than an empty

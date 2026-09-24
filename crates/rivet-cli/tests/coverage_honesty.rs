@@ -6,7 +6,8 @@
 //! carry `index` once a snapshot was acquired (15), `updated` counts files
 //! whose facts were regenerated (16), the non-UTF-8 path diagnostic is
 //! repository-relative (17), and `--no-refresh` refuses a cache built by other
-//! extractor or resolver rules (the audit's second unverified suspicion).
+//! extractor or resolver rules (the audit's second unverified suspicion). T41
+//! adds that indexing the authored TypeScript fixture changes nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -297,6 +298,132 @@ fn php_only_fixture_coverage_is_unchanged() {
     assert_eq!(
         (&value["symbols"], &value["uses"], &value["bindings"]),
         (&json!(50), &json!(14), &json!(13))
+    );
+}
+
+/// Copies every file under `source` into `dest`, keeping relative paths.
+fn copy_tree(source: &Path, dest: &Path) {
+    fs::create_dir_all(dest).expect("create destination");
+    for entry in fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("fixture entry");
+        let target = dest.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("copy fixture file");
+        }
+    }
+}
+
+/// The PHP fixture at the root and the authored TypeScript fixture (T41)
+/// under `typescript/`.
+fn mixed_fixture_repo(label: &str) -> TempDir {
+    let temp = fixture_repo(label);
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/typescript/authored");
+    copy_tree(&source, &temp.path().join("typescript"));
+    temp
+}
+
+/// A success object without its `index` metadata, whose snapshot and
+/// coverage differ between the two repositories by construction.
+fn without_index(output: &Output) -> Value {
+    let mut value = parse_success(output);
+    value.as_object_mut().expect("an object").remove("index");
+    value
+}
+
+// T41: adding the TypeScript fixture, which parses with its grammars but has
+// no extractor yet, changes nothing rivet reports for PHP, and its files stay
+// `unsupported` with `unsupported_language` diagnostics.
+#[test]
+fn typescript_fixture_leaves_indexing_unchanged() {
+    let php_only = fixture_repo("t41-php");
+    let mixed = mixed_fixture_repo("t41-mixed");
+    let before = parse_success(&run(php_only.path(), &["index", "--json"]));
+    let value = parse_success(&run(mixed.path(), &["index", "--json"]));
+
+    // 13 `.ts`/`.d.ts`/`.tsx` files, the broken one included, are unsupported
+    // with a diagnostic; README.md, tsconfig.json, `.js`, and `.mts` are
+    // ordinary unsupported files, counted only. Nothing is a parse error.
+    assert_eq!(
+        value["index"]["coverage"],
+        json!({
+            "complete": false,
+            "files_seen": 27,
+            "files_indexed": 9,
+            "skipped": {
+                "unsupported": 18,
+                "binary": 0,
+                "size": 0,
+                "encoding": 0,
+                "parse_error": 0,
+                "resource_limit": 0,
+            },
+        })
+    );
+    let typescript = [
+        "typescript/src/anonymous.ts",
+        "typescript/src/barrel.ts",
+        "typescript/src/broken.ts",
+        "typescript/src/components/App.tsx",
+        "typescript/src/components/Button.tsx",
+        "typescript/src/models.ts",
+        "typescript/src/pick.ts",
+        "typescript/src/pick/index.ts",
+        "typescript/src/report.ts",
+        "typescript/src/services/survey.ts",
+        "typescript/src/types.d.ts",
+        "typescript/src/unresolved.ts",
+        "typescript/src/util.ts",
+    ];
+    let items: Vec<Value> = typescript.iter().map(|file| no_extractor(file)).collect();
+    assert_eq!(
+        value["index"]["diagnostics"],
+        json!({"total": 13, "truncated": false, "items": items})
+    );
+
+    // PHP facts and answers are the PHP-only repository's.
+    assert_eq!(
+        (&value["symbols"], &value["uses"], &value["bindings"]),
+        (&before["symbols"], &before["uses"], &before["bindings"])
+    );
+    assert_eq!(
+        (&value["symbols"], &value["uses"], &value["bindings"]),
+        (&json!(50), &json!(14), &json!(13))
+    );
+    for args in [
+        &["refs", "App\\Services\\SurveyService::launch", "--json"][..],
+        &["symbol", "App\\Reporting\\ReportService", "--json"][..],
+    ] {
+        assert_eq!(
+            without_index(&run(mixed.path(), args)),
+            without_index(&run(php_only.path(), args)),
+            "{args:?}"
+        );
+    }
+
+    // A TypeScript file, even the broken one, is `unsupported_language`
+    // (exit 7), never a parse failure, while no extractor exists.
+    for query in [
+        "typescript/src/broken.ts:2",
+        "typescript/src/util.ts#double",
+    ] {
+        let error = parse_error(&run(mixed.path(), &["symbol", query, "--json"]), 7);
+        assert_eq!(error["error"], "unsupported_language", "{query}");
+        assert_eq!(error["language"], "typescript", "{query}");
+    }
+
+    // The human coverage line names the diagnostics by code (CV1).
+    let human = run(mixed.path(), &["index"]);
+    assert_eq!(human.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&human.stdout).ends_with(
+            "coverage incomplete: 9/27 files indexed; skipped 18 unsupported; \
+             13 diagnostics (13 unsupported_language)\n"
+        ),
+        "{}",
+        String::from_utf8_lossy(&human.stdout)
     );
 }
 

@@ -5,6 +5,16 @@ Slices every recorded byte span out of the named fixture file and checks the
 recorded text plus the line/column or line range derived from the offset.
 Stdlib only. Exits non-zero and prints the failing entry on any mismatch.
 
+TypeScript gold (T41). tests/gold/typescript-authored.toml tags every entry
+with the task that makes it verifiable (T42-T45) and lists the finished ones
+in `done_tasks`. Only entries of a done task are verified (the recorded text,
+and the line and column or line range, as for PHP entries); every other entry
+is counted as pending, per task, and printed, never skipped silently. A done task that still has an [[undecided]]
+entry fails. Independently of task state, a span self-check requires every
+TypeScript entry's recorded text to be the fixture's bytes at its span, so a
+pending entry is never unchecked. An unknown table, an unknown or missing task
+tag, or an unknown `done_tasks` value is an error.
+
 Private corpus gold (T35). The benchmark corpus is private, so its gold
 samples live outside this repository. When both environment variables are
 set, every `<name>.toml` in RIVET_PRIVATE_GOLD_DIR is also verified against
@@ -21,6 +31,20 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 GOLD = HERE / "php-authored.toml"
 FIXTURES = HERE.parent / "fixtures" / "php" / "authored"
+TS_GOLD = HERE / "typescript-authored.toml"
+TS_FIXTURES = HERE.parent / "fixtures" / "typescript" / "authored"
+TS_TASKS = ("T42", "T43", "T44", "T45")
+# Each table and whether its spans are declaration-like (a line range plus
+# `text`/`end_text`) or use-like (line and column plus the exact `text`).
+TS_TABLES = (
+    ("declaration", True),
+    ("not_a_declaration", True),
+    ("use", False),
+    ("not_a_use", False),
+    ("binding", False),
+    ("undecided", None),
+)
+TS_KEYS = {"done_tasks", "focus_names"} | {name for name, _ in TS_TABLES}
 
 
 def line_col(data, off):
@@ -51,6 +75,122 @@ def check(label, entry, data):
             return "line/column %d:%d, recorded %d:%d" % (
                 got[0], got[1], entry["line"], entry["column"])
     return None
+
+
+def ts_self_check(entry, data, block):
+    """The span self-check: the recorded text is the fixture's bytes there."""
+    start, end = entry["start_byte"], entry["end_byte"]
+    if not (0 <= start < end <= len(data)):
+        return "span [%d, %d) is outside %d bytes" % (start, end, len(data))
+    actual = data[start:end]
+    text = entry["text"].encode("utf-8")
+    if block:
+        end_text = entry["end_text"].encode("utf-8")
+        if not text or not actual.startswith(text):
+            return "text mismatch: span starts %r, recorded %r" % (actual[:len(text)], text)
+        if not end_text or not actual.endswith(end_text):
+            return "end_text mismatch: span ends %r, recorded %r" % (
+                actual[-len(end_text):], end_text)
+    elif actual != text:
+        return "text mismatch: got %r, recorded %r" % (actual, text)
+    return None
+
+
+def ts_verify(entry, data, block):
+    """Full verification of a done task's entry: text, then lines/column."""
+    error = ts_self_check(entry, data, block)
+    if error:
+        return error
+    start, end = entry["start_byte"], entry["end_byte"]
+    if block:
+        lines = (line_col(data, start)[0], line_col(data, end - 1)[0])
+        if lines != (entry["start_line"], entry["end_line"]):
+            return "lines %d-%d, recorded %d-%d" % (
+                lines[0], lines[1], entry["start_line"], entry["end_line"])
+    elif line_col(data, start) != (entry["line"], entry["column"]):
+        got = line_col(data, start)
+        return "line/column %d:%d, recorded %d:%d" % (
+            got[0], got[1], entry["line"], entry["column"])
+    return None
+
+
+def check_typescript():
+    """Verify done-task TypeScript entries and report the rest as pending.
+
+    Returns the number of failures.
+    """
+    with TS_GOLD.open("rb") as fh:
+        gold = tomllib.load(fh)
+    failures = 0
+    unknown = sorted(set(gold) - TS_KEYS)
+    if unknown:
+        failures += 1
+        print("FAIL typescript gold: unknown key(s) or table(s) %s" % ", ".join(unknown))
+    done = gold.get("done_tasks")
+    if not isinstance(done, list) or any(task not in TS_TASKS for task in done):
+        failures += 1
+        print("FAIL typescript gold: done_tasks %r must list tasks from %s" % (
+            done, ", ".join(TS_TASKS)))
+        done = []
+    cache = {}
+    verified = 0
+    self_checked = 0
+    self_failed = 0
+    pending = {task: 0 for task in TS_TASKS}
+    for table, block in TS_TABLES:
+        for entry in gold.get(table, []):
+            name = entry.get("file", "")
+            task = entry.get("task")
+            if task not in TS_TASKS:
+                failures += 1
+                print("FAIL typescript %s %s: task %r is not one of %s" % (
+                    table, name, task, ", ".join(TS_TASKS)))
+                continue
+            path = TS_FIXTURES / name
+            if not name or not path.is_file():
+                failures += 1
+                print("FAIL typescript %s %r: no such fixture file" % (table, name))
+                continue
+            if name not in cache:
+                cache[name] = path.read_bytes()
+            is_block = entry.get("form") == "declaration" if block is None else block
+            error = ts_self_check(entry, cache[name], is_block)
+            self_checked += 1
+            if error:
+                failures += 1
+                self_failed += 1
+                print("FAIL typescript self-check %s %s: %s" % (table, name, error))
+                print("     entry: %r" % (entry,))
+                continue
+            if task not in done:
+                pending[task] += 1
+                continue
+            if table == "undecided":
+                failures += 1
+                print("FAIL typescript undecided %s [%d, %d): %s is done but this "
+                      "construct is still undecided" % (
+                          name, entry["start_byte"], entry["end_byte"], task))
+                continue
+            error = ts_verify(entry, cache[name], is_block)
+            verified += 1
+            if error:
+                failures += 1
+                print("FAIL typescript %s %s: %s" % (table, name, error))
+                print("     entry: %r" % (entry,))
+            else:
+                print("ok   %-17s %-26s [%d, %d)" % (
+                    table, name, entry["start_byte"], entry["end_byte"]))
+    print("span self-check: %d of %d typescript entries match the fixture bytes" % (
+        self_checked - self_failed, self_checked))
+    print("verified %d typescript entries (done: %s)" % (
+        verified, ", ".join(done) if done else "none"))
+    total = sum(pending.values())
+    if total:
+        detail = ", ".join("%s: %d" % (task, count) for task, count in pending.items() if count)
+        print("pending %d typescript entries (%s)" % (total, detail))
+    else:
+        print("pending 0 typescript entries")
+    return failures
 
 
 def detached_head(checkout):
@@ -137,11 +277,14 @@ def main():
         print("%d of %d entries failed" % (failures, checked))
     else:
         print("verified %d gold entries" % checked)
+    ts_failures = check_typescript()
+    if ts_failures:
+        print("%d typescript gold check(s) failed" % ts_failures)
     private_checked, private_failures = check_private()
     if private_failures:
         print("%d private gold check(s) failed (of %d entries)" % (
             private_failures, private_checked))
-    return 1 if failures or private_failures else 0
+    return 1 if failures or ts_failures or private_failures else 0
 
 
 if __name__ == "__main__":

@@ -1,0 +1,3045 @@
+# Gold expectations for the authored TypeScript/TSX fixture,
+# tests/fixtures/typescript/authored/ (cases a-z in its README.md).
+#
+# How it was made. T41 wrote this before any TypeScript extractor existed, so
+# nothing here came from rivet. Each entry was chosen by reading the fixture
+# against ADDING-A-LANGUAGE's TypeScript column. Its span was then computed
+# mechanically from marker text by a throwaway script: a use-like span is the
+# identifier between two markers in a unique context string; a
+# declaration-like span runs from its first keyword to the first given end
+# string after it. `line`, `column`, `text` and `end_text` are derived from
+# those bytes. Two checks need no rivet:
+# - crates/rivet-languages/tests/typescript_gold.rs parses every fixture file
+#   with the pinned tree-sitter-typescript grammar and requires each
+#   declaration-like span to be exactly one named node and each use span to be
+#   exactly one identifier node;
+# - tests/gold/check_gold.py checks the recorded text at every span.
+#
+# Span conventions, adapted from php-authored.toml:
+# - A declaration starts at its first modifier or keyword, including `export`,
+#   `export default` and `declare`: for an exported declaration the span is the
+#   export statement. It ends where the grammar node ends: after the closing
+#   `}` of a body, after the `;` of a statement (a const, a function
+#   signature), and before the `;` of a class or interface member, which
+#   tree-sitter-typescript leaves outside the member node. Comments are outside.
+# - One statement declaring several consts gives each name the statement's span,
+#   as PHP multi-name constants do.
+# - A constructor parameter property spans its parameter, as a PHP promoted
+#   property does.
+# - A use covers the identifier only, never its receiver.
+# - Bytes are zero-based and half-open; lines and UTF-8 byte columns are
+#   one-based (OUTPUT-CONTRACT). `text` is the first 40 bytes of a
+#   declaration-like span (fewer at a UTF-8 boundary), `end_text` the last 40.
+#
+# Naming, where ADDING-A-LANGUAGE says only "lexical nesting with `.`":
+# - Members are `Class.member`; a constructor is the method `Class.constructor`;
+#   an ES private name keeps its `#`, as PHP properties keep `$`.
+# - Fields, parameter properties and interface property signatures are
+#   `property`; interface method signatures are `method`; enum members are
+#   `const`, as PHP enum cases are; namespaces and module blocks are `module`.
+# - A const bound to an arrow or function expression is one `function`.
+# - An ambient declaration in a .d.ts file is named exactly as the same
+#   declaration in a .ts file; the file path distinguishes modules.
+# - `id` is `<path>#<qualified name>` with the fixture root as the repository
+#   root, `%` and `#` escaped as `%25`/`%23`, and a one-based `#<n>` ordinal on
+#   every duplicate qualified name in a file in (start_byte, end_byte, kind)
+#   order (spec 10.1).
+#
+# Uses:
+# - `ref_kind` is `call` for a callee (a member call records the member) and
+#   for a capitalized JSX component name; `type` for a type annotation, a
+#   heritage clause and a `new` target, as in PHP; `import` for the local
+#   binding an import creates, the alias when there is one, as PHP records
+#   `use ... as Alias`; `unknown` for any other identifier in code, such as an
+#   object before `.`.
+# - `container` is the id of the nearest enclosing function, method, class,
+#   interface or enum symbol (the PHP container rule), or "" for none. A module,
+#   const or property is not a container; an anonymous function or class is
+#   transparent.
+# - `receiver` is the receiver's source text without `?.`, or "".
+#
+# Bindings name a [[use]] span. `expected_target` is an id, or "" when the use
+# stays unresolved; `expected_resolution` is the justified tier (spec 11.3,
+# 11.4). `not_target`, when present, is an id the use must never resolve to and
+# that reference mode for that id must exclude.
+#
+# Tables and task tags. Each entry carries the task that makes it verifiable:
+# - [[declaration]] T42: a named definition.
+# - [[not_a_declaration]] T42: a span that must not become a symbol.
+# - [[use]] T43: an identifier use.
+# - [[not_a_use]] T43: identifier-like text that is not a use.
+# - [[binding]] T44 for lexical bindings: same-file declarations and direct
+#   relative imports, and the import forms that must stay unresolved.
+#   T45 for receiver hints (`this`, `new`, annotations) and the receivers that
+#   must not upgrade.
+# - [[undecided]] T42 or T43: a construct the docs do not settle. `question`
+#   states it and `proposal` suggests an answer. The tagged task settles each
+#   one by moving it to a decided table; check_gold.py fails while a done task
+#   still has an undecided entry.
+#
+# src/broken.ts, src/legacy.js and src/esm.mts have no entries: typescript_gold.rs
+# pins their parse outcome and grammar dispatch, and the CLI test pins that
+# indexing the fixture is unchanged while no TypeScript extractor exists.
+
+# The tasks whose entries check_gold.py verifies. Every other entry is reported
+# as pending, per task. Add a task in the same change that makes its entries
+# pass.
+done_tasks = []
+
+# Every occurrence of these names outside comments in a supported fixture file
+# is a declaration's name or exactly one [[use]], [[not_a_use]] or [[undecided]]
+# span (typescript_gold.rs), so candidate mode can be checked for completeness.
+focus_names = ["launch", "double", "SurveyService", "Button"]
+
+[[declaration]]
+task = "T42"
+case = "q"
+file = "src/anonymous.ts"
+id = "src/anonymous.ts#mapAll"
+qualified_name = "mapAll"
+kind = "function"
+start_byte = 312
+end_byte = 413
+start_line = 12
+end_line = 14
+text = "export function mapAll(values: number[])"
+end_text = " values.map((value) => double(value));\n}"
+
+[[declaration]]
+task = "T42"
+case = "s"
+file = "src/components/App.tsx"
+id = "src/components/App.tsx#App"
+qualified_name = "App"
+kind = "function"
+start_byte = 191
+end_byte = 416
+start_line = 6
+end_line = 15
+text = "export function App() {\n  const count = "
+end_text = "e=\"Button\">{count}</span>\n    </>\n  );\n}"
+
+[[declaration]]
+task = "T42"
+case = "r"
+file = "src/components/Button.tsx"
+id = "src/components/Button.tsx#ButtonProps"
+qualified_name = "ButtonProps"
+kind = "interface"
+start_byte = 85
+end_byte = 157
+start_line = 3
+end_line = 6
+text = "export interface ButtonProps {\n  label: "
+end_text = " label: string;\n  onPress: () => void;\n}"
+
+[[declaration]]
+task = "T42"
+case = "r"
+file = "src/components/Button.tsx"
+id = "src/components/Button.tsx#ButtonProps.label"
+qualified_name = "ButtonProps.label"
+kind = "property"
+start_byte = 118
+end_byte = 131
+start_line = 4
+end_line = 4
+text = "label: string"
+end_text = "label: string"
+
+[[declaration]]
+task = "T42"
+case = "r"
+file = "src/components/Button.tsx"
+id = "src/components/Button.tsx#ButtonProps.onPress"
+qualified_name = "ButtonProps.onPress"
+kind = "property"
+start_byte = 135
+end_byte = 154
+start_line = 5
+end_line = 5
+text = "onPress: () => void"
+end_text = "onPress: () => void"
+
+[[declaration]]
+task = "T42"
+case = "r"
+file = "src/components/Button.tsx"
+id = "src/components/Button.tsx#Button"
+qualified_name = "Button"
+kind = "function"
+start_byte = 159
+end_byte = 308
+start_line = 8
+end_line = 14
+text = "export function Button(props: ButtonProp"
+end_text = "      {props.label}\n    </button>\n  );\n}"
+
+[[declaration]]
+task = "T42"
+case = "r"
+file = "src/components/Button.tsx"
+id = "src/components/Button.tsx#Card"
+qualified_name = "Card"
+kind = "function"
+start_byte = 310
+end_byte = 415
+start_line = 16
+end_line = 18
+text = "export const Card = ({ children }: { chi"
+end_text = "div className=\"card\">{children}</div>\n);"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Survey"
+qualified_name = "Survey"
+kind = "interface"
+start_byte = 209
+end_byte = 285
+start_line = 5
+end_line = 9
+text = "export interface Survey {\n  id: number;\n"
+end_text = "er;\n  title: string;\n  launch(): void;\n}"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Survey.id"
+qualified_name = "Survey.id"
+kind = "property"
+start_byte = 237
+end_byte = 247
+start_line = 6
+end_line = 6
+text = "id: number"
+end_text = "id: number"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Survey.title"
+qualified_name = "Survey.title"
+kind = "property"
+start_byte = 251
+end_byte = 264
+start_line = 7
+end_line = 7
+text = "title: string"
+end_text = "title: string"
+
+[[declaration]]
+task = "T42"
+case = "a"
+file = "src/models.ts"
+id = "src/models.ts#Survey.launch"
+qualified_name = "Survey.launch"
+kind = "method"
+start_byte = 268
+end_byte = 282
+start_line = 8
+end_line = 8
+text = "launch(): void"
+end_text = "launch(): void"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Settings#1"
+qualified_name = "Settings"
+kind = "interface"
+start_byte = 362
+end_byte = 408
+start_line = 12
+end_line = 14
+text = "export interface Settings {\n  theme: str"
+end_text = " interface Settings {\n  theme: string;\n}"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Settings.theme"
+qualified_name = "Settings.theme"
+kind = "property"
+start_byte = 392
+end_byte = 405
+start_line = 13
+end_line = 13
+text = "theme: string"
+end_text = "theme: string"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Settings#2"
+qualified_name = "Settings"
+kind = "interface"
+start_byte = 410
+end_byte = 457
+start_line = 16
+end_line = 18
+text = "export interface Settings {\n  locale: st"
+end_text = "interface Settings {\n  locale: string;\n}"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Settings.locale"
+qualified_name = "Settings.locale"
+kind = "property"
+start_byte = 440
+end_byte = 454
+start_line = 17
+end_line = 17
+text = "locale: string"
+end_text = "locale: string"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Status"
+qualified_name = "Status"
+kind = "enum"
+start_byte = 505
+end_byte = 557
+start_line = 21
+end_line = 24
+text = "export enum Status {\n  Draft,\n  Active ="
+end_text = "Status {\n  Draft,\n  Active = \"active\",\n}"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Status.Draft"
+qualified_name = "Status.Draft"
+kind = "const"
+start_byte = 528
+end_byte = 533
+start_line = 22
+end_line = 22
+text = "Draft"
+end_text = "Draft"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Status.Active"
+qualified_name = "Status.Active"
+kind = "const"
+start_byte = 537
+end_byte = 554
+start_line = 23
+end_line = 23
+text = "Active = \"active\""
+end_text = "Active = \"active\""
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Priority"
+qualified_name = "Priority"
+kind = "enum"
+start_byte = 559
+end_byte = 612
+start_line = 26
+end_line = 29
+text = "export const enum Priority {\n  Low = 1,\n"
+end_text = "enum Priority {\n  Low = 1,\n  High = 2,\n}"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Priority.Low"
+qualified_name = "Priority.Low"
+kind = "const"
+start_byte = 590
+end_byte = 597
+start_line = 27
+end_line = 27
+text = "Low = 1"
+end_text = "Low = 1"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Priority.High"
+qualified_name = "Priority.High"
+kind = "const"
+start_byte = 601
+end_byte = 609
+start_line = 28
+end_line = 28
+text = "High = 2"
+end_text = "High = 2"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Geometry"
+qualified_name = "Geometry"
+kind = "module"
+start_byte = 691
+end_byte = 956
+start_line = 32
+end_line = 44
+text = "export namespace Geometry {\n  export con"
+end_text = "er {\n      return value * 2;\n    }\n  }\n}"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Geometry.ORIGIN"
+qualified_name = "Geometry.ORIGIN"
+kind = "const"
+start_byte = 721
+end_byte = 745
+start_line = 33
+end_line = 33
+text = "export const ORIGIN = 0;"
+end_text = "export const ORIGIN = 0;"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Geometry.area"
+qualified_name = "Geometry.area"
+kind = "function"
+start_byte = 749
+end_byte = 841
+start_line = 35
+end_line = 37
+text = "export function area(width: number, heig"
+end_text = " number {\n    return width * height;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Geometry.Inner"
+qualified_name = "Geometry.Inner"
+kind = "module"
+start_byte = 845
+end_byte = 954
+start_line = 39
+end_line = 43
+text = "export namespace Inner {\n    export func"
+end_text = "mber {\n      return value * 2;\n    }\n  }"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Geometry.Inner.scale"
+qualified_name = "Geometry.Inner.scale"
+kind = "function"
+start_byte = 874
+end_byte = 950
+start_line = 40
+end_line = 42
+text = "export function scale(value: number): nu"
+end_text = ": number {\n      return value * 2;\n    }"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Legacy"
+qualified_name = "Legacy"
+kind = "module"
+start_byte = 1022
+end_byte = 1105
+start_line = 47
+end_line = 51
+text = "module Legacy {\n  export function old():"
+end_text = "mber {\n    return Geometry.ORIGIN;\n  }\n}"
+
+[[declaration]]
+task = "T42"
+case = "j"
+file = "src/models.ts"
+id = "src/models.ts#Legacy.old"
+qualified_name = "Legacy.old"
+kind = "function"
+start_byte = 1040
+end_byte = 1103
+start_line = 48
+end_line = 50
+text = "export function old(): number {\n    retu"
+end_text = "number {\n    return Geometry.ORIGIN;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+id = "src/models.ts#Box"
+qualified_name = "Box"
+kind = "interface"
+start_byte = 1282
+end_byte = 1321
+start_line = 57
+end_line = 59
+text = "export interface Box<T> {\n  value: T;\n}"
+end_text = "export interface Box<T> {\n  value: T;\n}"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+id = "src/models.ts#Box.value"
+qualified_name = "Box.value"
+kind = "property"
+start_byte = 1310
+end_byte = 1318
+start_line = 58
+end_line = 58
+text = "value: T"
+end_text = "value: T"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+id = "src/models.ts#Registry"
+qualified_name = "Registry"
+kind = "class"
+start_byte = 1323
+end_byte = 1448
+start_line = 61
+end_line = 67
+text = "export class Registry<T extends Survey> "
+end_text = " void {\n    this.items.push(item);\n  }\n}"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+id = "src/models.ts#Registry.items"
+qualified_name = "Registry.items"
+kind = "property"
+start_byte = 1367
+end_byte = 1390
+start_line = 62
+end_line = 62
+text = "private items: T[] = []"
+end_text = "private items: T[] = []"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+id = "src/models.ts#Registry.add"
+qualified_name = "Registry.add"
+kind = "method"
+start_byte = 1395
+end_byte = 1446
+start_line = 64
+end_line = 66
+text = "add(item: T): void {\n    this.items.push"
+end_text = "): void {\n    this.items.push(item);\n  }"
+
+[[declaration]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+id = "src/models.ts#first"
+qualified_name = "first"
+kind = "function"
+start_byte = 1450
+end_byte = 1524
+start_line = 69
+end_line = 71
+text = "export function first<T>(items: T[]): T "
+end_text = "]): T | undefined {\n  return items[0];\n}"
+
+[[declaration]]
+task = "T42"
+case = "y"
+file = "src/pick.ts"
+id = "src/pick.ts#pick"
+qualified_name = "pick"
+kind = "function"
+start_byte = 55
+end_byte = 118
+start_line = 2
+end_line = 4
+text = "export function pick(value: number): num"
+end_text = "lue: number): number {\n  return value;\n}"
+
+[[declaration]]
+task = "T42"
+case = "y"
+file = "src/pick/index.ts"
+id = "src/pick/index.ts#pick"
+qualified_name = "pick"
+kind = "function"
+start_byte = 48
+end_byte = 115
+start_line = 2
+end_line = 4
+text = "export function pick(value: number): num"
+end_text = " number): number {\n  return value + 1;\n}"
+
+[[declaration]]
+task = "T42"
+case = "a"
+file = "src/report.ts"
+id = "src/report.ts#ReportService"
+qualified_name = "ReportService"
+kind = "class"
+start_byte = 265
+end_byte = 1137
+start_line = 8
+end_line = 43
+text = "export class ReportService {\n  // gold: "
+end_text = "onst x = items[0];\n    x.launch();\n  }\n}"
+
+[[declaration]]
+task = "T42"
+case = "f"
+file = "src/report.ts"
+id = "src/report.ts#ReportService.service"
+qualified_name = "ReportService.service"
+kind = "property"
+start_byte = 350
+end_byte = 380
+start_line = 10
+end_line = 10
+text = "private service: SurveyService"
+end_text = "private service: SurveyService"
+
+[[declaration]]
+task = "T42"
+case = "f"
+file = "src/report.ts"
+id = "src/report.ts#ReportService.constructor"
+qualified_name = "ReportService.constructor"
+kind = "method"
+start_byte = 385
+end_byte = 454
+start_line = 12
+end_line = 14
+text = "constructor(service: SurveyService) {\n  "
+end_text = "rvice) {\n    this.service = service;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "a"
+file = "src/report.ts"
+id = "src/report.ts#ReportService.launch"
+qualified_name = "ReportService.launch"
+kind = "method"
+start_byte = 458
+end_byte = 505
+start_line = 16
+end_line = 18
+text = "launch(): void {\n    this.service.launch"
+end_text = "): void {\n    this.service.launch();\n  }"
+
+[[declaration]]
+task = "T42"
+case = "e"
+file = "src/report.ts"
+id = "src/report.ts#ReportService.runNew"
+qualified_name = "ReportService.runNew"
+kind = "method"
+start_byte = 556
+end_byte = 662
+start_line = 21
+end_line = 24
+text = "runNew(): void {\n    const created = new"
+end_text = "tatus.Active);\n    created.launch();\n  }"
+
+[[declaration]]
+task = "T42"
+case = "f"
+file = "src/report.ts"
+id = "src/report.ts#ReportService.runTyped"
+qualified_name = "ReportService.runTyped"
+kind = "method"
+start_byte = 744
+end_byte = 821
+start_line = 27
+end_line = 30
+text = "runTyped(svc: SurveyService): void {\n   "
+end_text = "    svc.launch();\n    svc?.launch();\n  }"
+
+[[declaration]]
+task = "T42"
+case = "f"
+file = "src/report.ts"
+id = "src/report.ts#ReportService.runVariable"
+qualified_name = "ReportService.runVariable"
+kind = "method"
+start_byte = 878
+end_byte = 988
+start_line = 33
+end_line = 36
+text = "runVariable(): void {\n    const annotate"
+end_text = "ce.create();\n    annotated.launch();\n  }"
+
+[[declaration]]
+task = "T42"
+case = "g"
+file = "src/report.ts"
+id = "src/report.ts#ReportService.runUnknown"
+qualified_name = "ReportService.runUnknown"
+kind = "method"
+start_byte = 1049
+end_byte = 1135
+start_line = 39
+end_line = 42
+text = "runUnknown(items: ReportService[]): void"
+end_text = " const x = items[0];\n    x.launch();\n  }"
+
+[[declaration]]
+task = "T42"
+case = "h"
+file = "src/report.ts"
+id = "src/report.ts#summary"
+qualified_name = "summary"
+kind = "const"
+start_byte = 1396
+end_byte = 1469
+start_line = 54
+end_line = 54
+text = "export const summary = `café launch ${d"
+end_text = "nch ${double(5)} via ${util.format(6)}`;"
+
+[[declaration]]
+task = "T42"
+case = "p"
+file = "src/report.ts"
+id = "src/report.ts#shadowed"
+qualified_name = "shadowed"
+kind = "function"
+start_byte = 1534
+end_byte = 1639
+start_line = 57
+end_line = 60
+text = "export function shadowed(): number {\n  c"
+end_text = ": number => n + n;\n  return double(7);\n}"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#BaseService"
+qualified_name = "BaseService"
+kind = "class"
+start_byte = 117
+end_byte = 257
+start_line = 4
+end_line = 10
+text = "export abstract class BaseService {\n  ab"
+end_text = ": void {\n    console.log(message);\n  }\n}"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#BaseService.describe"
+qualified_name = "BaseService.describe"
+kind = "method"
+start_byte = 155
+end_byte = 182
+start_line = 5
+end_line = 5
+text = "abstract describe(): string"
+end_text = "abstract describe(): string"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#BaseService.log"
+qualified_name = "BaseService.log"
+kind = "method"
+start_byte = 187
+end_byte = 255
+start_line = 7
+end_line = 9
+text = "protected log(message: string): void {\n "
+end_text = "g): void {\n    console.log(message);\n  }"
+
+[[declaration]]
+task = "T42"
+case = "a"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService"
+qualified_name = "SurveyService"
+kind = "class"
+start_byte = 332
+end_byte = 1378
+start_line = 13
+end_line = 55
+text = "export class SurveyService extends BaseS"
+end_text = "ue: string) {\n    this.log(value);\n  }\n}"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.instances"
+qualified_name = "SurveyService.instances"
+kind = "property"
+start_byte = 414
+end_byte = 434
+start_line = 15
+end_line = 15
+text = "static instances = 0"
+end_text = "static instances = 0"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.current"
+qualified_name = "SurveyService.current"
+kind = "property"
+start_byte = 498
+end_byte = 535
+start_line = 18
+end_line = 18
+text = "private current: Survey | null = null"
+end_text = "private current: Survey | null = null"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.%23attempts"
+qualified_name = "SurveyService.#attempts"
+kind = "property"
+start_byte = 539
+end_byte = 552
+start_line = 19
+end_line = 19
+text = "#attempts = 0"
+end_text = "#attempts = 0"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.constructor"
+qualified_name = "SurveyService.constructor"
+kind = "method"
+start_byte = 613
+end_byte = 733
+start_line = 22
+end_line = 25
+text = "constructor(private readonly prefix: str"
+end_text = ");\n    SurveyService.instances += 1;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.prefix"
+qualified_name = "SurveyService.prefix"
+kind = "property"
+start_byte = 625
+end_byte = 656
+start_line = 22
+end_line = 22
+text = "private readonly prefix: string"
+end_text = "private readonly prefix: string"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.status"
+qualified_name = "SurveyService.status"
+kind = "property"
+start_byte = 658
+end_byte = 679
+start_line = 22
+end_line = 22
+text = "public status: Status"
+end_text = "public status: Status"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.create"
+qualified_name = "SurveyService.create"
+kind = "method"
+start_byte = 803
+end_byte = 893
+start_line = 28
+end_line = 30
+text = "static create(): SurveyService {\n    ret"
+end_text = "rveyService(\"survey\", Status.Draft);\n  }"
+
+[[declaration]]
+task = "T42"
+case = "k"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.describe"
+qualified_name = "SurveyService.describe"
+kind = "method"
+start_byte = 897
+end_byte = 966
+start_line = 32
+end_line = 34
+text = "describe(): string {\n    return `${this."
+end_text = "rn `${this.prefix}: ${this.status}`;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "a"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.launch"
+qualified_name = "SurveyService.launch"
+kind = "method"
+start_byte = 1043
+end_byte = 1112
+start_line = 37
+end_line = 40
+text = "launch(): void {\n    this.#attempts += 1"
+end_text = "tempts += 1;\n    this.log(\"launch\");\n  }"
+
+[[declaration]]
+task = "T42"
+case = "d"
+file = "src/services/survey.ts"
+id = "src/services/survey.ts#SurveyService.relaunch"
+qualified_name = "SurveyService.relaunch"
+kind = "method"
+start_byte = 1169
+end_byte = 1210
+start_line = 43
+end_line = 45
+text = "relaunch(): void {\n    this.launch();\n  "
+end_text = "elaunch(): void {\n    this.launch();\n  }"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#greet"
+qualified_name = "greet"
+kind = "function"
+start_byte = 57
+end_byte = 102
+start_line = 2
+end_line = 2
+text = "declare function greet(name: string): st"
+end_text = "re function greet(name: string): string;"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#VERSION"
+qualified_name = "VERSION"
+kind = "const"
+start_byte = 104
+end_byte = 134
+start_line = 4
+end_line = 4
+text = "declare const VERSION: string;"
+end_text = "declare const VERSION: string;"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Widget"
+qualified_name = "Widget"
+kind = "class"
+start_byte = 136
+end_byte = 178
+start_line = 6
+end_line = 8
+text = "declare class Widget {\n  render(): void;"
+end_text = "clare class Widget {\n  render(): void;\n}"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Widget.render"
+qualified_name = "Widget.render"
+kind = "method"
+start_byte = 161
+end_byte = 175
+start_line = 7
+end_line = 7
+text = "render(): void"
+end_text = "render(): void"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Lib"
+qualified_name = "Lib"
+kind = "module"
+start_byte = 180
+end_byte = 284
+start_line = 10
+end_line = 16
+text = "declare namespace Lib {\n  function versi"
+end_text = "ce Options {\n    verbose: boolean;\n  }\n}"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Lib.version"
+qualified_name = "Lib.version"
+kind = "function"
+start_byte = 206
+end_byte = 233
+start_line = 11
+end_line = 11
+text = "function version(): string;"
+end_text = "function version(): string;"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Lib.Options"
+qualified_name = "Lib.Options"
+kind = "interface"
+start_byte = 237
+end_byte = 282
+start_line = 13
+end_line = 15
+text = "interface Options {\n    verbose: boolean"
+end_text = "face Options {\n    verbose: boolean;\n  }"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Lib.Options.verbose"
+qualified_name = "Lib.Options.verbose"
+kind = "property"
+start_byte = 261
+end_byte = 277
+start_line = 14
+end_line = 14
+text = "verbose: boolean"
+end_text = "verbose: boolean"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Theme"
+qualified_name = "Theme"
+kind = "interface"
+start_byte = 286
+end_byte = 321
+start_line = 18
+end_line = 20
+text = "interface Theme {\n  name: string;\n}"
+end_text = "interface Theme {\n  name: string;\n}"
+
+[[declaration]]
+task = "T42"
+case = "t"
+file = "src/types.d.ts"
+id = "src/types.d.ts#Theme.name"
+qualified_name = "Theme.name"
+kind = "property"
+start_byte = 306
+end_byte = 318
+start_line = 19
+end_line = 19
+text = "name: string"
+end_text = "name: string"
+
+[[declaration]]
+task = "T42"
+case = "x"
+file = "src/unresolved.ts"
+id = "src/unresolved.ts#unresolvedUses"
+qualified_name = "unresolvedUses"
+kind = "function"
+start_byte = 346
+end_byte = 546
+start_line = 10
+end_line = 17
+text = "export function unresolvedUses(survey: S"
+end_text = "vey.id);\n  return twice(Status.Draft);\n}"
+
+[[declaration]]
+task = "T42"
+case = "l"
+file = "src/util.ts"
+id = "src/util.ts#toLabel"
+qualified_name = "toLabel"
+kind = "function"
+start_byte = 163
+end_byte = 246
+start_line = 4
+end_line = 6
+text = "export function toLabel(value: number | "
+end_text = "ing): string {\n  return String(value);\n}"
+
+[[declaration]]
+task = "T42"
+case = "l"
+file = "src/util.ts"
+id = "src/util.ts#format"
+qualified_name = "format"
+kind = "function"
+start_byte = 248
+end_byte = 329
+start_line = 8
+end_line = 10
+text = "export function format(value: number): s"
+end_text = "ring {\n  return toLabel(value).trim();\n}"
+
+[[declaration]]
+task = "T42"
+case = "l"
+file = "src/util.ts"
+id = "src/util.ts#double"
+qualified_name = "double"
+kind = "function"
+start_byte = 403
+end_byte = 454
+start_line = 13
+end_line = 13
+text = "export const double = (n: number): numbe"
+end_text = "t double = (n: number): number => n * 2;"
+
+[[declaration]]
+task = "T42"
+case = "l"
+file = "src/util.ts"
+id = "src/util.ts#launchAll"
+qualified_name = "launchAll"
+kind = "function"
+start_byte = 532
+end_byte = 618
+start_line = 16
+end_line = 18
+text = "export const launchAll = function (count"
+end_text = "er): number {\n  return double(count);\n};"
+
+[[declaration]]
+task = "T42"
+case = "m"
+file = "src/util.ts"
+id = "src/util.ts#RETRY_LIMIT"
+qualified_name = "RETRY_LIMIT"
+kind = "const"
+start_byte = 688
+end_byte = 717
+start_line = 21
+end_line = 21
+text = "export const RETRY_LIMIT = 3;"
+end_text = "export const RETRY_LIMIT = 3;"
+
+[[declaration]]
+task = "T42"
+case = "m"
+file = "src/util.ts"
+id = "src/util.ts#MIN_COUNT"
+qualified_name = "MIN_COUNT"
+kind = "const"
+start_byte = 718
+end_byte = 761
+start_line = 22
+end_line = 22
+text = "export const MIN_COUNT = 1, MAX_COUNT = "
+end_text = "ort const MIN_COUNT = 1, MAX_COUNT = 10;"
+
+[[declaration]]
+task = "T42"
+case = "m"
+file = "src/util.ts"
+id = "src/util.ts#MAX_COUNT"
+qualified_name = "MAX_COUNT"
+kind = "const"
+start_byte = 718
+end_byte = 761
+start_line = 22
+end_line = 22
+text = "export const MIN_COUNT = 1, MAX_COUNT = "
+end_text = "ort const MIN_COUNT = 1, MAX_COUNT = 10;"
+
+[[declaration]]
+task = "T42"
+case = "n"
+file = "src/util.ts"
+id = "src/util.ts#helper"
+qualified_name = "helper"
+kind = "function"
+start_byte = 825
+end_byte = 899
+start_line = 25
+end_line = 27
+text = "export default function helper(): string"
+end_text = "string {\n  return format(RETRY_LIMIT);\n}"
+
+[[not_a_declaration]]
+task = "T42"
+case = "q"
+file = "src/anonymous.ts"
+why = "anonymous default-exported class"
+start_byte = 167
+end_byte = 235
+start_line = 5
+end_line = 9
+text = "export default class {\n  run(): number {"
+end_text = "(): number {\n    return double(1);\n  }\n}"
+
+[[not_a_declaration]]
+task = "T42"
+case = "q"
+file = "src/anonymous.ts"
+why = "method of an anonymous class"
+start_byte = 192
+end_byte = 233
+start_line = 6
+end_line = 8
+text = "run(): number {\n    return double(1);\n  "
+end_text = "un(): number {\n    return double(1);\n  }"
+
+[[not_a_declaration]]
+task = "T42"
+case = "q"
+file = "src/anonymous.ts"
+why = "callback arrow function"
+start_byte = 385
+end_byte = 409
+start_line = 13
+end_line = 13
+text = "(value) => double(value)"
+end_text = "(value) => double(value)"
+
+[[not_a_declaration]]
+task = "T42"
+case = "q"
+file = "src/anonymous.ts"
+why = "function-expression IIFE"
+start_byte = 491
+end_byte = 519
+start_line = 17
+end_line = 19
+text = "function () {\n  double(2);\n}"
+end_text = "function () {\n  double(2);\n}"
+
+[[not_a_declaration]]
+task = "T42"
+case = "q"
+file = "src/components/App.tsx"
+why = "anonymous default-exported function"
+start_byte = 481
+end_byte = 529
+start_line = 18
+end_line = 20
+text = "export default function () {\n  return <A"
+end_text = "efault function () {\n  return <App />;\n}"
+
+[[use]]
+task = "T43"
+case = "q"
+file = "src/anonymous.ts"
+start_byte = 9
+end_byte = 15
+line = 1
+column = 10
+text = "double"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "q"
+file = "src/anonymous.ts"
+start_byte = 219
+end_byte = 225
+line = 7
+column = 12
+text = "double"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "q"
+file = "src/anonymous.ts"
+start_byte = 396
+end_byte = 402
+line = 13
+column = 32
+text = "double"
+ref_kind = "call"
+container = "src/anonymous.ts#mapAll"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "q"
+file = "src/anonymous.ts"
+start_byte = 507
+end_byte = 513
+line = 18
+column = 3
+text = "double"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "q"
+file = "src/anonymous.ts"
+start_byte = 605
+end_byte = 611
+line = 22
+column = 8
+text = "double"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "q"
+file = "src/anonymous.ts"
+start_byte = 649
+end_byte = 655
+line = 24
+column = 3
+text = "double"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 9
+end_byte = 15
+line = 1
+column = 10
+text = "Button"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 17
+end_byte = 21
+line = 1
+column = 18
+text = "Card"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 50
+end_byte = 56
+line = 2
+column = 10
+text = "double"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+start_byte = 231
+end_byte = 237
+line = 7
+column = 17
+text = "double"
+ref_kind = "call"
+container = "src/components/App.tsx#App"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+start_byte = 267
+end_byte = 273
+line = 10
+column = 8
+text = "Button"
+ref_kind = "call"
+container = "src/components/App.tsx#App"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+start_byte = 304
+end_byte = 310
+line = 10
+column = 45
+text = "double"
+ref_kind = "call"
+container = "src/components/App.tsx#App"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+start_byte = 329
+end_byte = 333
+line = 11
+column = 8
+text = "Card"
+ref_kind = "call"
+container = "src/components/App.tsx#App"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "q"
+file = "src/components/App.tsx"
+start_byte = 520
+end_byte = 523
+line = 19
+column = 11
+text = "App"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "z"
+file = "src/components/Button.tsx"
+start_byte = 189
+end_byte = 200
+line = 8
+column = 31
+text = "ButtonProps"
+ref_kind = "type"
+container = "src/components/Button.tsx#Button"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "b"
+file = "src/report.ts"
+start_byte = 9
+end_byte = 22
+line = 1
+column = 10
+text = "SurveyService"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "b"
+file = "src/report.ts"
+start_byte = 108
+end_byte = 114
+line = 3
+column = 23
+text = "runAll"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "b"
+file = "src/report.ts"
+start_byte = 116
+end_byte = 122
+line = 3
+column = 31
+text = "double"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "b"
+file = "src/report.ts"
+start_byte = 147
+end_byte = 156
+line = 4
+column = 8
+text = "makeLabel"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 367
+end_byte = 380
+line = 10
+column = 20
+text = "SurveyService"
+ref_kind = "type"
+container = "src/report.ts#ReportService"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 406
+end_byte = 419
+line = 12
+column = 24
+text = "SurveyService"
+ref_kind = "type"
+container = "src/report.ts#ReportService.constructor"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 492
+end_byte = 498
+line = 17
+column = 18
+text = "launch"
+ref_kind = "call"
+container = "src/report.ts#ReportService.launch"
+receiver = "this.service"
+
+[[use]]
+task = "T43"
+case = "e"
+file = "src/report.ts"
+start_byte = 597
+end_byte = 610
+line = 22
+column = 25
+text = "SurveyService"
+ref_kind = "type"
+container = "src/report.ts#ReportService.runNew"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "e"
+file = "src/report.ts"
+start_byte = 649
+end_byte = 655
+line = 23
+column = 13
+text = "launch"
+ref_kind = "call"
+container = "src/report.ts#ReportService.runNew"
+receiver = "created"
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 758
+end_byte = 771
+line = 27
+column = 17
+text = "SurveyService"
+ref_kind = "type"
+container = "src/report.ts#ReportService.runTyped"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 789
+end_byte = 795
+line = 28
+column = 9
+text = "launch"
+ref_kind = "call"
+container = "src/report.ts#ReportService.runTyped"
+receiver = "svc"
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 808
+end_byte = 814
+line = 29
+column = 10
+text = "launch"
+ref_kind = "call"
+container = "src/report.ts#ReportService.runTyped"
+receiver = "svc"
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 921
+end_byte = 934
+line = 34
+column = 22
+text = "SurveyService"
+ref_kind = "type"
+container = "src/report.ts#ReportService.runVariable"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 937
+end_byte = 950
+line = 34
+column = 38
+text = "SurveyService"
+ref_kind = "unknown"
+container = "src/report.ts#ReportService.runVariable"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "f"
+file = "src/report.ts"
+start_byte = 975
+end_byte = 981
+line = 35
+column = 15
+text = "launch"
+ref_kind = "call"
+container = "src/report.ts#ReportService.runVariable"
+receiver = "annotated"
+
+[[use]]
+task = "T43"
+case = "g"
+file = "src/report.ts"
+start_byte = 1122
+end_byte = 1128
+line = 41
+column = 7
+text = "launch"
+ref_kind = "call"
+container = "src/report.ts#ReportService.runUnknown"
+receiver = "x"
+
+[[use]]
+task = "T43"
+case = "c"
+file = "src/report.ts"
+start_byte = 1220
+end_byte = 1226
+line = 46
+column = 1
+text = "runAll"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "c"
+file = "src/report.ts"
+start_byte = 1231
+end_byte = 1237
+line = 47
+column = 1
+text = "double"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "c"
+file = "src/report.ts"
+start_byte = 1242
+end_byte = 1251
+line = 48
+column = 1
+text = "makeLabel"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "o"
+file = "src/report.ts"
+start_byte = 1312
+end_byte = 1318
+line = 51
+column = 6
+text = "format"
+ref_kind = "call"
+container = ""
+receiver = "util"
+
+[[use]]
+task = "T43"
+case = "h"
+file = "src/report.ts"
+start_byte = 1435
+end_byte = 1441
+line = 54
+column = 40
+text = "double"
+ref_kind = "call"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "h"
+file = "src/report.ts"
+start_byte = 1457
+end_byte = 1463
+line = 54
+column = 62
+text = "format"
+ref_kind = "call"
+container = ""
+receiver = "util"
+
+[[use]]
+task = "T43"
+case = "p"
+file = "src/report.ts"
+start_byte = 1627
+end_byte = 1633
+line = 59
+column = 10
+text = "double"
+ref_kind = "call"
+container = "src/report.ts#shadowed"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 367
+end_byte = 378
+line = 13
+column = 36
+text = "BaseService"
+ref_kind = "type"
+container = "src/services/survey.ts#SurveyService"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 700
+end_byte = 713
+line = 24
+column = 5
+text = "SurveyService"
+ref_kind = "unknown"
+container = "src/services/survey.ts#SurveyService.constructor"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 820
+end_byte = 833
+line = 28
+column = 20
+text = "SurveyService"
+ref_kind = "type"
+container = "src/services/survey.ts#SurveyService.create"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 851
+end_byte = 864
+line = 29
+column = 16
+text = "SurveyService"
+ref_kind = "type"
+container = "src/services/survey.ts#SurveyService.create"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "i"
+file = "src/services/survey.ts"
+start_byte = 1094
+end_byte = 1097
+line = 39
+column = 10
+text = "log"
+ref_kind = "call"
+container = "src/services/survey.ts#SurveyService.launch"
+receiver = "this"
+
+[[use]]
+task = "T43"
+case = "d"
+file = "src/services/survey.ts"
+start_byte = 1197
+end_byte = 1203
+line = 44
+column = 10
+text = "launch"
+ref_kind = "call"
+container = "src/services/survey.ts#SurveyService.relaunch"
+receiver = "this"
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 9
+end_byte = 14
+line = 1
+column = 10
+text = "twice"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 43
+end_byte = 49
+line = 2
+column = 10
+text = "Status"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 88
+end_byte = 99
+line = 3
+column = 20
+text = "aliasFormat"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 126
+end_byte = 134
+line = 4
+column = 10
+text = "debounce"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 166
+end_byte = 172
+line = 5
+column = 15
+text = "Survey"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "y"
+file = "src/unresolved.ts"
+start_byte = 201
+end_byte = 205
+line = 6
+column = 10
+text = "pick"
+ref_kind = "import"
+container = ""
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 385
+end_byte = 391
+line = 10
+column = 40
+text = "Survey"
+ref_kind = "type"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 448
+end_byte = 454
+line = 12
+column = 10
+text = "double"
+ref_kind = "call"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = "legacy"
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 461
+end_byte = 472
+line = 13
+column = 3
+text = "aliasFormat"
+ref_kind = "call"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 479
+end_byte = 487
+line = 14
+column = 3
+text = "debounce"
+ref_kind = "call"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 488
+end_byte = 493
+line = 14
+column = 12
+text = "twice"
+ref_kind = "unknown"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "y"
+file = "src/unresolved.ts"
+start_byte = 498
+end_byte = 502
+line = 15
+column = 3
+text = "pick"
+ref_kind = "call"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 524
+end_byte = 529
+line = 16
+column = 10
+text = "twice"
+ref_kind = "call"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 530
+end_byte = 536
+line = 16
+column = 16
+text = "Status"
+ref_kind = "unknown"
+container = "src/unresolved.ts#unresolvedUses"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "z"
+file = "src/util.ts"
+start_byte = 601
+end_byte = 607
+line = 17
+column = 10
+text = "double"
+ref_kind = "call"
+container = "src/util.ts#launchAll"
+receiver = ""
+
+[[use]]
+task = "T43"
+case = "z"
+file = "src/util.ts"
+start_byte = 877
+end_byte = 883
+line = 26
+column = 10
+text = "format"
+ref_kind = "call"
+container = "src/util.ts#helper"
+receiver = ""
+
+[[not_a_use]]
+task = "T43"
+case = "b"
+file = "src/components/App.tsx"
+why = "module specifier string"
+start_byte = 32
+end_byte = 38
+line = 1
+column = 33
+text = "Button"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+why = "literal JSX text"
+start_byte = 334
+end_byte = 340
+line = 11
+column = 13
+text = "Button"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+why = "literal JSX text"
+start_byte = 341
+end_byte = 347
+line = 11
+column = 20
+text = "launch"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+why = "lowercase intrinsic element"
+start_byte = 367
+end_byte = 371
+line = 12
+column = 8
+text = "span"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+why = "string attribute value"
+start_byte = 379
+end_byte = 385
+line = 12
+column = 20
+text = "Button"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/Button.tsx"
+why = "lowercase intrinsic element"
+start_byte = 220
+end_byte = 226
+line = 10
+column = 6
+text = "button"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/Button.tsx"
+why = "lowercase intrinsic element"
+start_byte = 294
+end_byte = 300
+line = 12
+column = 7
+text = "button"
+
+[[not_a_use]]
+task = "T43"
+case = "s"
+file = "src/components/Button.tsx"
+why = "lowercase intrinsic element"
+start_byte = 375
+end_byte = 378
+line = 17
+column = 4
+text = "div"
+
+[[not_a_use]]
+task = "T43"
+case = "h"
+file = "src/report.ts"
+why = "template literal text"
+start_byte = 1426
+end_byte = 1432
+line = 54
+column = 31
+text = "launch"
+
+[[not_a_use]]
+task = "T43"
+case = "h"
+file = "src/services/survey.ts"
+why = "comment"
+start_byte = 286
+end_byte = 292
+line = 12
+column = 28
+text = "launch"
+
+[[not_a_use]]
+task = "T43"
+case = "h"
+file = "src/services/survey.ts"
+why = "string literal"
+start_byte = 1099
+end_byte = 1105
+line = 39
+column = 15
+text = "launch"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/anonymous.ts"
+start_byte = 9
+end_byte = 15
+line = 1
+column = 10
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/anonymous.ts"
+start_byte = 219
+end_byte = 225
+line = 7
+column = 12
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/anonymous.ts"
+start_byte = 396
+end_byte = 402
+line = 13
+column = 32
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/anonymous.ts"
+start_byte = 507
+end_byte = 513
+line = 18
+column = 3
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/anonymous.ts"
+start_byte = 605
+end_byte = 611
+line = 22
+column = 8
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/anonymous.ts"
+start_byte = 649
+end_byte = 655
+line = 24
+column = 3
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 9
+end_byte = 15
+line = 1
+column = 10
+text = "Button"
+expected_target = "src/components/Button.tsx#Button"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 17
+end_byte = 21
+line = 1
+column = 18
+text = "Card"
+expected_target = "src/components/Button.tsx#Card"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 50
+end_byte = 56
+line = 2
+column = 10
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 231
+end_byte = 237
+line = 7
+column = 17
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 267
+end_byte = 273
+line = 10
+column = 8
+text = "Button"
+expected_target = "src/components/Button.tsx#Button"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 304
+end_byte = 310
+line = 10
+column = 45
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/components/App.tsx"
+start_byte = 329
+end_byte = 333
+line = 11
+column = 8
+text = "Card"
+expected_target = "src/components/Button.tsx#Card"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/components/App.tsx"
+start_byte = 520
+end_byte = 523
+line = 19
+column = 11
+text = "App"
+expected_target = "src/components/App.tsx#App"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/components/Button.tsx"
+start_byte = 189
+end_byte = 200
+line = 8
+column = 31
+text = "ButtonProps"
+expected_target = "src/components/Button.tsx#ButtonProps"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 9
+end_byte = 22
+line = 1
+column = 10
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 108
+end_byte = 114
+line = 3
+column = 23
+text = "runAll"
+expected_target = "src/util.ts#launchAll"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 116
+end_byte = 122
+line = 3
+column = 31
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 147
+end_byte = 156
+line = 4
+column = 8
+text = "makeLabel"
+expected_target = "src/util.ts#helper"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 367
+end_byte = 380
+line = 10
+column = 20
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 406
+end_byte = 419
+line = 12
+column = 24
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 597
+end_byte = 610
+line = 22
+column = 25
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 758
+end_byte = 771
+line = 27
+column = 17
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 921
+end_byte = 934
+line = 34
+column = 22
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 937
+end_byte = 950
+line = 34
+column = 38
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 1220
+end_byte = 1226
+line = 46
+column = 1
+text = "runAll"
+expected_target = "src/util.ts#launchAll"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "c"
+file = "src/report.ts"
+start_byte = 1231
+end_byte = 1237
+line = 47
+column = 1
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "b"
+file = "src/report.ts"
+start_byte = 1242
+end_byte = 1251
+line = 48
+column = 1
+text = "makeLabel"
+expected_target = "src/util.ts#helper"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "o"
+file = "src/report.ts"
+start_byte = 1312
+end_byte = 1318
+line = 51
+column = 6
+text = "format"
+expected_target = "src/util.ts#format"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "h"
+file = "src/report.ts"
+start_byte = 1435
+end_byte = 1441
+line = 54
+column = 40
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "o"
+file = "src/report.ts"
+start_byte = 1457
+end_byte = 1463
+line = 54
+column = 62
+text = "format"
+expected_target = "src/util.ts#format"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "p"
+file = "src/report.ts"
+start_byte = 1627
+end_byte = 1633
+line = 59
+column = 10
+text = "double"
+expected_target = ""
+expected_resolution = "name_match"
+not_target = "src/util.ts#double"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 367
+end_byte = 378
+line = 13
+column = 36
+text = "BaseService"
+expected_target = "src/services/survey.ts#BaseService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 700
+end_byte = 713
+line = 24
+column = 5
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 820
+end_byte = 833
+line = 28
+column = 20
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/services/survey.ts"
+start_byte = 851
+end_byte = 864
+line = 29
+column = 16
+text = "SurveyService"
+expected_target = "src/services/survey.ts#SurveyService"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 9
+end_byte = 14
+line = 1
+column = 10
+text = "twice"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 43
+end_byte = 49
+line = 2
+column = 10
+text = "Status"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 88
+end_byte = 99
+line = 3
+column = 20
+text = "aliasFormat"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 126
+end_byte = 134
+line = 4
+column = 10
+text = "debounce"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 166
+end_byte = 172
+line = 5
+column = 15
+text = "Survey"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "y"
+file = "src/unresolved.ts"
+start_byte = 201
+end_byte = 205
+line = 6
+column = 10
+text = "pick"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 385
+end_byte = 391
+line = 10
+column = 40
+text = "Survey"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 448
+end_byte = 454
+line = 12
+column = 10
+text = "double"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 461
+end_byte = 472
+line = 13
+column = 3
+text = "aliasFormat"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 479
+end_byte = 487
+line = 14
+column = 3
+text = "debounce"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 488
+end_byte = 493
+line = 14
+column = 12
+text = "twice"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "y"
+file = "src/unresolved.ts"
+start_byte = 498
+end_byte = 502
+line = 15
+column = 3
+text = "pick"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 524
+end_byte = 529
+line = 16
+column = 10
+text = "twice"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "x"
+file = "src/unresolved.ts"
+start_byte = 530
+end_byte = 536
+line = 16
+column = 16
+text = "Status"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/util.ts"
+start_byte = 601
+end_byte = 607
+line = 17
+column = 10
+text = "double"
+expected_target = "src/util.ts#double"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T44"
+case = "z"
+file = "src/util.ts"
+start_byte = 877
+end_byte = 883
+line = 26
+column = 10
+text = "format"
+expected_target = "src/util.ts#format"
+expected_resolution = "exact"
+
+[[binding]]
+task = "T45"
+case = "f"
+file = "src/report.ts"
+start_byte = 492
+end_byte = 498
+line = 17
+column = 18
+text = "launch"
+expected_target = "src/services/survey.ts#SurveyService.launch"
+expected_resolution = "scoped"
+
+[[binding]]
+task = "T45"
+case = "e"
+file = "src/report.ts"
+start_byte = 649
+end_byte = 655
+line = 23
+column = 13
+text = "launch"
+expected_target = "src/services/survey.ts#SurveyService.launch"
+expected_resolution = "scoped"
+
+[[binding]]
+task = "T45"
+case = "f"
+file = "src/report.ts"
+start_byte = 789
+end_byte = 795
+line = 28
+column = 9
+text = "launch"
+expected_target = "src/services/survey.ts#SurveyService.launch"
+expected_resolution = "scoped"
+
+[[binding]]
+task = "T45"
+case = "f"
+file = "src/report.ts"
+start_byte = 808
+end_byte = 814
+line = 29
+column = 10
+text = "launch"
+expected_target = "src/services/survey.ts#SurveyService.launch"
+expected_resolution = "scoped"
+
+[[binding]]
+task = "T45"
+case = "f"
+file = "src/report.ts"
+start_byte = 975
+end_byte = 981
+line = 35
+column = 15
+text = "launch"
+expected_target = "src/services/survey.ts#SurveyService.launch"
+expected_resolution = "scoped"
+
+[[binding]]
+task = "T45"
+case = "g"
+file = "src/report.ts"
+start_byte = 1122
+end_byte = 1128
+line = 41
+column = 7
+text = "launch"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T45"
+case = "i"
+file = "src/services/survey.ts"
+start_byte = 1094
+end_byte = 1097
+line = 39
+column = 10
+text = "log"
+expected_target = ""
+expected_resolution = "name_match"
+
+[[binding]]
+task = "T45"
+case = "d"
+file = "src/services/survey.ts"
+start_byte = 1197
+end_byte = 1203
+line = 44
+column = 10
+text = "launch"
+expected_target = "src/services/survey.ts#SurveyService.launch"
+expected_resolution = "scoped"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+form = "declaration"
+question = "Is a type alias a v0.1 definition? ADDING-A-LANGUAGE's TypeScript column does not name type aliases, and the contract's closed `kind` list has no fitting value."
+proposal = "not a symbol in v0.1; adding one needs a contract kind"
+start_byte = 1177
+end_byte = 1216
+start_line = 54
+end_line = 54
+text = "export type SurveyId = number | string;"
+end_text = "export type SurveyId = number | string;"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/models.ts"
+form = "declaration"
+question = "Is a generic type parameter a definition? The column is silent; its 'Not resolved' row excludes unions/generics from resolution only."
+proposal = "not a symbol; the generic class, interface or function is one ordinary symbol"
+start_byte = 1303
+end_byte = 1304
+start_line = 57
+end_line = 57
+text = "T"
+end_text = "T"
+
+[[undecided]]
+task = "T42"
+case = "p"
+file = "src/report.ts"
+form = "declaration"
+question = "Is a function-local const a symbol? The column says 'named const bindings' without saying module level. This applies to every const in a function body (created, annotated, x here; count in App.tsx; legacy in unresolved.ts). If it becomes `shadowed.double`, update the (p) binding's expected_target."
+proposal = "not a symbol: locals are never symbols, as in PHP"
+start_byte = 1573
+end_byte = 1617
+start_line = 58
+end_line = 58
+text = "const double = (n: number): number => n "
+end_text = "t double = (n: number): number => n + n;"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/services/survey.ts"
+form = "declaration"
+question = "Is a getter a method symbol? With its setter it shares the qualified name SurveyService.label, so both would carry spec 10.1 ordinals (#1, #2) and a short query would be ambiguous."
+proposal = "a `method` symbol each, with ordinals; the alternative is one `property` symbol"
+start_byte = 1272
+end_byte = 1321
+start_line = 48
+end_line = 50
+text = "get label(): string {\n    return this.pr"
+end_text = "(): string {\n    return this.prefix;\n  }"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/services/survey.ts"
+form = "declaration"
+question = "Is a setter a method symbol? See the getter entry above."
+proposal = "a `method` symbol, as for the getter"
+start_byte = 1325
+end_byte = 1376
+start_line = 52
+end_line = 54
+text = "set label(value: string) {\n    this.log("
+end_text = "alue: string) {\n    this.log(value);\n  }"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/types.d.ts"
+form = "declaration"
+question = "How is a string-named ambient module named? Its name is a string literal (\"legacy-lib\"), not an identifier, so 'lexical nesting with .' does not say whether the qualified name is legacy-lib, \"legacy-lib\", or no symbol at all."
+proposal = "no symbol in v0.1: the name is a module specifier, not an identifier"
+start_byte = 392
+end_byte = 456
+start_line = 23
+end_line = 25
+text = "declare module \"legacy-lib\" {\n  export f"
+end_text = "ib\" {\n  export function start(): void;\n}"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/types.d.ts"
+form = "declaration"
+question = "The member of the string-named ambient module; its qualified name follows the module's."
+proposal = "no symbol, following the module"
+start_byte = 424
+end_byte = 454
+start_line = 24
+end_line = 24
+text = "export function start(): void;"
+end_text = "export function start(): void;"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/util.ts"
+form = "declaration"
+question = "Is an overload signature a definition? Separate `function` symbols would give toLabel#1..#3 ordinals (and renumber the implementation); folding them into the implementation keeps one symbol."
+proposal = "not a separate symbol; the implementation is the one `toLabel` symbol"
+start_byte = 67
+end_byte = 114
+start_line = 2
+end_line = 2
+text = "export function toLabel(value: number): "
+end_text = "function toLabel(value: number): string;"
+
+[[undecided]]
+task = "T42"
+case = "u"
+file = "src/util.ts"
+form = "declaration"
+question = "The second overload signature; see the first."
+proposal = "not a separate symbol"
+start_byte = 115
+end_byte = 162
+start_line = 3
+end_line = 3
+text = "export function toLabel(value: string): "
+end_text = "function toLabel(value: string): string;"
+
+[[undecided]]
+task = "T43"
+case = "x"
+file = "src/barrel.ts"
+form = "use"
+question = "Is the local name in a re-export specifier a use? The PHP precedent records one import use per binding, at the alias; a re-export creates no local binding."
+proposal = "an `import` use of `double`, left unresolved because re-exports are not followed"
+start_byte = 59
+end_byte = 65
+line = 2
+column = 10
+text = "double"
+
+[[undecided]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+form = "use"
+question = "Is a JSX attribute name a use? `label` names a field of ButtonProps; the column lists JSX expressions and component names only."
+proposal = "not a use in v0.1"
+start_byte = 274
+end_byte = 279
+line = 10
+column = 15
+text = "label"
+
+[[undecided]]
+task = "T43"
+case = "s"
+file = "src/components/App.tsx"
+form = "use"
+question = "Is a component's closing tag name a second use? The element is one reference; `</Card>` repeats the name."
+proposal = "not a use: only the opening or self-closing tag name is"
+start_byte = 354
+end_byte = 358
+line = 11
+column = 33
+text = "Card"

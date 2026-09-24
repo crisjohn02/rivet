@@ -8,12 +8,12 @@ This queue breaks the [implementation plan](IMPLEMENTATION-PLAN.md) into resumab
 
 | Field | Value |
 |---|---|
-| Last completed task | SN2 (lean managed snippet, 624 bytes, sha256 `908710a5...5898`, recommending `context --tokens 1500`); before it, CV1 (shorter human coverage line) |
-| Next task | User decision. SY1, RX1, CV1 and SN2 follow TE1's reading of the spent heldout-01 tasks, so any claim about their effect needs a new held-out set; SN2 is a new benchmark treatment (new snippet hash). Parked: T33c, T36a-T36c, T41+ (TypeScript) |
+| Last completed task | T41 (TypeScript/TSX authored fixture in `tests/fixtures/typescript/authored/`, task-tagged gold in `tests/gold/typescript-authored.toml`, `.ts`/`.d.ts`/`.tsx` grammar dispatch and parser-level parse policy, one extractor switch `LanguageId::has_extractor`; CLI output unchanged); before it, SN2 (lean managed snippet) |
+| Next task | T42: settle the nine T42 `[[undecided]]` gold entries (type alias, generic parameter, overloads, accessors, function-local consts, string-named ambient module), then extract definitions, flip `LanguageId::has_extractor` for TypeScript and add its dispatch arm together. Parked: T33c, T36a-T36c |
 | Active task / partial progress | None |
 | Blocker | None known |
-| Last checks | SN2: fmt, clippy `-D warnings`, `cargo test --workspace` (705 passed, 1 ignored), `check_gold.py` (51 entries), `benchmark/runner/test_runner.py` (90 tests) all pass; `rivet snippet` sha256 908710a5ba23e4ffc3a4fe08513ceb01a9f5b1ed02227b97d0529f7ee38e5898. heldout-01 (T49): C/B 0.960, upper bound 1.011, outcome `inconclusive`. |
-| Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands |
+| Last checks | T41: fmt, clippy `-D warnings`, `cargo test --workspace` (719 passed, 1 ignored), `check_gold.py` (51 PHP entries verified; 227 TypeScript entries span-self-checked, all pending: T42 93, T43 74, T44 52, T45 8), `benchmark/runner/test_runner.py` (90 tests) all pass; `index`/`refs`/`symbol`/`context` output on PHP plus the TypeScript fixture is byte-identical to the pre-T41 binary; `rivet snippet` sha256 908710a5ba23e4ffc3a4fe08513ceb01a9f5b1ed02227b97d0529f7ee38e5898 (unchanged). heldout-01 (T49): outcome `inconclusive`. |
+| Decisions to carry forward | PHP first; sequential implementation; JSON before human formatting; no new commands. 2026-09-24: the user started TypeScript (T41+) now, overriding Gate G's deferral; `.ts`/`.tsx` files stay `unsupported_language` until an extractor exists |
 
 Update this checkpoint at the end of each implementation session. Keep it short; the code and task checklist are the detailed record.
 
@@ -199,7 +199,7 @@ These are still separate tasks, activated only after Gate G. Read the correspond
 
 | Done | ID | Small task | Done when |
 |---|---|---|---|
-| [ ] | T41 | Add TypeScript/TSX authored fixtures, gold spans, and extension/grammar dispatch. | `.ts`, `.tsx`, and declaration-file cases use the intended grammar; unsupported extensions are explicit. |
+| [x] | T41 | Add TypeScript/TSX authored fixtures, gold spans, and extension/grammar dispatch. | `.ts`, `.tsx`, and declaration-file cases use the intended grammar; unsupported extensions are explicit. |
 | [ ] | T42 | Extract TypeScript named definitions and signatures. | Named functions/classes/methods and remaining supported kinds match gold; split remaining kind families into subtasks if needed. |
 | [ ] | T43 | Extract TypeScript scopes, uses, and imports, including TSX expressions/component names. | Top-level/anonymous-container uses, interpolation, aliases, and shadowing match gold; literal JSX text is excluded. |
 | [ ] | T44 | Resolve supported direct relative imports/exports. | Local named/default bindings resolve uniquely; re-exports, package/path aliases, and ambiguous paths remain unresolved. |

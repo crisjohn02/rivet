@@ -540,8 +540,8 @@ fn refresh_inventory(
         let language_name = id.name().to_string();
 
         // An enabled language with no extraction adapter (TypeScript until
-        // T42) yields no facts even when it parses, so the file must not count
-        // as indexed. OUTPUT-CONTRACT "Common index metadata": "`complete` is
+        // T42; `LanguageId::has_extractor` is the one switch) yields no facts
+        // even when it parses, so the file must not count as indexed. OUTPUT-CONTRACT "Common index metadata": "`complete` is
         // true only when all skip counts are zero", and ARCHITECTURE "Parse and
         // coverage policy": "Unsupported language, binary, oversize, encoding,
         // and deterministic parser-resource skips are counted separately."
@@ -551,7 +551,7 @@ fn refresh_inventory(
         // or binary skip is not distinguished, exactly as for any other
         // unsupported file. Unlike an ordinary unsupported file (a README), the
         // user enabled this language, so a diagnostic names the reason.
-        if !rivet_parser::has_extractor(id) {
+        if !id.has_extractor() {
             stored_by_path.remove(&entry.rel_path);
             skipped.unsupported += 1;
             diagnostics.push(no_extractor_diagnostic(&entry.rel_path, &language_name));
@@ -1099,7 +1099,7 @@ pub(crate) fn cached_report(store: &Store, timing: bool) -> Result<Report, CliEr
 /// with no extraction adapter, or `None` when an adapter exists.
 fn lacks_extractor<'a>(path: &str, language: &'a str) -> Option<&'a str> {
     language_for_path(path)
-        .filter(|id| id.name() == language && !rivet_parser::has_extractor(*id))
+        .filter(|id| id.name() == language && !id.has_extractor())
         .map(|_| language)
 }
 
