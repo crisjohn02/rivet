@@ -13,7 +13,7 @@ use rivet_core::extract::{
     BindingSpace, ExtractedScope, ExtractedUse, ModuleImport, ModuleImportKind, TypedOrigin,
     UseHint,
 };
-use rivet_core::{ExtractedFile, RefKind};
+use rivet_core::{ExtractedFile, RefKind, Span};
 use rivet_languages::{LanguageId, ResourceLimits, grammar, typescript};
 use tree_sitter::{Parser, Tree};
 
@@ -915,17 +915,26 @@ function free(this: Window) {
 }
 ";
     let extracted = ts(source);
+    // The type-name span is checked separately below.
     let typed = |spelling: &str, origin: TypedOrigin| UseHint::Typed {
         type_spelling: spelling.to_string(),
         origin,
+        name_span: None,
     };
     let new_expr = |spelling: &str| UseHint::NewExpr {
         class_spelling: spelling.to_string(),
         use_block: None,
+        name_span: None,
+    };
+    let this = UseHint::This {
+        is_static: Some(false),
+    };
+    let static_this = UseHint::This {
+        is_static: Some(true),
     };
     // (line, member, receiver, hint)
     let expected: Vec<(usize, &str, &str, UseHint)> = vec![
-        (6, "repo", "this", UseHint::This),
+        (6, "repo", "this", this.clone()),
         (6, "save", "this.repo", typed("Repo", TypedOrigin::Property)),
         (
             7,
@@ -935,7 +944,7 @@ function free(this: Window) {
         ),
         (8, "use", "plain", typed("Plain", TypedOrigin::Parameter)),
         (9, "flush", "log", typed("Logger", TypedOrigin::Parameter)),
-        (12, "save", "this", UseHint::This),
+        (12, "save", "this", this.clone()),
         // A union type records no hint.
         (13, "save", "this.maybe", UseHint::Unresolved),
         (14, "go", "arg", typed("Arg", TypedOrigin::Parameter)),
@@ -950,12 +959,12 @@ function free(this: Window) {
         (24, "go", "both", typed("Declared", TypedOrigin::Variable)),
         // A `function` has its own `this`; an arrow keeps the method's.
         (25, "go", "this", UseHint::Unresolved),
-        (26, "go", "this", UseHint::This),
+        (26, "go", "this", this.clone()),
         // An object-literal method, and an anonymous class.
         (27, "go", "this", UseHint::Unresolved),
         (28, "go", "this", UseHint::Unresolved),
         // A static method's `this` is the class: static fields.
-        (31, "shared", "this", UseHint::This),
+        (31, "shared", "this", static_this),
         (
             31,
             "clear",
@@ -977,7 +986,25 @@ function free(this: Window) {
             })
             .collect();
         assert_eq!(found.len(), 1, "line {line} {receiver}.{member}: {found:?}");
-        assert_eq!(found[0].hint, hint, "line {line} {receiver}.{member}");
+        let (got, name_span) = without_name_span(&found[0].hint);
+        assert_eq!(got, hint, "line {line} {receiver}.{member}");
+        // T45: a typed or `new` hint points at the `type` use of its name.
+        if let UseHint::Typed { type_spelling, .. }
+        | UseHint::NewExpr {
+            class_spelling: type_spelling,
+            ..
+        } = &got
+        {
+            let span = name_span.unwrap_or_else(|| panic!("line {line}: no name span"));
+            let at: Vec<&ExtractedUse> = extracted
+                .uses
+                .iter()
+                .filter(|use_| use_.span == span)
+                .collect();
+            assert_eq!(at.len(), 1, "line {line}: {at:?}");
+            assert_eq!(at[0].ref_kind, RefKind::Type, "line {line}");
+            assert_eq!(&at[0].spelling, type_spelling, "line {line}");
+        }
     }
     // A hint rides only on a member use: a bare name gets none.
     for use_ in extracted.uses.iter().filter(|use_| use_.receiver.is_none()) {
@@ -1016,9 +1043,103 @@ export function f(svc: Service): void {
         UseHint::Typed {
             type_spelling: "Service".to_string(),
             origin: TypedOrigin::Parameter,
+            name_span: Some(the_use(&extracted, source, "Service", 0).span),
         }
     );
     assert_eq!(hint("go", 3), UseHint::Unresolved, "bound twice");
+}
+
+/// T45: the module scope records the side of every class and interface
+/// member symbol; a constructor, an anonymous class's members, and every
+/// other scope record none.
+#[test]
+fn member_sides_are_recorded_in_the_module_scope() {
+    let source = "\
+export class K {
+  static count = 0;
+  #hidden = 1;
+  name: string = \"\";
+  constructor(private readonly dep: Dep, plain: Plain) {}
+  static make(): K { return new K(null!, null!); }
+  run(): void {}
+  get label(): string { return \"\"; }
+  set label(v: string) {}
+  static get total(): number { return 0; }
+  static(): void {}
+}
+export interface I {
+  m(): void;
+  p: number;
+}
+export const Anon = class {
+  x(): void {}
+};
+export default class {
+  y(): void {}
+}
+";
+    let extracted = ts(source);
+    let top = scope(&extracted, typescript::MODULE_SCOPE_KEY);
+    let mut sides: Vec<(String, bool)> = top
+        .facts
+        .member_sides
+        .iter()
+        .map(|side| {
+            (
+                extracted.symbols[side.symbol].qualified_name.clone(),
+                side.is_static,
+            )
+        })
+        .collect();
+    sides.sort();
+    let want: Vec<(String, bool)> = [
+        ("Anon.x", false),
+        ("I.m", false),
+        ("I.p", false),
+        ("K.#hidden", false),
+        ("K.count", true),
+        ("K.dep", false),
+        ("K.label", false),
+        ("K.label", false),
+        ("K.make", true),
+        ("K.name", false),
+        ("K.run", false),
+        // A method named `static` is an instance method.
+        ("K.static", false),
+        ("K.total", true),
+    ]
+    .iter()
+    .map(|(name, is_static)| (name.to_string(), *is_static))
+    .collect();
+    assert_eq!(sides, want);
+    // In symbol order, once each.
+    let order: Vec<usize> = top
+        .facts
+        .member_sides
+        .iter()
+        .map(|side| side.symbol)
+        .collect();
+    let mut sorted = order.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(order, sorted);
+    for other in extracted
+        .scopes
+        .iter()
+        .filter(|scope| scope.scope_key != typescript::MODULE_SCOPE_KEY)
+    {
+        assert!(other.facts.member_sides.is_empty(), "{other:?}");
+    }
+}
+
+/// `hint` with its type-name span taken out, and that span (T45).
+fn without_name_span(hint: &UseHint) -> (UseHint, Option<Span>) {
+    let mut hint = hint.clone();
+    let span = match &mut hint {
+        UseHint::Typed { name_span, .. } | UseHint::NewExpr { name_span, .. } => name_span.take(),
+        _ => None,
+    };
+    (hint, span)
 }
 
 // ---------------------------------------------------------------------------

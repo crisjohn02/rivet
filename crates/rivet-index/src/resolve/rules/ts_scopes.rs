@@ -1,7 +1,9 @@
 //! TypeScript lexical scopes, relative module lookup, and module exports
-//! (T44). Not a rule: the lookups [`ts_lexical`](super::ts_lexical) and
-//! [`ts_namespace`](super::ts_namespace) share, as `rebinding.rs` is for the
-//! PHP receiver rules.
+//! (T44). Not a rule: the lookups [`ts_lexical`](super::ts_lexical),
+//! [`ts_namespace`](super::ts_namespace), and
+//! [`ts_receivers`](super::ts_receivers) share, as `rebinding.rs` is for the
+//! PHP receiver rules. T45 adds each TypeScript use by span (a receiver hint
+//! names its class name's `type` use) and each member's static side.
 //!
 //! Everything here reads the persisted TypeScript scope facts (T43's `locals`
 //! and `module_imports`, T44's `module_exports` and `value_type_uses`, and
@@ -257,6 +259,13 @@ pub(crate) struct TsModules<'a> {
     merged_bodies: HashMap<&'a str, Vec<&'a SymbolRow>>,
     /// Each TypeScript symbol's direct members, by parent ID.
     children: HashMap<&'a str, Vec<&'a SymbolRow>>,
+    /// Each TypeScript use by file and `(start_byte, end_byte)` (T45): a
+    /// typed or `new` receiver hint names the `type` use of its class name.
+    uses: HashMap<&'a str, HashMap<(u32, u32), Vec<&'a UseRow>>>,
+    /// Whether each class or interface member symbol is static, by ID (T45),
+    /// from its file's `member_sides`; `None` when two facts disagree. A
+    /// member absent here (a constructor) has no known side.
+    member_static: HashMap<&'a str, Option<bool>>,
 }
 
 impl<'a> TsModules<'a> {
@@ -306,6 +315,53 @@ impl<'a> TsModules<'a> {
     /// The scope `key` of `file`.
     pub(crate) fn scope(&self, file: &str, key: &str) -> Option<&TsScope<'a>> {
         self.scopes.get(file)?.get(key)
+    }
+
+    /// Records one TypeScript use (T45).
+    pub(crate) fn insert_use(&mut self, row: &'a UseRow) {
+        self.uses
+            .entry(row.file.as_str())
+            .or_default()
+            .entry((row.start_byte, row.end_byte))
+            .or_default()
+            .push(row);
+    }
+
+    /// The one use of `file` whose span is `span`, if exactly one is (T45).
+    pub(crate) fn use_at(&self, file: &str, span: Span) -> Option<&'a UseRow> {
+        match self
+            .uses
+            .get(file)?
+            .get(&(span.start_byte(), span.end_byte()))?
+            .as_slice()
+        {
+            [row] => Some(*row),
+            _ => None,
+        }
+    }
+
+    /// Records the side of one class or interface member (T45). Two facts
+    /// that disagree leave the side unknown.
+    pub(crate) fn insert_member_side(&mut self, member: &'a SymbolRow, is_static: bool) {
+        self.member_static
+            .entry(member.id.as_str())
+            .and_modify(|side| {
+                if *side != Some(is_static) {
+                    *side = None;
+                }
+            })
+            .or_insert(Some(is_static));
+    }
+
+    /// Whether the member `id` is static, or `None` when its side is not
+    /// known (T45).
+    pub(crate) fn member_side(&self, id: &str) -> Option<bool> {
+        self.member_static.get(id).copied().flatten()
+    }
+
+    /// The direct members of the symbol `parent`, in no particular order.
+    pub(crate) fn members(&self, parent: &str) -> &[&'a SymbolRow] {
+        self.children.get(parent).map_or(&[], Vec::as_slice)
     }
 }
 

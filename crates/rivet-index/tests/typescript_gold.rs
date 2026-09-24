@@ -1,18 +1,20 @@
-//! T44: the authored TypeScript fixture's bindings, from the extractor
-//! through the resolver.
+//! T44 and T45: the authored TypeScript fixture's bindings, from the
+//! extractor through the resolver.
 //!
-//! This is the extractor-and-resolver half of the T44 gold harness
+//! This is the extractor-and-resolver half of the T44 and T45 gold harness
 //! (`crates/rivet-cli/tests/typescript_index.rs` is the end-to-end half). It
 //! extracts every fixture file with the real TypeScript adapter
 //! (`rivet_parser::parse_file`), turns the facts into the rows refresh
 //! persists (canonical IDs, use rows, and `scopes.facts_json` with
-//! `declares` as IDs), runs [`Resolver`] over them, and requires:
+//! `declares` and `member_sides` as IDs), runs [`Resolver`] over them, and
+//! requires:
 //!
 //! - every T44 `[[binding]]` to hold: an `exact` entry binds its use to
 //!   `expected_target` at that tier, and a `name_match` entry binds nothing;
+//! - every T45 `[[binding]]` to hold the same way at `scoped` (receiver
+//!   hints, spec §11.4 rules 1-3);
 //! - no use to bind a `not_target`;
-//! - every T45 entry to stay unbound until T45 is done (receivers are T45's,
-//!   and T44 must not bind them at any tier);
+//! - every T44 binding to be `exact` and every receiver binding `scoped`;
 //! - no TypeScript use to get a receiver class; and
 //! - the links to be identical whatever order the rows arrive in.
 //!
@@ -171,6 +173,14 @@ fn fixture_rows() -> Rows {
                 .iter()
                 .map(|index| serde_json::Value::from(ids[*index].clone()))
                 .collect();
+            facts["member_sides"] = scope
+                .facts
+                .member_sides
+                .iter()
+                .map(|side| {
+                    serde_json::json!({"symbol": ids[side.symbol], "is_static": side.is_static})
+                })
+                .collect();
             rows.scopes.push(ScopeRow {
                 file: path.clone(),
                 scope_key: scope.scope_key.clone(),
@@ -217,7 +227,7 @@ fn span(entry: &toml::Table) -> (String, u32, u32) {
 }
 
 #[test]
-fn t44_entries_match_the_extractor_and_resolver() {
+fn t44_and_t45_entries_match_the_extractor_and_resolver() {
     let gold = gold();
     let done: Vec<&str> = gold["done_tasks"]
         .as_array()
@@ -225,10 +235,12 @@ fn t44_entries_match_the_extractor_and_resolver() {
         .iter()
         .map(|task| task.as_str().expect("a task"))
         .collect();
-    assert!(
-        done.contains(&"T44"),
-        "this harness verifies T44; list it in done_tasks"
-    );
+    for task in ["T44", "T45"] {
+        assert!(
+            done.contains(&task),
+            "this harness verifies {task}; list it in done_tasks"
+        );
+    }
     let rows = fixture_rows();
     let links = Resolver::new(&rows.files, &rows.symbols, &rows.uses, &rows.scopes).resolve_links();
     let bound = bound(&rows, &links);
@@ -241,7 +253,7 @@ fn t44_entries_match_the_extractor_and_resolver() {
         });
 
     let mut problems = Vec::new();
-    let mut verified = 0;
+    let mut verified = BTreeMap::<&str, usize>::new();
     for entry in gold["binding"]
         .as_array()
         .expect("bindings")
@@ -254,34 +266,32 @@ fn t44_entries_match_the_extractor_and_resolver() {
             continue;
         }
         let got = bound.get(&key);
-        match text(entry, "task") {
-            "T44" => {
-                verified += 1;
-                let want = match text(entry, "expected_resolution") {
-                    "name_match" => None,
-                    "exact" => Some((
-                        text(entry, "expected_target").to_string(),
-                        Resolution::Exact,
-                    )),
-                    other => {
-                        problems.push(format!("binding {key:?}: T44 tier {other}"));
-                        continue;
-                    }
-                };
-                if got != want.as_ref() {
-                    problems.push(format!(
-                        "binding {key:?} ({}): want {want:?}, resolved {got:?}",
-                        text(entry, "case")
-                    ));
-                }
+        let task = text(entry, "task");
+        // T44's lexical bindings are `exact`, T45's receivers `scoped`.
+        let tier = match task {
+            "T44" => Resolution::Exact,
+            "T45" => Resolution::Scoped,
+            other => {
+                problems.push(format!("binding {key:?}: unknown task {other}"));
+                continue;
             }
-            // Receivers are T45's: until it is done none of its uses binds.
-            "T45" if !done.contains(&"T45") => {
-                if let Some(got) = got {
-                    problems.push(format!("T45 binding {key:?} is bound early: {got:?}"));
-                }
+        };
+        *verified.entry(task).or_default() += 1;
+        let want = match text(entry, "expected_resolution") {
+            "name_match" => None,
+            written if written == tier.as_str() => {
+                Some((text(entry, "expected_target").to_string(), tier))
             }
-            _ => {}
+            other => {
+                problems.push(format!("binding {key:?}: {task} tier {other}"));
+                continue;
+            }
+        };
+        if got != want.as_ref() {
+            problems.push(format!(
+                "binding {key:?} ({}): want {want:?}, resolved {got:?}",
+                text(entry, "case")
+            ));
         }
         if let Some(not_target) = entry.get("not_target").and_then(toml::Value::as_str)
             && got.is_some_and(|(target, _)| target == not_target)
@@ -318,9 +328,28 @@ fn t44_entries_match_the_extractor_and_resolver() {
         problems.push("links differ when the rows arrive in reverse order".to_string());
     }
 
+    // A receiver binding is always `scoped`, a receiver-less one `exact`.
+    let by_key: BTreeMap<(String, u32, u32), &UseRow> = rows
+        .uses
+        .iter()
+        .map(|row| ((row.file.clone(), row.start_byte, row.end_byte), row))
+        .collect();
+    for (key, (target, tier)) in &bound {
+        let row = by_key[key];
+        let receiver_hint = row.receiver.is_some() && row.hint_json != "{\"kind\":\"unresolved\"}";
+        let want = if receiver_hint {
+            Resolution::Scoped
+        } else {
+            Resolution::Exact
+        };
+        if *tier != want {
+            problems.push(format!("{key:?} -> {target} is {tier:?}, want {want:?}"));
+        }
+    }
+
     assert!(
         problems.is_empty(),
-        "T44 resolver problems:\n{}",
+        "T44/T45 resolver problems:\n{}",
         problems.join("\n")
     );
     let exact = bound
@@ -328,7 +357,7 @@ fn t44_entries_match_the_extractor_and_resolver() {
         .filter(|(_, tier)| *tier == Resolution::Exact)
         .count();
     println!(
-        "typescript T44: {verified} entries verified against the extractor and resolver; \
+        "typescript T44/T45: {verified:?} entries verified against the extractor and resolver; \
          the fixture's {} uses give {exact} exact and {} scoped bindings",
         rows.uses.len(),
         bound.len() - exact

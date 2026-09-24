@@ -23,9 +23,9 @@ pub use config::{
 };
 pub use extract::{
     BindingSpace, DeclaredSupertype, Diagnostic, ExtractedFile, ExtractedImport, ExtractedScope,
-    ExtractedSymbol, ExtractedUse, ImportKind, LocalBinding, ModuleExport, ModuleImport,
-    ModuleImportKind, NewBinding, ScopeFacts, ScopeImport, SupertypeRelation, TypedBinding,
-    UseHint,
+    ExtractedSymbol, ExtractedUse, ImportKind, LocalBinding, MemberSide, ModuleExport,
+    ModuleImport, ModuleImportKind, NewBinding, ScopeFacts, ScopeImport, SupertypeRelation,
+    TypedBinding, UseHint,
 };
 pub use id::{SymbolId, SymbolIdError, assign_ordinals};
 pub use kinds::{KindParseError, ParseStatus, RefKind, Resolution, SymbolKind};

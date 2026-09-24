@@ -22,7 +22,8 @@
 //! `double`), a global, a re-export, `export *`, a path alias or package
 //! specifier, `require`, a name the module does not export, an unresolved or
 //! ambiguous module, and more than one candidate declaration. A use with a
-//! receiver is [`ts_namespace`](super::ts_namespace)'s, or T45's.
+//! receiver is [`ts_namespace`](super::ts_namespace)'s, or
+//! [`ts_receivers`](super::ts_receivers)'s (T45).
 
 use rivet_core::{RefKind, Resolution};
 use rivet_store::{SymbolRow, UseRow};

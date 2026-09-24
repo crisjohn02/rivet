@@ -170,6 +170,15 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///
 /// History, newest first:
 ///
+/// - **14** — T45: TypeScript receiver facts. `UseHint::This` gained
+///   `is_static` (whether the `this` is in a static member, static block, or
+///   static field initializer), `UseHint::Typed` and `UseHint::NewExpr`
+///   gained `name_span` (the span of the `type` use of the annotation's type
+///   name or the `new` target, so the resolver looks the class up in the
+///   scope where it is written), and a TypeScript file's module scope gained
+///   `member_sides` (whether each class and interface member symbol is
+///   static). PHP records none of the new fields, and each is omitted from
+///   the fact JSON when absent, so PHP facts are byte-identical.
 /// - **13** — T44: TypeScript scopes gained `module_exports` (what a module
 ///   exports from its own declarations: `export` on a declaration, `export
 ///   default` of a named declaration or an identifier, local `export { a as
@@ -237,13 +246,13 @@ pub fn is_language_compiled(name: &str) -> bool {
 ///   `UseHint::NewExpr` gained `use_block`.
 /// - **T22** — introduced this component.
 #[cfg(all(feature = "lang-php", feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=13";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;ts=0.23.2;fact-schema=14";
 
 #[cfg(all(feature = "lang-php", not(feature = "lang-typescript")))]
-pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=13";
+pub const EXTRACTOR_FINGERPRINT: &str = "php=0.24.2;fact-schema=14";
 
 #[cfg(all(not(feature = "lang-php"), feature = "lang-typescript"))]
-pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=13";
+pub const EXTRACTOR_FINGERPRINT: &str = "ts=0.23.2;fact-schema=14";
 
 #[cfg(not(any(feature = "lang-php", feature = "lang-typescript")))]
 pub const EXTRACTOR_FINGERPRINT: &str = "";
