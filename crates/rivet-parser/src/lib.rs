@@ -13,11 +13,13 @@
 //! `.tsx` to the TSX grammar, and applies the v0.1 parse policy at this level
 //! too: [`parse_tree`] parses with a language's grammar and
 //! [`first_parse_error`] finds the first ERROR or MISSING node, which makes the
-//! file a parse failure. TypeScript has no extraction adapter until T42
-//! ([`LanguageId::has_extractor`] is the one switch), so [`parse_file`] yields
-//! no facts for it, only the `parse_error` diagnostic of a failing tree.
-//! Refresh never calls it for such a language: it counts the file as
-//! `unsupported` without reading it.
+//! file a parse failure. T42 adds the TypeScript definition adapter
+//! (`rivet_languages::typescript`), but TypeScript stays unindexed until T43
+//! adds uses: [`LanguageId::has_extractor`] is the one switch and stays off,
+//! and this crate does not dispatch to the adapter yet, so [`parse_file`]
+//! yields no facts for TypeScript, only the `parse_error` diagnostic of a
+//! failing tree. Refresh never calls it for such a language: it counts the
+//! file as `unsupported` without reading it.
 
 use rivet_core::ExtractedFile;
 use rivet_languages::LanguageId;
@@ -108,10 +110,11 @@ pub fn first_parse_error(tree: &tree_sitter::Tree) -> Option<ParseFailure> {
 
 /// Dispatches a parsed tree to the language adapter's `extract`.
 ///
-/// A language whose [`LanguageId::has_extractor`] is false has no adapter:
-/// its file yields no facts, and a tree that fails the parse policy yields
-/// one `parse_error` diagnostic, as an adapter would report it. When T42 adds
-/// the TypeScript adapter it replaces that arm and flips the switch; a test
+/// A language whose [`LanguageId::has_extractor`] is false is not dispatched
+/// to an adapter: its file yields no facts, and a tree that fails the parse
+/// policy yields one `parse_error` diagnostic, as an adapter would report it.
+/// TypeScript's definition adapter exists (T42), but T43 replaces that arm
+/// with it and flips the switch in the same change, once uses exist; a test
 /// below fails if the two disagree.
 fn dispatch(
     language: LanguageId,
@@ -275,7 +278,7 @@ mod tests {
 
     /// The extractor switch and the dispatch agree: a language whose switch
     /// is on extracts a declared function, and one whose switch is off
-    /// extracts nothing from a valid file. T42 must flip the TypeScript switch
+    /// extracts nothing from a valid file. T43 must flip the TypeScript switch
     /// and add its dispatch arm together.
     #[test]
     fn extractor_switch_matches_dispatch() {

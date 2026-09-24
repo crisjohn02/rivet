@@ -1,8 +1,7 @@
-//! T41: the authored TypeScript/TSX fixture and its gold, checked without an
-//! extractor.
+//! The authored TypeScript/TSX fixture and its gold.
 //!
-//! No TypeScript adapter exists yet, so nothing here runs rivet's extraction.
-//! The tests pin what T42-T45 will verify against:
+//! T41 wrote these checks before any TypeScript extractor existed; they pin
+//! what T42-T45 verify against:
 //!
 //! - every fixture file dispatches to the intended grammar (`.ts` and `.d.ts`
 //!   to TypeScript, `.tsx` to TSX, `.js`/`.mts` and the rest to none), and
@@ -17,13 +16,20 @@
 //!   a lowercase intrinsic element name);
 //! - every occurrence of a focus name outside comments is accounted for, so a
 //!   later candidate-mode check can rely on the gold being complete.
+//!
+//! T42 is the first done task, and [`t42_entries_match_the_extractor`] is its
+//! harness: it runs the TypeScript adapter on every supported fixture file and
+//! compares every T42 entry, `[[declaration]]` and `[[not_a_declaration]]`
+//! alike, with the extracted symbols. `tests/gold/check_gold.py` checks only
+//! the recorded spans and names this test as the owner of the comparison.
 
 #![cfg(feature = "lang-typescript")]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rivet_languages::{LanguageId, grammar, language_for_path};
+use rivet_core::{ExtractedFile, SymbolId, assign_ordinals};
+use rivet_languages::{LanguageId, grammar, language_for_path, typescript};
 use serde::Deserialize;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -291,7 +297,7 @@ const IDENTIFIER_KINDS: [&str; 4] = [
     "private_property_identifier",
 ];
 
-const SYMBOL_KINDS: [&str; 9] = [
+const SYMBOL_KINDS: [&str; 10] = [
     "class",
     "function",
     "method",
@@ -301,6 +307,7 @@ const SYMBOL_KINDS: [&str; 9] = [
     "module",
     "property",
     "const",
+    "type_alias",
 ];
 
 const CONTAINER_KINDS: [&str; 5] = ["function", "method", "class", "interface", "enum"];
@@ -466,6 +473,13 @@ fn gold_is_well_formed() {
         }
         if u.question.is_empty() || u.proposal.is_empty() {
             problems.push(format!("undecided {}: empty question or proposal", u.file));
+        }
+        // A done task has settled every construct it was asked to.
+        if done.contains(u.task.as_str()) {
+            problems.push(format!(
+                "undecided {} [{}, {}): {} is done but this construct is still undecided",
+                u.file, u.start_byte, u.end_byte, u.task
+            ));
         }
     }
 
@@ -1054,4 +1068,212 @@ fn focus_names_are_fully_annotated() {
         "focus-name gaps:\n{}",
         problems.join("\n")
     );
+}
+
+/// Every supported fixture file, the broken one included, extracted by the
+/// TypeScript adapter with the grammar its extension dispatches to, visiting
+/// files in `order`.
+fn extract_fixture(order: &[String]) -> BTreeMap<String, (Vec<u8>, ExtractedFile)> {
+    let mut out = BTreeMap::new();
+    for rel in order {
+        let Some(id) = language_for_path(rel) else {
+            continue;
+        };
+        let source = std::fs::read(fixture_root().join(rel)).expect("read fixture file");
+        let tree = parse(id, &source);
+        let extracted = typescript::extract(&source, &tree);
+        out.insert(rel.clone(), (source, extracted));
+    }
+    out
+}
+
+/// One file's canonical symbol IDs, computed exactly as refresh computes PHP
+/// IDs: `rivet_core` duplicate ordinals and spec §10.1 escaping.
+fn canonical_ids(path: &str, extracted: &ExtractedFile) -> Vec<String> {
+    let items: Vec<_> = extracted
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.qualified_name.as_str(), symbol.span, symbol.kind))
+        .collect();
+    extracted
+        .symbols
+        .iter()
+        .zip(assign_ordinals(&items))
+        .map(|(symbol, ordinal)| {
+            SymbolId::new(path, &symbol.qualified_name, ordinal)
+                .expect("a non-empty path and qualified name")
+                .as_canonical()
+        })
+        .collect()
+}
+
+/// T42's harness: the extractor's symbols are exactly the gold declarations.
+///
+/// For every supported fixture file, the extracted `(id, qualified_name,
+/// kind, start_byte, end_byte)` set equals the file's `[[declaration]]` set,
+/// in both directions. Each symbol's name span is the name's own bytes and one
+/// of the names its gold node declares, and a parent's qualified name
+/// prefixes its member's. No `[[not_a_declaration]]` span is a symbol span,
+/// and no symbol's name lies inside one. `src/broken.ts` yields no facts and
+/// one `parse_error`. Extraction is byte-identical across runs and file
+/// orders.
+#[test]
+fn t42_entries_match_the_extractor() {
+    let gold = load_gold();
+    assert!(
+        gold.done_tasks.iter().any(|task| task == "T42"),
+        "this harness verifies T42; list it in done_tasks"
+    );
+    let order = walk(&fixture_root());
+    let extracted = extract_fixture(&order);
+    let files = parsed_files();
+    let mut problems: Vec<String> = Vec::new();
+
+    let (_, broken) = &extracted[BROKEN];
+    if !(broken.symbols.is_empty()
+        && broken.diagnostics.len() == 1
+        && broken.diagnostics[0].code == "parse_error")
+    {
+        problems.push(format!(
+            "{BROKEN}: want no facts and one parse_error, got {broken:?}"
+        ));
+    }
+
+    type Key = (String, String, String, String, u32, u32);
+    let mut actual: BTreeSet<Key> = BTreeSet::new();
+    for (file, (source, file_facts)) in &extracted {
+        if file == BROKEN {
+            continue;
+        }
+        if !file_facts.diagnostics.is_empty() {
+            problems.push(format!("{file}: diagnostics {:?}", file_facts.diagnostics));
+        }
+        if !(file_facts.uses.is_empty()
+            && file_facts.imports.is_empty()
+            && file_facts.scopes.is_empty())
+        {
+            problems.push(format!("{file}: T42 extracts definitions only"));
+        }
+        let ids = canonical_ids(file, file_facts);
+        for (symbol, id) in file_facts.symbols.iter().zip(ids) {
+            let key = (
+                file.clone(),
+                id.clone(),
+                symbol.qualified_name.clone(),
+                symbol.kind.as_str().to_string(),
+                symbol.span.start_byte(),
+                symbol.span.end_byte(),
+            );
+            if !actual.insert(key) {
+                problems.push(format!("{id}: extracted twice"));
+            }
+            let Some(name_span) = symbol.name_span else {
+                problems.push(format!("{id}: no name span"));
+                continue;
+            };
+            let (start, end) = (
+                name_span.start_byte() as usize,
+                name_span.end_byte() as usize,
+            );
+            if source.get(start..end) != Some(symbol.name.as_bytes()) {
+                problems.push(format!(
+                    "{id}: name span [{start}, {end}) is not {:?}",
+                    symbol.name
+                ));
+            }
+            // The name is one the gold node at this span declares.
+            let declared = files
+                .get(file)
+                .and_then(|parsed| {
+                    exact_nodes(
+                        &parsed.tree,
+                        symbol.span.start_byte() as usize,
+                        symbol.span.end_byte() as usize,
+                    )
+                    .into_iter()
+                    .find(Node::is_named)
+                })
+                .map(declared_names)
+                .unwrap_or_default();
+            if !declared.contains(&(start, end)) {
+                problems.push(format!(
+                    "{id}: name span [{start}, {end}) is not declared by its node ({declared:?})"
+                ));
+            }
+            let expected_qualified = match symbol.parent_index {
+                Some(parent) => format!(
+                    "{}.{}",
+                    file_facts.symbols[parent].qualified_name, symbol.name
+                ),
+                None => symbol.name.clone(),
+            };
+            if symbol.qualified_name != expected_qualified {
+                problems.push(format!(
+                    "{id}: qualified name is not its parent's plus its name ({expected_qualified})"
+                ));
+            }
+        }
+        // Not-declarations: never a symbol span, and no name inside one.
+        for d in gold.not_a_declaration.iter().filter(|d| &d.file == file) {
+            for symbol in &file_facts.symbols {
+                let span = (
+                    symbol.span.start_byte() as usize,
+                    symbol.span.end_byte() as usize,
+                );
+                let name_inside = symbol.name_span.is_some_and(|name| {
+                    d.start_byte <= name.start_byte() as usize
+                        && name.end_byte() as usize <= d.end_byte
+                });
+                if span == (d.start_byte, d.end_byte) || name_inside {
+                    problems.push(format!(
+                        "not_a_declaration {file} [{}, {}) ({}) is extracted as {}",
+                        d.start_byte, d.end_byte, d.why, symbol.qualified_name
+                    ));
+                }
+            }
+        }
+    }
+
+    let expected: BTreeSet<Key> = gold
+        .declaration
+        .iter()
+        .filter(|d| d.task == "T42")
+        .map(|d| {
+            (
+                d.file.clone(),
+                d.id.clone(),
+                d.qualified_name.clone(),
+                d.kind.clone(),
+                d.start_byte as u32,
+                d.end_byte as u32,
+            )
+        })
+        .collect();
+    for missing in expected.difference(&actual) {
+        problems.push(format!("gold declaration not extracted: {missing:?}"));
+    }
+    for extra in actual.difference(&expected) {
+        problems.push(format!("extracted symbol not in gold: {extra:?}"));
+    }
+
+    // Determinism: same bytes, same records, in any file order.
+    let mut reversed = order.clone();
+    reversed.reverse();
+    let again = extract_fixture(&reversed);
+    if format!("{extracted:?}") != format!("{again:?}") {
+        problems.push("extraction differs between runs or file orders".to_string());
+    }
+
+    assert!(
+        problems.is_empty(),
+        "T42 extractor problems:\n{}",
+        problems.join("\n")
+    );
+    let verified = gold.declaration.iter().filter(|d| d.task == "T42").count()
+        + gold
+            .not_a_declaration
+            .iter()
+            .filter(|d| d.task == "T42")
+            .count();
+    println!("typescript T42: {verified} entries verified against the extractor");
 }

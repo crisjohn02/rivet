@@ -45,6 +45,11 @@ fn is_class_like(kind: SymbolKind) -> bool {
 /// | global constant | `import` |
 /// | class, interface, enum, trait | `type`; `import` |
 /// | namespace (`module`), `struct` | every form |
+/// | TypeScript type alias (`type_alias`) | every form |
+///
+/// A type alias is TypeScript-only, and no TypeScript use is excluded by
+/// evidence (docs/ADDING-A-LANGUAGE.md "MVP support boundary"), so it
+/// excludes nothing.
 ///
 /// A `unknown` use is compatible with every target: the extractor records a
 /// bare constant name, a trait `use` inside a class body, and any other
@@ -78,7 +83,7 @@ pub fn form_compatible(
         SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum => {
             matches!(row.ref_kind, RefKind::Type | RefKind::Import)
         }
-        SymbolKind::Module | SymbolKind::Struct => true,
+        SymbolKind::Module | SymbolKind::Struct | SymbolKind::TypeAlias => true,
     }
 }
 
@@ -429,6 +434,20 @@ mod tests {
                 SymbolKind::Module,
                 false,
                 &[(Call, true), (Type, false), (Read, true)],
+                &[],
+            ),
+            // A TypeScript type alias excludes nothing (T42).
+            (
+                SymbolKind::TypeAlias,
+                false,
+                &[
+                    (Call, false),
+                    (Call, true),
+                    (Type, false),
+                    (Import, false),
+                    (Read, true),
+                    (Write, true),
+                ],
                 &[],
             ),
         ];

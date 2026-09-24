@@ -223,6 +223,8 @@ pub fn resolve_query(store: &Store, query: &str) -> Result<QueryOutcome, Error> 
 /// - a property compares case-sensitively with any leading `$` removed from
 ///   both sides, because a declaration keeps its `$` and `$x->name` omits it;
 /// - a constant (including an enum case) compares case-sensitively;
+/// - a type alias, which only TypeScript declares, compares case-sensitively,
+///   as TypeScript identifiers do (T42);
 /// - every other kind (class, interface, trait, enum, function, method,
 ///   namespace) compares by ASCII case folding, as PHP does (AF2).
 pub fn lookup_name_matches(name: &str, kind: SymbolKind, lookup_name: &str) -> bool {
@@ -231,7 +233,7 @@ pub fn lookup_name_matches(name: &str, kind: SymbolKind, lookup_name: &str) -> b
             name.strip_prefix('$').unwrap_or(name)
                 == lookup_name.strip_prefix('$').unwrap_or(lookup_name)
         }
-        SymbolKind::Const => name == lookup_name,
+        SymbolKind::Const | SymbolKind::TypeAlias => name == lookup_name,
         _ => name.eq_ignore_ascii_case(lookup_name),
     }
 }
@@ -483,6 +485,29 @@ mod tests {
     };
     use rivet_core::{ParseStatus, SymbolKind};
     use rivet_store::{FileRow, Store, SymbolRow};
+
+    /// A type alias compares case-sensitively, as TypeScript identifiers do;
+    /// a class still folds ASCII case, as PHP does (T42).
+    #[test]
+    fn type_alias_lookup_is_case_sensitive() {
+        use super::lookup_name_matches;
+
+        assert!(lookup_name_matches(
+            "SurveyId",
+            SymbolKind::TypeAlias,
+            "SurveyId"
+        ));
+        assert!(!lookup_name_matches(
+            "surveyid",
+            SymbolKind::TypeAlias,
+            "SurveyId"
+        ));
+        assert!(lookup_name_matches(
+            "SurveyId",
+            SymbolKind::Class,
+            "surveyid"
+        ));
+    }
 
     #[test]
     fn normalizes_and_collapses_every_language_separator() {

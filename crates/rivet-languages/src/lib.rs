@@ -4,12 +4,17 @@
 //! grammars for the enabled features, and the extension dispatch that decides
 //! which files a build can handle. T41 adds [`LanguageId::has_extractor`], the
 //! one switch that says whether a language's files can be indexed. The PHP
-//! adapter lives in [`php`]; TypeScript extraction arrives in T42.
+//! adapter lives in [`php`]. The TypeScript/TSX adapter lives in `typescript`
+//! (T42 definitions); it is not yet reachable from indexing, because its
+//! switch stays off until T43 adds uses.
 
 use std::path::Path;
 
 #[cfg(feature = "lang-php")]
 pub mod php;
+
+#[cfg(feature = "lang-typescript")]
+pub mod typescript;
 
 /// A source language supported by the enabled crate features.
 ///
@@ -52,9 +57,12 @@ impl LanguageId {
     /// CLI's refresh and cached-coverage paths consult this method directly;
     /// nothing else decides it.
     ///
-    /// TypeScript and TSX parse with their grammars (T41) but have no adapter
-    /// until T42, which flips their arm here and dispatches them to the adapter
-    /// in `rivet_parser`. `rivet_parser`'s tests fail if the two disagree.
+    /// TypeScript and TSX parse with their grammars (T41), and T42 adds their
+    /// definition extractor (`typescript::extract`), but their arm stays
+    /// `false`: indexing definitions without uses would make `refs` return
+    /// misleadingly empty results. T43 adds uses and imports, flips this arm,
+    /// and dispatches them to the adapter in `rivet_parser` in the same
+    /// change. `rivet_parser`'s tests fail if the two disagree.
     pub const fn has_extractor(self) -> bool {
         match self {
             #[cfg(feature = "lang-php")]
@@ -252,9 +260,11 @@ pub fn grammar(id: LanguageId) -> tree_sitter::Language {
 /// The result is the adapter's summary alone. It does not include the doc
 /// comment; a caller that needs the full §16.2 signature form prepends it.
 ///
-/// Returns `None` when the language has no collapsed-form renderer (every
-/// TypeScript build today, which has no extractor either), so a caller can
-/// treat the signature form as unavailable rather than emit an empty one.
+/// Returns `None` when the language has no collapsed-form renderer, so a
+/// caller can treat the signature form as unavailable rather than emit an
+/// empty one. TypeScript has none yet: T42 records each definition's own
+/// signature, not the container form, and no TypeScript symbol is indexed
+/// until T43 flips [`LanguageId::has_extractor`].
 pub fn signature_summary(
     language: LanguageId,
     symbol: &rivet_core::ExtractedSymbol,
@@ -280,9 +290,14 @@ pub fn signature_summary(
 
 #[cfg(test)]
 mod tests {
+    // A build with no grammar has an empty fingerprint and nothing to check,
+    // so the fingerprint tests and their helper need at least one grammar
+    // (and would be unused, failing `-D warnings`, without one).
+    #[cfg(any(feature = "lang-php", feature = "lang-typescript"))]
     use super::EXTRACTOR_FINGERPRINT;
 
     /// The locked `version` of `package`, read from the workspace `Cargo.lock`.
+    #[cfg(any(feature = "lang-php", feature = "lang-typescript"))]
     fn locked_version(lock: &str, package: &str) -> Option<String> {
         let needle = format!("name = \"{package}\"");
         let mut lines = lock.lines();
@@ -306,6 +321,7 @@ mod tests {
     /// The hand-maintained fingerprint must name the grammar versions that are
     /// actually locked, or stored facts silently outlive a grammar bump.
     #[test]
+    #[cfg(any(feature = "lang-php", feature = "lang-typescript"))]
     fn fingerprint_tracks_locked_grammar_versions() {
         let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
         let lock = std::fs::read_to_string(&lock_path).expect("read workspace Cargo.lock");
@@ -396,7 +412,8 @@ mod tests {
         }
     }
 
-    /// Only PHP has an extractor; TypeScript and TSX get one in T42.
+    /// Only PHP is indexed. TypeScript and TSX have a definition extractor
+    /// (T42), but their switch stays off until T43 adds uses.
     #[test]
     fn only_php_has_an_extractor() {
         #[cfg(feature = "lang-php")]
@@ -418,6 +435,7 @@ mod tests {
             name: "f".to_string(),
             kind: rivet_core::SymbolKind::Function,
             span: rivet_core::Span::new(0, 1).expect("span"),
+            name_span: None,
             parent_index: None,
             signature: Some("function f()".to_string()),
             doc_comment: None,

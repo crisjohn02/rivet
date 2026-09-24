@@ -21,7 +21,9 @@ use crate::span::Span;
 /// `parent_index` is an index into the same `Vec<ExtractedSymbol>` as the
 /// symbol, or `None` for a top-level definition. For PHP, members point at
 /// their enclosing class/interface/trait/enum; namespaces are recorded as
-/// [`SymbolKind::Module`] but are not parents.
+/// [`SymbolKind::Module`] but are not parents. For TypeScript (T42), members
+/// point at their nearest enclosing class, interface, enum, or namespace,
+/// whose qualified name prefixes theirs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedSymbol {
     /// The fully qualified name in the language's native form.
@@ -33,6 +35,12 @@ pub struct ExtractedSymbol {
     pub kind: SymbolKind,
     /// The whole declaration node range, including modifiers.
     pub span: Span,
+    /// The range of the declared name itself, when the adapter records one.
+    ///
+    /// The TypeScript adapter (T42) records it for every symbol. The PHP
+    /// adapter records none, and a record rebuilt from stored rows has none
+    /// either: the store persists no name span.
+    pub name_span: Option<Span>,
     /// Index of the enclosing container symbol in the owning
     /// `Vec<ExtractedSymbol>`, if any.
     pub parent_index: Option<usize>,

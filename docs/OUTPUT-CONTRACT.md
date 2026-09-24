@@ -52,7 +52,7 @@ Paths are repository-relative UTF-8 with `/` separators and preserved case. Byte
 }
 ```
 
-`kind`: `class`, `function`, `method`, `interface`, `struct`, `enum`, `module`, `property`, `const`. Only supported language constructs appear. `language` is an open string. Hashes in real output are `blake3:` plus 64 lowercase hex digits. Symbol IDs escape literal `%` and `#` in components and use file-order ordinals for duplicate declarations (spec §10). They survive line-only edits, not renames, moves, or duplicate reordering.
+`kind`: `class`, `function`, `method`, `interface`, `struct`, `enum`, `module`, `property`, `const`, `type_alias` (additive, T42: a TypeScript `type` alias). Only supported language constructs appear. `language` is an open string. Hashes in real output are `blake3:` plus 64 lowercase hex digits. Symbol IDs escape literal `%` and `#` in components and use file-order ordinals for duplicate declarations (spec §10). They survive line-only edits, not renames, moves, or duplicate reordering.
 
 ## Common index metadata
 
